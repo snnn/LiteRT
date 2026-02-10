@@ -18,6 +18,18 @@ set -ex
 # Run this script under the root directory.
 export TF_LOCAL_SOURCE_PATH=${TF_LOCAL_SOURCE_PATH:-"$(pwd)/third_party/tensorflow"}
 
+# Build configuration: "opt" (default) or "dbg" for debug builds.
+LITERT_BUILD_MODE=${LITERT_BUILD_MODE:-opt}
+if [[ "${LITERT_BUILD_MODE}" == "dbg" ]]; then
+  BAZEL_BUILD_MODE="dbg"
+  OPTIMIZATION_COPT=""
+else
+  BAZEL_BUILD_MODE="opt"
+  OPTIMIZATION_COPT="--copt=-O3"
+  export CFLAGS="${CFLAGS:-} -O3"
+  export CXXFLAGS="${CXXFLAGS:-} -O3"
+fi
+
 ARCH="$(uname -m)"
 OS_NAME="$(uname -s)"
 TENSORFLOW_TARGET=${TENSORFLOW_TARGET:-$1}
@@ -30,7 +42,7 @@ case "${TENSORFLOW_TARGET}" in
   armhf)
     BAZEL_FLAGS="--config=elinux_armhf
       --copt=-march=armv7-a --copt=-mfpu=neon-vfpv4
-      --copt=-O3 --copt=-fno-tree-pre --copt=-fpermissive
+      ${OPTIMIZATION_COPT} --copt=-fno-tree-pre --copt=-fpermissive
       --define tensorflow_mkldnn_contraction_kernel=0
       --define=raspberry_pi_with_neon=true
       --repo_env=USE_PYWRAP_RULES=True"
@@ -38,7 +50,7 @@ case "${TENSORFLOW_TARGET}" in
   rpi0)
     BAZEL_FLAGS="--config=elinux_armhf
       --copt=-march=armv6 -mfpu=vfp -mfloat-abi=hard
-      --copt=-O3 --copt=-fno-tree-pre --copt=-fpermissivec
+      ${OPTIMIZATION_COPT} --copt=-fno-tree-pre --copt=-fpermissivec
       --define tensorflow_mkldnn_contraction_kernel=0
       --define=raspberry_pi_with_neon=true
       --repo_env=USE_PYWRAP_RULES=True"
@@ -46,16 +58,16 @@ case "${TENSORFLOW_TARGET}" in
   aarch64)
     BAZEL_FLAGS="--config=release_arm64_linux
       --define tensorflow_mkldnn_contraction_kernel=0
-      --copt=-O3
+      ${OPTIMIZATION_COPT}
       --repo_env=USE_PYWRAP_RULES=True"
     ;;
   native)
-    BAZEL_FLAGS="--copt=-O3
+    BAZEL_FLAGS="${OPTIMIZATION_COPT}
       --copt=-march=native
       --repo_env=USE_PYWRAP_RULES=True"
     ;;
   *)
-    BAZEL_FLAGS="--copt=-O3
+    BAZEL_FLAGS="${OPTIMIZATION_COPT}
       --repo_env=USE_PYWRAP_RULES=True"
     ;;
 esac
@@ -78,6 +90,7 @@ if [[ "${USE_LOCAL_TF}" == "true" ]]; then
   BUILD_FLAGS+=("--config=use_local_tf")
 fi
 
+BAZEL_FLAGS+=(--repo_env=HERMETIC_PYTHON_VERSION=3.13 --action_env=HERMETIC_PYTHON_VERSION=3.13)
 # Set linkopt for arm64 architecture, and remote_cache for x86_64.
 case "${ARCH}" in
   x86_64)
@@ -93,7 +106,7 @@ case "${ARCH}" in
     ;;
 esac
 
-bazel ${BAZEL_STARTUP_OPTIONS} build -c opt --cxxopt=-std=gnu++17 \
+bazelisk ${BAZEL_STARTUP_OPTIONS} build --config "${BAZEL_BUILD_MODE}" --cxxopt=-std=gnu++17 \
   ${BAZEL_FLAGS} ${CUSTOM_BAZEL_FLAGS} //ci/tools/python/wheel:litert_wheel
 
 # Move the wheel file to the root directory since it is not accessible from the
@@ -107,20 +120,20 @@ find "./dist/"
 
 if [ "${TEST_MANYLINUX_COMPLIANCE}" = "true" ]; then
   echo "Testing manylinux compliance..."
-  bazel ${BAZEL_STARTUP_OPTIONS} test -c opt \
+  bazelisk ${BAZEL_STARTUP_OPTIONS} test --config "${BAZEL_BUILD_MODE}" \
     ${BAZEL_FLAGS} ${CUSTOM_BAZEL_FLAGS} //ci/tools/python/wheel:manylinux_compliance_test
 fi
 
 # Vendor SDKs
 
 ## Qualcomm SDK
-bazel ${BAZEL_STARTUP_OPTIONS} build -c opt \
+bazelisk ${BAZEL_STARTUP_OPTIONS} build --config "${BAZEL_BUILD_MODE}" \
   ${BAZEL_FLAGS} ${CUSTOM_BAZEL_FLAGS} //ci/tools/python/vendor_sdk/qualcomm:ai_edge_litert_sdk_qualcomm_sdist
 
 mv bazel-bin/ci/tools/python/vendor_sdk/qualcomm/ai_edge_litert_sdk_qualcomm*.tar.gz dist/
 
 ## Mediatek SDK
-bazel ${BAZEL_STARTUP_OPTIONS} build -c opt \
+bazelisk ${BAZEL_STARTUP_OPTIONS} build --config "${BAZEL_BUILD_MODE}" \
   ${BAZEL_FLAGS} ${CUSTOM_BAZEL_FLAGS} //ci/tools/python/vendor_sdk/mediatek:ai_edge_litert_sdk_mediatek_sdist
 
 mv bazel-bin/ci/tools/python/vendor_sdk/mediatek/ai_edge_litert_sdk_mediatek*.tar.gz dist/
