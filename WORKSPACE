@@ -46,9 +46,9 @@ load("//litert:tensorflow_source_rules.bzl", "tensorflow_source_repo")
 
 tensorflow_source_repo(
     name = "org_tensorflow",
-    sha256 = "627f4312389398ca1358a6884230fd60ffa0ca558120b1fbe70d62651afa1553",
-    strip_prefix = "tensorflow-938f12698e98b54482670a9c4634c5404fd59a1d",
-    urls = ["https://github.com/tensorflow/tensorflow/archive/938f12698e98b54482670a9c4634c5404fd59a1d.tar.gz"],
+    sha256 = "6e78f0d1503b3e70913512cb7c5fdafd1b69dfd45563924ee6ee9f768c8c283a",
+    strip_prefix = "tensorflow-777924f5575e7e6e22e4f47be211c2a94f59c4f5",
+    urls = ["https://github.com/tensorflow/tensorflow/archive/777924f5575e7e6e22e4f47be211c2a94f59c4f5.tar.gz"],
 )
 
 # Initialize the TensorFlow repository and all dependencies.
@@ -207,9 +207,9 @@ maven_install(
         "androidx.lifecycle:lifecycle-common:2.8.7",
         "com.google.android.play:ai-delivery:0.1.1-alpha01",
         "com.google.guava:guava:33.4.6-android",
-        "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1",
-        "org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.10.1",
-        "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.1",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.8.0",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.0",
     ],
     repositories = [
         "https://jcenter.bintray.com",

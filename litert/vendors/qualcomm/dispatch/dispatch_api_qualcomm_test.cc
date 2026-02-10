@@ -69,10 +69,9 @@ TEST(Qualcomm, DispatchApiWithFastRpc) {
 #endif
 
   LITERT_ASSERT_OK_AND_ASSIGN(auto env, CreateDefaultEnvironment());
-  LITERT_ASSERT_OK_AND_ASSIGN(auto env_options, env.GetOptions());
   LITERT_ASSERT_OK_AND_ASSIGN(auto options, Options::Create());
 
-  ASSERT_EQ(LiteRtDispatchInitialize(env_options.Get(), options.Get()),
+  ASSERT_EQ(LiteRtDispatchInitialize(env.GetHolder().handle, options.Get()),
             kLiteRtStatusOk);
 
   const char* vendor_id;
@@ -196,21 +195,24 @@ TEST(Qualcomm, DispatchApiWithFastRpc) {
 
   LiteRtTensorBuffer input_0_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), input_0_tensor_buffer_type, &kInput0TensorType,
-                input_0_tensor_buffer_size, &input_0_tensor_buffer),
+                env.GetHolder().handle, input_0_tensor_buffer_type,
+                &kInput0TensorType, input_0_tensor_buffer_size,
+                &input_0_tensor_buffer),
             kLiteRtStatusOk);
 
   LiteRtTensorBuffer input_1_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), input_1_tensor_buffer_type, &kInput1TensorType,
-                input_1_tensor_buffer_size, &input_1_tensor_buffer),
+                env.GetHolder().handle, input_1_tensor_buffer_type,
+                &kInput1TensorType, input_1_tensor_buffer_size,
+                &input_1_tensor_buffer),
             kLiteRtStatusOk);
 
   LiteRtTensorBuffer output_tensor_buffer;
-  EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), output_tensor_buffer_type, &kOutputTensorType,
-                output_tensor_buffer_size, &output_tensor_buffer),
-            kLiteRtStatusOk);
+  EXPECT_EQ(
+      LiteRtCreateManagedTensorBuffer(
+          env.GetHolder().handle, output_tensor_buffer_type, &kOutputTensorType,
+          output_tensor_buffer_size, &output_tensor_buffer),
+      kLiteRtStatusOk);
 
   // ///////////////////////////////////////////////////////////////////////////
   // Register tensor buffers.
@@ -329,10 +331,9 @@ TEST(Qualcomm, DispatchApiWithDmaBuf) {
 #endif
 
   LITERT_ASSERT_OK_AND_ASSIGN(auto env, CreateDefaultEnvironment());
-  LITERT_ASSERT_OK_AND_ASSIGN(auto env_options, env.GetOptions());
   LITERT_ASSERT_OK_AND_ASSIGN(auto options, Options::Create());
 
-  ASSERT_EQ(LiteRtDispatchInitialize(env_options.Get(), options.Get()),
+  ASSERT_EQ(LiteRtDispatchInitialize(env.GetHolder().handle, options.Get()),
             kLiteRtStatusOk);
 
   const char* vendor_id;
@@ -456,21 +457,24 @@ TEST(Qualcomm, DispatchApiWithDmaBuf) {
 
   LiteRtTensorBuffer input_0_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), input_0_tensor_buffer_type, &kInput0TensorType,
-                input_0_tensor_buffer_size, &input_0_tensor_buffer),
+                env.GetHolder().handle, input_0_tensor_buffer_type,
+                &kInput0TensorType, input_0_tensor_buffer_size,
+                &input_0_tensor_buffer),
             kLiteRtStatusOk);
 
   LiteRtTensorBuffer input_1_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), input_1_tensor_buffer_type, &kInput1TensorType,
-                input_1_tensor_buffer_size, &input_1_tensor_buffer),
+                env.GetHolder().handle, input_1_tensor_buffer_type,
+                &kInput1TensorType, input_1_tensor_buffer_size,
+                &input_1_tensor_buffer),
             kLiteRtStatusOk);
 
   LiteRtTensorBuffer output_tensor_buffer;
-  EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), output_tensor_buffer_type, &kOutputTensorType,
-                output_tensor_buffer_size, &output_tensor_buffer),
-            kLiteRtStatusOk);
+  EXPECT_EQ(
+      LiteRtCreateManagedTensorBuffer(
+          env.GetHolder().handle, output_tensor_buffer_type, &kOutputTensorType,
+          output_tensor_buffer_size, &output_tensor_buffer),
+      kLiteRtStatusOk);
 
   // ///////////////////////////////////////////////////////////////////////////
   // Register tensor buffers.
@@ -615,10 +619,9 @@ TEST(Qualcomm, DispatchApiWithFastRpcInt16Model) {
       output_tensor_0.size() * sizeof(decltype(output_tensor_0)::value_type);
 
   LITERT_ASSERT_OK_AND_ASSIGN(auto env, CreateDefaultEnvironment());
-  LITERT_ASSERT_OK_AND_ASSIGN(auto env_options, env.GetOptions());
   LITERT_ASSERT_OK_AND_ASSIGN(auto options, Options::Create());
 
-  ASSERT_EQ(LiteRtDispatchInitialize(env_options.Get(), options.Get()),
+  ASSERT_EQ(LiteRtDispatchInitialize(env.GetHolder().handle, options.Get()),
             kLiteRtStatusOk);
 
   const char* vendor_id;
@@ -742,20 +745,23 @@ TEST(Qualcomm, DispatchApiWithFastRpcInt16Model) {
 
   LiteRtTensorBuffer input_0_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), input_0_tensor_buffer_type, &kInput0TensorType_3,
-                input_0_tensor_buffer_size, &input_0_tensor_buffer),
+                env.GetHolder().handle, input_0_tensor_buffer_type,
+                &kInput0TensorType_3, input_0_tensor_buffer_size,
+                &input_0_tensor_buffer),
             kLiteRtStatusOk);
 
   LiteRtTensorBuffer input_1_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), input_1_tensor_buffer_type, &kInput1TensorType_3,
-                input_1_tensor_buffer_size, &input_1_tensor_buffer),
+                env.GetHolder().handle, input_1_tensor_buffer_type,
+                &kInput1TensorType_3, input_1_tensor_buffer_size,
+                &input_1_tensor_buffer),
             kLiteRtStatusOk);
 
   LiteRtTensorBuffer output_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), output_tensor_buffer_type, &kOutputTensorType_3,
-                output_tensor_buffer_size, &output_tensor_buffer),
+                env.GetHolder().handle, output_tensor_buffer_type,
+                &kOutputTensorType_3, output_tensor_buffer_size,
+                &output_tensor_buffer),
             kLiteRtStatusOk);
 
   // ///////////////////////////////////////////////////////////////////////////
@@ -910,10 +916,9 @@ TEST(Qualcomm, DispatchApiWithDmaBufInt16Model) {
       output_tensor_0.size() * sizeof(decltype(output_tensor_0)::value_type);
 
   LITERT_ASSERT_OK_AND_ASSIGN(auto env, CreateDefaultEnvironment());
-  LITERT_ASSERT_OK_AND_ASSIGN(auto env_options, env.GetOptions());
   LITERT_ASSERT_OK_AND_ASSIGN(auto options, Options::Create());
 
-  ASSERT_EQ(LiteRtDispatchInitialize(env_options.Get(), options.Get()),
+  ASSERT_EQ(LiteRtDispatchInitialize(env.GetHolder().handle, options.Get()),
             kLiteRtStatusOk);
 
   const char* vendor_id;
@@ -1037,20 +1042,23 @@ TEST(Qualcomm, DispatchApiWithDmaBufInt16Model) {
 
   LiteRtTensorBuffer input_0_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), input_0_tensor_buffer_type, &kInput0TensorType_3,
-                input_0_tensor_buffer_size, &input_0_tensor_buffer),
+                env.GetHolder().handle, input_0_tensor_buffer_type,
+                &kInput0TensorType_3, input_0_tensor_buffer_size,
+                &input_0_tensor_buffer),
             kLiteRtStatusOk);
 
   LiteRtTensorBuffer input_1_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), input_1_tensor_buffer_type, &kInput1TensorType_3,
-                input_1_tensor_buffer_size, &input_1_tensor_buffer),
+                env.GetHolder().handle, input_1_tensor_buffer_type,
+                &kInput1TensorType_3, input_1_tensor_buffer_size,
+                &input_1_tensor_buffer),
             kLiteRtStatusOk);
 
   LiteRtTensorBuffer output_tensor_buffer;
   EXPECT_EQ(LiteRtCreateManagedTensorBuffer(
-                env.Get(), output_tensor_buffer_type, &kOutputTensorType_3,
-                output_tensor_buffer_size, &output_tensor_buffer),
+                env.GetHolder().handle, output_tensor_buffer_type,
+                &kOutputTensorType_3, output_tensor_buffer_size,
+                &output_tensor_buffer),
             kLiteRtStatusOk);
 
   // ///////////////////////////////////////////////////////////////////////////

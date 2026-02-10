@@ -350,16 +350,6 @@ LiteRtStatus QnnManager::ValidateOp(const Qnn_OpConfig_t& op_config) {
   return kLiteRtStatusOk;
 }
 
-std::optional<::qnn::SocInfo> FindSocInfo(
-    const ::qnn::SnapdragonModel& soc_model) {
-  for (auto i = 0; i < ::qnn::kNumSocInfos; ++i) {
-    if (soc_model == ::qnn::kSocInfos[i].soc_model) {
-      return ::qnn::kSocInfos[i];
-    }
-  }
-  LITERT_LOG(LITERT_ERROR, "Failed to find available SoC!");
-  return std::nullopt;
-}
 
 LiteRtStatus QnnManager::Init(std::optional<std::string> shared_library_dir,
                               std::optional<::qnn::SocInfo> soc_info,
@@ -399,14 +389,10 @@ LiteRtStatus QnnManager::Init(std::optional<std::string> shared_library_dir,
       LITERT_RETURN_IF_ERROR(
           ResolveApi(::qnn::HtpBackend::GetExpectedBackendVersion()));
 
-      backend_ = std::make_unique<::qnn::HtpBackend>(Api());
-      LITERT_RETURN_IF_ERROR(backend_->Init(options_, soc_info));
-      auto* htp_backend = dynamic_cast<::qnn::HtpBackend*>(backend_.get());
-      if (!htp_backend) {
-        LITERT_LOG(LITERT_ERROR, "dynamic_cast to HtpBackend failed");
-        return kLiteRtStatusErrorRuntimeFailure;
-      }
+      auto htp_backend = std::make_unique<::qnn::HtpBackend>(Api());
+      LITERT_RETURN_IF_ERROR(htp_backend->Init(options_, soc_info));
       soc_info_ = htp_backend->GetSocInfo();
+      backend_ = std::move(htp_backend);
 
       break;
     }

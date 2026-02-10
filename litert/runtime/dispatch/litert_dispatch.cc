@@ -14,6 +14,8 @@
 
 #include "litert/vendors/c/litert_dispatch.h"
 
+#include "litert/c/litert_any.h"
+
 #if !defined(LITERT_WINDOWS_OS)
 #include <dlfcn.h>
 #endif  // !defined(LITERT_WINDOWS_OS)
@@ -23,10 +25,10 @@
 
 #include "litert/c/internal/litert_logging.h"
 #include "litert/c/litert_common.h"
+#include "litert/c/litert_environment.h"
 #include "litert/c/litert_environment_options.h"
 #include "litert/c/litert_metrics.h"
 #include "litert/cc/internal/litert_shared_library.h"
-#include "litert/cc/litert_environment_options.h"
 #include "litert/cc/litert_expected.h"
 #include "litert/cc/litert_macros.h"
 #include "litert/core/dynamic_loading.h"
@@ -79,22 +81,23 @@ LiteRtDispatchApi TheApi = {
     /*.graph_interface=*/nullptr,
 };
 
-LiteRtStatus Initialize(LiteRtEnvironmentOptions environment_options,
-                        LiteRtOptions options) {
-  INVOKE_FUNC(initialize, environment_options, options);
+LiteRtStatus Initialize(LiteRtEnvironment env, LiteRtOptions options) {
+  INVOKE_FUNC(initialize, env, options);
 }
 
 litert::Expected<std::string> GetSharedLibraryPath(
-    const litert::EnvironmentOptions& env_options) {
+    LiteRtEnvironmentOptions env_options) {
   std::vector<std::string> dispatch_lib_paths;
-  LITERT_ASSIGN_OR_RETURN(
-      auto dispatch_lib_dir,
-      env_options.GetOption(kLiteRtEnvOptionTagDispatchLibraryDir));
-  litert::internal::FindLiteRtDispatchSharedLibs(
-      std::get<const char*>(dispatch_lib_dir), dispatch_lib_paths);
+  LiteRtAny dispatch_lib_dir;
+  auto status = LiteRtGetEnvironmentOptionsValue(
+      env_options, kLiteRtEnvOptionTagDispatchLibraryDir, &dispatch_lib_dir);
+  if (status == kLiteRtStatusOk) {
+    litert::internal::FindLiteRtDispatchSharedLibs(dispatch_lib_dir.str_value,
+                                                   dispatch_lib_paths);
+  }
   if (dispatch_lib_paths.empty()) {
     LITERT_LOG(LITERT_ERROR, "No dispatch library found in %s",
-               std::get<const char*>(dispatch_lib_dir));
+               dispatch_lib_dir.str_value);
     return litert::Error(kLiteRtStatusErrorRuntimeFailure);
   }
   if (dispatch_lib_paths.size() > 1) {
@@ -109,13 +112,13 @@ litert::Expected<std::string> GetSharedLibraryPath(
 // Basic Execution API
 // /////////////////////////////////////////////////////////////////////////////
 
-LiteRtStatus LiteRtDispatchInitialize(
-    LiteRtEnvironmentOptions environment_options, LiteRtOptions options) {
+LiteRtStatus LiteRtDispatchInitialize(LiteRtEnvironment env,
+                                      LiteRtOptions options) {
   if (IsTheApiInitialized) {
     return kLiteRtStatusOk;
   }
-
-  litert::EnvironmentOptions env_options(environment_options);
+  LiteRtEnvironmentOptions env_options;
+  LITERT_RETURN_IF_ERROR(LiteRtGetEnvironmentOptions(env, &env_options));
 
   // TODO(piyu): support Android systems where libraries are not unpacked in the
   // system directory.
@@ -149,7 +152,7 @@ LiteRtStatus LiteRtDispatchInitialize(
     return kLiteRtStatusErrorWrongVersion;
   }
 
-  auto status = Initialize(environment_options, options);
+  auto status = Initialize(env, options);
   if (status == kLiteRtStatusOk) {
     IsTheApiInitialized = true;
   }
