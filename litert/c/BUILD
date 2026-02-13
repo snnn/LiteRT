@@ -496,6 +496,7 @@ cc_library(
         ":litert_options",
         ":litert_tensor_buffer",
         "//litert/c/internal:litert_logging",
+        "//litert/c/internal:litert_scheduling_info",
         "//litert/cc:litert_macros",
         "//litert/runtime:compiled_model",
         "//tflite/c:c_api_types",
@@ -560,6 +561,12 @@ cc_library(
     hdrs = ["litert_opaque_options.h"],
     deps = [":litert_common"],
     alwayslink = 1,
+)
+
+cc_library(
+    name = "litert_opaque_options_header",
+    hdrs = ["litert_opaque_options.h"],
+    deps = [":litert_common"],
 )
 
 cc_test(
@@ -898,6 +905,7 @@ cc_library(
         ":litert_webgpu_types",
         # only depend on headers
         "@com_google_absl//absl/types:span",
+        "//litert/c/internal:litert_scheduling_info",
         "@opencl_headers",
         "//litert/vendors/c:litert_dispatch_c_api",
         "//tflite/core/api",

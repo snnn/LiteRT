@@ -288,15 +288,17 @@ cc_library(
         ":litert_profiler",
         ":litert_ranked_tensor_type",
         ":litert_tensor_buffer",
-        "//litert/c:litert_any",
+        ":litert_tensor_buffer_requirements",
+        ":litert_tensor_buffer_types",
         "//litert/c:litert_common",
         "//litert/c:litert_layout",
         "//litert/c:litert_metrics",
+        "//litert/c:litert_model_types",
         "//litert/c:litert_tensor_buffer_types",
-        "//litert/cc:litert_tensor_buffer_types",
+        "//litert/c/internal:litert_scheduling_info",
+        "//litert/cc/internal:litert_consts",
         "//litert/cc/internal:litert_handle",
         "@com_google_absl//absl/algorithm:container",
-        "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/strings:string_view",
@@ -375,6 +377,7 @@ litert_device_test(
 #         ":litert_profiler",
 #         ":litert_ranked_tensor_type",
 #         ":litert_tensor_buffer",
+#         ":litert_tensor_buffer_requirements",
 #         ":litert_tensor_buffer_types",
 #         "@com_google_googletest//:gtest_main",
 #         "@com_google_absl//absl/container:flat_hash_map",
@@ -686,12 +689,12 @@ cc_test(
         ":litert_profiler",
         ":litert_ranked_tensor_type",
         ":litert_tensor_buffer",
+        ":litert_tensor_buffer_requirements",
         ":litert_tensor_buffer_types",
         "//litert/c:litert_common",
         "//litert/c:litert_compiled_model",
         "//litert/c:litert_tensor_buffer",
         "//litert/c:litert_tensor_buffer_types",
-        "//litert/cc/internal:litert_handle",
         "//litert/cc/options:litert_runtime_options",
         "//litert/test:common",
         "//litert/test:matchers",
@@ -822,6 +825,7 @@ cc_library(
         "//litert/c:litert_common",
         "//litert/c:litert_model",
         "//litert/c:litert_model_types",
+        "//litert/cc/internal:litert_consts",
         "//litert/cc/internal:litert_detail",
         "//litert/cc/internal:litert_handle",
         "@com_google_absl//absl/strings:string_view",
@@ -899,19 +903,16 @@ cc_library(
     hdrs = [":litert_tensor_buffer_requirements.h"],
     visibility = [
         # copybara:uncomment_begin(oss litert_lm)
-        # "//litert:litert_cc_users_static_link",
+        # "//litert:litert_public",
         # copybara:uncomment_end_and_comment_begin
         "//visibility:public",
         # copybara:comment_end
     ],
     deps = [
         ":litert_expected",
-        ":litert_macros",
         ":litert_tensor_buffer_types",
         "//litert/c:litert_common",
-        "//litert/c:litert_tensor_buffer",
-        "//litert/c:litert_tensor_buffer_types",
-        "//litert/cc/internal:litert_handle",
+        "//litert/c/internal:litert_logging",
         "@com_google_absl//absl/types:span",
     ],
 )
@@ -920,7 +921,7 @@ cc_test(
     name = "litert_tensor_buffer_requirements_test",
     srcs = ["litert_tensor_buffer_requirements_test.cc"],
     deps = [
-        ":litert_tensor_buffer",
+        ":litert_tensor_buffer_requirements",
         ":litert_tensor_buffer_types",
         "//litert/c:litert_common",
         "//litert/c:litert_tensor_buffer",
@@ -933,10 +934,7 @@ cc_test(
 
 cc_library(
     name = "litert_tensor_buffer",
-    hdrs = [
-        ":litert_tensor_buffer.h",
-        ":litert_tensor_buffer_requirements.h",
-    ],
+    hdrs = ["litert_tensor_buffer.h"],
     visibility = [
         # copybara:uncomment_begin(oss litert_lm)
         # "//litert:litert_cc_users_static_link",
@@ -1187,6 +1185,7 @@ cc_library(
         # C++ API headers.
         "litert_any.h",
         "litert_common.h",
+        "//litert/c/internal:litert_scheduling_info",
         "litert_buffer_ref.h",
         "litert_tensor_buffer_types.h",
         "litert_compiled_model.h",
@@ -1241,6 +1240,7 @@ cc_library(
         # C++ API targets.
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/functional:any_invocable",
+        "//litert/c/internal:litert_scheduling_info",
         "//litert/cc/dynamic_runtime:litert_compiled_model",
         "//litert/cc/dynamic_runtime:litert_custom_op_kernel",
         "//litert/cc/dynamic_runtime:litert_environment",
@@ -1250,7 +1250,6 @@ cc_library(
         "//litert/cc/dynamic_runtime:litert_model_predicates",
         "//litert/cc/dynamic_runtime:litert_profiler",
         "//litert/cc/dynamic_runtime:litert_tensor_buffer",
-        "//litert/cc/dynamic_runtime:litert_tensor_buffer_requirements",
         "//litert/cc/internal:litert_runtime_builtin_runtimecapi",
         # C++ Common Options API targets.
         "//litert/cc/dynamic_runtime:litert_opaque_options",
