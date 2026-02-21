@@ -117,6 +117,7 @@ using litert::internal::GetTensorIdentifier;
 #if !defined(LITERT_DISABLE_NPU)
 using litert::internal::SerializeModel;
 #endif  // !defined(LITERT_DISABLE_NPU)
+using litert::internal::ParseLiteRtRuntimeOptions;
 using litert::internal::TfLiteTensorIdentifier;
 
 namespace {
@@ -291,27 +292,35 @@ Expected<void> LiteRtCompiledModelT::InitializeRuntime(
     auto opaque_options = litert::OpaqueOptions::WrapCObject(
         jit_compilation_options->options, litert::OwnHandle::kNo);
 
-    if (auto runtime_options = litert::FindOpaqueData<LiteRtRuntimeOptionsT>(
+    if (auto runtime_options_data = litert::FindOpaqueData<const char>(
             opaque_options, LiteRtRuntimeOptionsT::Identifier());
-        runtime_options) {
-      interpreter_options.SetShloCompositeInlining(true);
-      interpreter_options.SetCompressQuantizationZeroPoints(
-          (*runtime_options)->compress_quantization_zero_points);
-      if ((*runtime_options)->enable_profiling) {
-        profiler_ = new LiteRtProfilerT(/*max_profiling_buffer_entries=*/2048);
-      }
+        runtime_options_data) {
+      LiteRtRuntimeOptionsT runtime_options;
+      absl::string_view data_str(*runtime_options_data);
+      if (ParseLiteRtRuntimeOptions(data_str.data(), data_str.size(),
+                                    &runtime_options) != kLiteRtStatusOk) {
+        LITERT_LOG(LITERT_WARNING, "Failed to parse runtime options");
+      } else {
+        interpreter_options.SetShloCompositeInlining(true);
+        interpreter_options.SetCompressQuantizationZeroPoints(
+            runtime_options.compress_quantization_zero_points);
+        if (runtime_options.enable_profiling) {
+          profiler_ =
+              new LiteRtProfilerT(/*max_profiling_buffer_entries=*/2048);
+        }
 
-      // Create error reporter based on mode
-      switch ((*runtime_options)->error_reporter_mode) {
-        case kLiteRtErrorReporterModeNone:
-          // No error reporter
-          break;
-        case kLiteRtErrorReporterModeStderr:
-          error_reporter_ = std::make_unique<litert::StderrReporter>();
-          break;
-        case kLiteRtErrorReporterModeBuffer:
-          error_reporter_ = std::make_unique<litert::BufferErrorReporter>();
-          break;
+        // Create error reporter based on mode
+        switch (runtime_options.error_reporter_mode) {
+          case kLiteRtErrorReporterModeNone:
+            // No error reporter
+            break;
+          case kLiteRtErrorReporterModeStderr:
+            error_reporter_ = std::make_unique<litert::StderrReporter>();
+            break;
+          case kLiteRtErrorReporterModeBuffer:
+            error_reporter_ = std::make_unique<litert::BufferErrorReporter>();
+            break;
+        }
       }
     }
 
@@ -382,11 +391,16 @@ Expected<void> LiteRtCompiledModelT::InitializeRuntime(
   interp_->SetExternalContext(kTfLiteLiteRtBufferContext,
                               buffer_context_.get());
 #if defined(LITERT_WITH_EXTERNAL_WEIGHT_LOADER)
+  std::unique_ptr<litert::ScopedWeightSource> scoped_weight_source;
+  auto* options_impl =
+    reinterpret_cast<LiteRtOptionsT*>(jit_compilation_options);
+  if (options_impl != nullptr) {
+    scoped_weight_source = std::move(options_impl->scoped_weight_source);
+  }
   weight_loader_ = weight_loader::CreateLiteRtWeightLoader(
-      fb_model_->GetModel(), model_directory_);
-  if (jit_compilation_options) {
-    reinterpret_cast<LiteRtOptionsT*>(jit_compilation_options)->weight_loader =
-        weight_loader_.get();
+      fb_model_->GetModel(), model_directory_, std::move(scoped_weight_source));
+  if (options_impl != nullptr) {
+    options_impl->weight_loader = weight_loader_.get();
   }
   if (weight_loader_) {
     weight_loader::WeightAccessRequest request;
@@ -594,10 +608,10 @@ Expected<void> LiteRtCompiledModelT::InitializeModel(
     // Fall through to the next step if it's pre-compiled, else try to apply
     // plugins to the model.
     if (!IsCompiled(model)) {
-      Expected<bool> maybe_initialzed_model =
+      Expected<bool> maybe_initialized_model =
           ApplyPluginsWithCaching(model, hw_accelerators, *options, env);
-      if (maybe_initialzed_model.HasValue() &&
-          maybe_initialzed_model.Value() == true) {
+      if (maybe_initialized_model.HasValue() &&
+          maybe_initialized_model.Value() == true) {
         // The compiled model's flatbuffer has initialized by applying the
         // plugins.
         return {};

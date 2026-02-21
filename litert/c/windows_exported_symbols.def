@@ -60,7 +60,6 @@ EXPORTS
   LiteRtCreateOpaqueOptions
   LiteRtCreateOptions
   LiteRtCreateProfiler
-  LiteRtCreateRuntimeOptions
   LiteRtCreateTensorBufferFromGlBuffer
   LiteRtCreateTensorBufferFromGlTexture
   LiteRtCreateTensorBufferFromHostMemory
@@ -92,7 +91,6 @@ EXPORTS
   LiteRtFindCompilerOptions
   LiteRtFindCpuOptions
   LiteRtFindOpaqueOptionsData
-  LiteRtFindRuntimeOptions
   LiteRtGetAcceleratorEnvironment
   LiteRtGetCompiledModelEnvironment
   LiteRtGetCompiledModelInputBufferRequirements
@@ -176,10 +174,6 @@ EXPORTS
   LiteRtGetProfilerEvents
   LiteRtGetQuantizationTypeId
   LiteRtGetRankedTensorType
-  LiteRtGetRuntimeOptionsCompressQuantizationZeroPoints
-  LiteRtGetRuntimeOptionsEnableProfiling
-  LiteRtGetRuntimeOptionsErrorReporterMode
-  LiteRtGetRuntimeOptionsIdentifier
   LiteRtGetSignatureInputName
   LiteRtGetSignatureInputTensor
   LiteRtGetSignatureInputTensorByIndex
@@ -226,6 +220,7 @@ EXPORTS
   LiteRtGoogleTensorOptionsGetInt64ToInt32Truncation
   LiteRtGoogleTensorOptionsGetOutputDir
   LiteRtGoogleTensorOptionsGetShardingIntensity
+  LiteRtGoogleTensorOptionsGetEnableDynamicRangeQuantization
   LiteRtGoogleTensorOptionsGetTestingFlags
   LiteRtGoogleTensorOptionsSetDumpOpTimings
   LiteRtGoogleTensorOptionsSetEnable4BitCompilation
@@ -234,6 +229,7 @@ EXPORTS
   LiteRtGoogleTensorOptionsSetInt64ToInt32Truncation
   LiteRtGoogleTensorOptionsSetOutputDir
   LiteRtGoogleTensorOptionsSetShardingIntensity
+  LiteRtGoogleTensorOptionsSetEnableDynamicRangeQuantization
   LiteRtGoogleTensorOptionsSetTestingFlags
   LiteRtGpuEnvironmentCreate
   LiteRtHasTensorBufferEvent
@@ -362,9 +358,6 @@ EXPORTS
   LiteRtSetOpaqueOptionsHash
   LiteRtSetOptionsHardwareAccelerators
   LiteRtSetProfilerCurrentEventSource
-  LiteRtSetRuntimeOptionsCompressQuantizationZeroPoints
-  LiteRtSetRuntimeOptionsEnableProfiling
-  LiteRtSetRuntimeOptionsErrorReporterMode
   LiteRtSetTensorBufferEvent
   LiteRtSignalEvent
   LiteRtStartProfiler
