@@ -21,14 +21,16 @@ export TF_LOCAL_SOURCE_PATH=${TF_LOCAL_SOURCE_PATH:-"$(pwd)/third_party/tensorfl
 # Build configuration: "opt" (default) or "dbg" for debug builds.
 LITERT_BUILD_MODE=${LITERT_BUILD_MODE:-opt}
 if [[ "${LITERT_BUILD_MODE}" == "dbg" ]]; then
-  BAZEL_BUILD_MODE="dbg"
   OPTIMIZATION_COPT=""
-else
-  BAZEL_BUILD_MODE="opt"
+elif [[ "${LITERT_BUILD_MODE}" == "opt" ]]; then
   OPTIMIZATION_COPT="--copt=-O3"
   export CFLAGS="${CFLAGS:-} -O3"
   export CXXFLAGS="${CXXFLAGS:-} -O3"
+else
+  echo "Unsupported LITERT_BUILD_MODE: ${LITERT_BUILD_MODE} (expected: opt or dbg)"
+  exit 1
 fi
+BAZEL_BUILD_MODE_FLAGS=(--config="${LITERT_BUILD_MODE}")
 
 ARCH="$(uname -m)"
 OS_NAME="$(uname -s)"
@@ -110,7 +112,7 @@ case "${ARCH}" in
     ;;
 esac
 
-bazelisk ${BAZEL_STARTUP_OPTIONS} build --config "${BAZEL_BUILD_MODE}" --cxxopt=-std=gnu++17 \
+bazelisk ${BAZEL_STARTUP_OPTIONS} build "${BAZEL_BUILD_MODE_FLAGS[@]}" --cxxopt=-std=gnu++17 \
   ${BAZEL_FLAGS} ${CUSTOM_BAZEL_FLAGS} //ci/tools/python/wheel:litert_wheel
 
 # Move the wheel file to the root directory since it is not accessible from the
@@ -124,27 +126,27 @@ find "./dist/"
 
 if [ "${TEST_MANYLINUX_COMPLIANCE}" = "true" ]; then
   echo "Testing manylinux compliance..."
-  bazelisk ${BAZEL_STARTUP_OPTIONS} test --config "${BAZEL_BUILD_MODE}" \
+  bazelisk ${BAZEL_STARTUP_OPTIONS} test "${BAZEL_BUILD_MODE_FLAGS[@]}" \
     ${BAZEL_FLAGS} ${CUSTOM_BAZEL_FLAGS} //ci/tools/python/wheel:manylinux_compliance_test
 fi
 
 # Vendor SDKs
 
 ## Qualcomm SDK
-bazelisk ${BAZEL_STARTUP_OPTIONS} build --config "${BAZEL_BUILD_MODE}" \
+bazelisk ${BAZEL_STARTUP_OPTIONS} build "${BAZEL_BUILD_MODE_FLAGS[@]}" \
   ${BAZEL_FLAGS} ${CUSTOM_BAZEL_FLAGS} //ci/tools/python/vendor_sdk/qualcomm:ai_edge_litert_sdk_qualcomm_sdist
 
 mv bazel-bin/ci/tools/python/vendor_sdk/qualcomm/ai_edge_litert_sdk_qualcomm*.tar.gz dist/
 
 ## Mediatek SDK
-bazelisk ${BAZEL_STARTUP_OPTIONS} build --config "${BAZEL_BUILD_MODE}" \
+bazelisk ${BAZEL_STARTUP_OPTIONS} build "${BAZEL_BUILD_MODE_FLAGS[@]}" \
   ${BAZEL_FLAGS} ${CUSTOM_BAZEL_FLAGS} //ci/tools/python/vendor_sdk/mediatek:ai_edge_litert_sdk_mediatek_sdist
 
 mv bazel-bin/ci/tools/python/vendor_sdk/mediatek/ai_edge_litert_sdk_mediatek*.tar.gz dist/
 
 ## Google Tensor SDK
 if [[ -d "ci/tools/python/vendor_sdk/google_tensor" ]]; then
-  bazel ${BAZEL_STARTUP_OPTIONS} build -c opt \
+  bazelisk ${BAZEL_STARTUP_OPTIONS} build "${BAZEL_BUILD_MODE_FLAGS[@]}" \
     ${BAZEL_FLAGS} ${CUSTOM_BAZEL_FLAGS} //ci/tools/python/vendor_sdk/google_tensor:ai_edge_litert_sdk_google_tensor_sdist
 
   mv bazel-bin/ci/tools/python/vendor_sdk/google_tensor/ai_edge_litert_sdk_google_tensor*.tar.gz dist/

@@ -56,7 +56,7 @@ using ::litert::Options;
 using ::litert::RuntimeOptions;
 using ::litert::TensorBuffer;
 
-Options CreateCompiledModelOptions(const BenchmarkParams& params) {
+Expected<Options> CreateCompiledModelOptions(const BenchmarkParams& params) {
   auto use_gpu = params.Get<bool>("use_gpu");
   auto use_npu = params.Get<bool>("use_npu");
   auto use_cpu = params.Get<bool>("use_cpu");
@@ -69,14 +69,13 @@ Options CreateCompiledModelOptions(const BenchmarkParams& params) {
   auto enable_weight_sharing = params.Get<bool>("enable_weight_sharing");
   auto mediatek_nerun_pilot_version =
       params.Get<std::string>("mediatek_nerun_pilot_version");
-  LITERT_ASSIGN_OR_ABORT(Options compilation_options,
-                         litert::Options::Create());
+  LITERT_ASSIGN_OR_RETURN(Options compilation_options,
+                          litert::Options::Create());
 
   if (use_cpu && require_full_delegation) {
-    LITERT_LOG(
-        LITERT_ERROR,
-        "Requesting full delegation and CPU acceleration are incompatible.");
-    std::abort();
+    return Error(kLiteRtStatusErrorInvalidArgument,
+                 "Requesting full delegation and CPU acceleration are "
+                 "incompatible.");
   }
 
   HwAcceleratorSet hardware_accelerators(HwAccelerators::kNone);
@@ -259,7 +258,6 @@ TfLiteStatus BenchmarkLiteRtModel::Init() {
       litert::CompiledModel::Create(*environment_, model_->Get(),
                                     compilation_options),
       AsTfLiteStatus(_ << "Failed to compile model."));
-
   compiled_model_ =
       std::make_unique<litert::CompiledModel>(std::move(compiled_model_result));
 

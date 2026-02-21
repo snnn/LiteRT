@@ -390,6 +390,35 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "benchmark_litert_model_dynamic",
+    srcs = ["benchmark_litert_model.cc"],
+    hdrs = ["benchmark_litert_model.h"],
+    deps = [
+        "//litert/c:litert_common",
+        "//litert/c/internal:litert_logging",
+        "//litert/c/options:litert_mediatek_options",
+        "//litert/c/options:litert_qualcomm_options",
+        "//litert/cc:litert_api_with_dynamic_runtime",
+        "//litert/cc/internal:litert_tflite_error_status_builder",
+        "//litert/core/util:perfetto_profiling",
+        "//litert/runtime:compiled_model",
+        "//tflite:framework_stable",
+        "//tflite/c:c_api_types",
+        "//tflite/c:common",
+        "//tflite/profiling:model_runtime_info",
+        "//tflite/profiling:profile_buffer",
+        "//tflite/profiling:profile_summarizer",
+        "//tflite/tools:command_line_flags",
+        "//tflite/tools:utils",
+        "//tflite/tools/benchmark:benchmark_model_lib",
+        "//tflite/tools/benchmark:benchmark_params",
+        "//tflite/tools/benchmark/proto:benchmark_result_cc",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
 # copybara:uncomment_begin(google-only)
 # # Ensure that benchmark tool is statically linked.
 # check_dependencies(
@@ -682,12 +711,30 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "benchmark_model_main_dynamic",
+    srcs = ["benchmark_litert_model_main.cc"],
+    deps = [
+        ":benchmark_litert_model_dynamic",
+        "//tflite/c:c_api_types",
+        "//tflite/tools:logging",
+    ],
+)
+
 litert_bin(
     name = "benchmark_model",
     data = litert_gpu_accelerator_prebuilts(),
     export_litert_only = True,
     ungrte = True,
     deps = [":benchmark_model_main"] + litert_gpu_accelerator_deps(),
+)
+
+litert_bin(
+    name = "benchmark_model_dynamic",
+    data = litert_gpu_accelerator_prebuilts(),
+    export_litert_only = True,
+    ungrte = True,
+    deps = [":benchmark_model_main_dynamic"] + litert_gpu_accelerator_deps(),
 )
 
 cc_binary(

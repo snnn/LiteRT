@@ -73,6 +73,10 @@ class CompiledModelWrapper:
         """
         ...
 
+    def IsFullyAccelerated(self) -> bool:
+        """Returns whether the compiled model is fully accelerated."""
+        ...
+
     def CreateInputBufferByName(self, sig_key: str, in_name: str) -> object:
         """Creates an input buffer for the specified signature and input name.
 

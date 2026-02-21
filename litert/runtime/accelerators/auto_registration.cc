@@ -15,6 +15,7 @@
 #include "litert/runtime/accelerators/auto_registration.h"
 
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>  // NOLINT
 #include <string>
 #include <utility>
@@ -186,6 +187,15 @@ Expected<void> TriggerAcceleratorAutomaticRegistration(
 #define SO_EXT ".so"
 #endif
 #if !defined(LITERT_DISABLE_GPU)
+  const char* disable_gpu_auto_registration =
+      std::getenv("LITERT_DISABLE_GPU_AUTO_REGISTRATION");
+  if (disable_gpu_auto_registration != nullptr &&
+      std::string(disable_gpu_auto_registration) == "1") {
+    LITERT_LOG(
+        LITERT_INFO,
+        "GPU accelerator auto-registration disabled by "
+        "LITERT_DISABLE_GPU_AUTO_REGISTRATION=1.");
+  } else {
   static constexpr absl::string_view kGpuAcceleratorLibs[] = {
       "libLiteRtGpuAccelerator" SO_EXT,
 
@@ -270,6 +280,7 @@ Expected<void> TriggerAcceleratorAutomaticRegistration(
   if (!gpu_accelerator_registered) {
     LITERT_LOG(LITERT_WARNING,
                "GPU accelerator could not be loaded and registered.");
+  }
   }
 #else
   LITERT_LOG(LITERT_VERBOSE, "GPU accelerator registration disabled.");

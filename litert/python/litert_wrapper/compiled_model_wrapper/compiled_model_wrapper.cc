@@ -503,6 +503,14 @@ PyObject* CompiledModelWrapper::GetInputTensorDetails(
   return result_dict;
 }
 
+PyObject* CompiledModelWrapper::IsFullyAccelerated() {
+  auto is_fully_accelerated_or = compiled_model_.IsFullyAccelerated();
+  if (!is_fully_accelerated_or) {
+    return ConvertErrorToPyExc(is_fully_accelerated_or.Error());
+  }
+  return PyBool_FromLong(*is_fully_accelerated_or ? 1 : 0);
+}
+
 PyObject* CompiledModelWrapper::RunByName(const char* signature_key,
                                           PyObject* input_map,
                                           PyObject* output_map) {

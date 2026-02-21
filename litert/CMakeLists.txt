@@ -91,6 +91,8 @@ option(LITERT_AUTO_BUILD_TFLITE "Automatically build TFLite if not found" ON)
 option(LITERT_ENABLE_GPU "Enable GPU acceleration support" ON)
 option(LITERT_ENABLE_NPU "Enable NPU acceleration support" ON)
 option(LITERT_DISABLE_KLEIDIAI "Disable KleidiAI delegate when bundling host TFLite (default ON for Linux/macOS x86_64 hosts)" ${_litert_disable_kleidiai_default})
+set(LITERT_DEPENDENCY_BUILD_PARALLEL_LEVEL "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}" CACHE STRING
+    "Parallel job count for nested dependency builds (host flatc, tensorflow-lite)")
 
 set(LITERT_HOST_C_COMPILER "" CACHE FILEPATH "Host C compiler used for helper host-side tools (e.g. FlatBuffers flatc)")
 set(LITERT_HOST_CXX_COMPILER "" CACHE FILEPATH "Host C++ compiler used for helper host-side tools (e.g. FlatBuffers flatc)")
@@ -195,7 +197,8 @@ if(NOT EXISTS "${TFLITE_BUILD_DIR}/libtensorflow-lite.a")
                 message(FATAL_ERROR "Failed to configure host flatbuffers:\n${HOSTCFG_ERR}")
               endif()
               execute_process(
-                COMMAND ${CMAKE_COMMAND} --build . --target flatc -- -j
+                COMMAND ${CMAKE_COMMAND} --build . --target flatc
+                        --parallel ${LITERT_DEPENDENCY_BUILD_PARALLEL_LEVEL}
                 WORKING_DIRECTORY "${_root_host_flatc_dir}"
                 RESULT_VARIABLE HOSTBUILD_RC
                 ERROR_VARIABLE HOSTBUILD_ERR)
@@ -263,7 +266,8 @@ if(NOT EXISTS "${TFLITE_BUILD_DIR}/libtensorflow-lite.a")
         # Build TFLite
         message(STATUS "Building TFLite (this will take several minutes)...")
         execute_process(
-            COMMAND ${CMAKE_COMMAND} --build . --target tensorflow-lite -- -j
+            COMMAND ${CMAKE_COMMAND} --build . --target tensorflow-lite
+                    --parallel ${LITERT_DEPENDENCY_BUILD_PARALLEL_LEVEL}
             WORKING_DIRECTORY "${TFLITE_BUILD_DIR}"
             RESULT_VARIABLE TFLITE_BUILD_RESULT
             OUTPUT_QUIET

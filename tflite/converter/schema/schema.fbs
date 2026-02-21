@@ -493,7 +493,9 @@ enum BuiltinOperator : int32 {
   DILATE = 203,
   STABLEHLO_RNG_BIT_GENERATOR = 204,
   REDUCE_WINDOW = 205 (deprecated),
-  STABLEHLO_COMPOSITE = 206, // WARNING: No runtime support
+  // Runtime support exists via the STABLEHLO_COMPOSITE kernel (and optional
+  // inlining/delegation).
+  STABLEHLO_COMPOSITE = 206,
   STABLEHLO_SHIFT_LEFT = 207,
   STABLEHLO_CBRT = 208, // WARNING: No runtime support
   STABLEHLO_CASE = 209,

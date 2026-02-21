@@ -184,6 +184,23 @@ class CompiledModel:
         signature_index, output_index
     )
 
+  def get_node_placement(self) -> Dict[str, Any]:
+    """Returns delegate placement information for each node.
+
+    This method requires runtime support in the underlying extension. If the
+    extension was built without this capability, a NotImplementedError is
+    raised.
+    """
+    if not hasattr(self._model, "GetNodePlacement"):
+      raise NotImplementedError(
+          "Node placement API is not available in this LiteRT build."
+      )
+    return self._model.GetNodePlacement()
+
+  def is_fully_accelerated(self) -> bool:
+    """Returns whether the compiled model is fully accelerated."""
+    return bool(self._model.IsFullyAccelerated())
+
   def create_input_buffer_by_name(
       self, signature_key: str, input_name: str
   ) -> TensorBuffer:
