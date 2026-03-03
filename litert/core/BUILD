@@ -315,6 +315,7 @@ cc_test(
         ":litert_toml_parser",
         "//litert/c:litert_common",
         "//litert/test:matchers",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest_main",
     ],
 )

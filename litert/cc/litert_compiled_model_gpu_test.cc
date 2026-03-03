@@ -36,6 +36,7 @@
 #include "litert/cc/litert_compiled_model.h"
 #include "litert/cc/litert_element_type.h"
 #include "litert/cc/litert_environment.h"
+#include "litert/cc/litert_environment_options.h"
 #include "litert/cc/litert_event.h"
 #include "litert/cc/litert_expected.h"
 #include "litert/cc/litert_layout.h"
@@ -144,13 +145,30 @@ TEST_P(CompiledModelGpuTest, Basic2nd) {
 }
 
 TEST(CompiledModelGpuTest, DoubleEnvironmentWithInterleavedDestruction) {
+  std::vector<litert::EnvironmentOptions::Option> env_options;
+// LiteRT currently does not support multiple EGL environments, so in the case
+// that OpenGL support is available, we need to create the EGL environment
+// outside of the LiteRT environment.
+#if LITERT_HAS_OPENGL_SUPPORT
+  std::unique_ptr<tflite::gpu::gl::EglEnvironment> egl_env;
+  ASSERT_TRUE(
+      tflite::gpu::gl::EglEnvironment::NewEglEnvironment(&egl_env).ok());
+  env_options.push_back(
+      {litert::EnvironmentOptions::Tag::kEglContext,
+       reinterpret_cast<int64_t>(egl_env->context().context())});
+  env_options.push_back({litert::EnvironmentOptions::Tag::kEglDisplay,
+                         reinterpret_cast<int64_t>(egl_env->display())});
+#endif  // LITERT_HAS_OPENGL_SUPPORT
+
   // Objects for the second model, which will outlive the first.
   std::unique_ptr<litert::Environment> env2;
   std::optional<CompiledModel> compiled_model2;
 
   {
     // Create the first environment and model and run it.
-    LITERT_ASSERT_OK_AND_ASSIGN(auto env1, litert::Environment::Create({}));
+    LITERT_ASSERT_OK_AND_ASSIGN(
+        auto env1,
+        litert::Environment::Create(litert::EnvironmentOptions(env_options)));
     LITERT_ASSERT_OK_AND_ASSIGN(
         auto options1, CreateGpuOptions(/*external_tensors_mode=*/false));
     LITERT_ASSERT_OK_AND_ASSIGN(
@@ -168,7 +186,9 @@ TEST(CompiledModelGpuTest, DoubleEnvironmentWithInterleavedDestruction) {
     compiled_model1.Run(input_buffers, output_buffers);
 
     // Create the second environment and model.
-    LITERT_ASSERT_OK_AND_ASSIGN(auto env2_val, litert::Environment::Create({}));
+    LITERT_ASSERT_OK_AND_ASSIGN(
+        auto env2_val,
+        litert::Environment::Create(litert::EnvironmentOptions(env_options)));
     env2 = std::make_unique<litert::Environment>(std::move(env2_val));
 
     LITERT_ASSERT_OK_AND_ASSIGN(
@@ -272,7 +292,7 @@ TEST_P(CompiledModelGpuTest, WithProfiler) {
 }
 
 TEST_P(CompiledModelGpuTest, GpuEnvironment) {
-  auto env = litert::Environment::Create({});
+  auto env = litert::Environment::Create(litert::EnvironmentOptions({}));
   ASSERT_TRUE(env);
 
   LITERT_ASSERT_OK_AND_ASSIGN(
@@ -284,25 +304,27 @@ TEST_P(CompiledModelGpuTest, GpuEnvironment) {
   LITERT_ASSERT_OK_AND_ASSIGN(auto env_options, env->GetOptions());
   LITERT_ASSERT_OK_AND_ASSIGN(
       auto opencl_device_id,
-      env_options.GetOption(kLiteRtEnvOptionTagOpenClDeviceId));
+      env_options.GetOption(litert::EnvironmentOptions::Tag::kOpenClDeviceId));
   ABSL_LOG(INFO) << "OpenCL device id: "
                  << reinterpret_cast<cl_device_id>(
                         std::get<int64_t>(opencl_device_id));
   LITERT_ASSERT_OK_AND_ASSIGN(
       auto opencl_platform_id,
-      env_options.GetOption(kLiteRtEnvOptionTagOpenClPlatformId));
+      env_options.GetOption(
+          litert::EnvironmentOptions::Tag::kOpenClPlatformId));
   ABSL_LOG(INFO) << "OpenCL platform id: "
                  << reinterpret_cast<cl_platform_id>(
                         std::get<int64_t>(opencl_platform_id));
   LITERT_ASSERT_OK_AND_ASSIGN(
       auto opencl_context,
-      env_options.GetOption(kLiteRtEnvOptionTagOpenClContext));
+      env_options.GetOption(litert::EnvironmentOptions::Tag::kOpenClContext));
   ABSL_LOG(INFO) << "OpenCL context: "
                  << reinterpret_cast<cl_context>(
                         std::get<int64_t>(opencl_context));
   LITERT_ASSERT_OK_AND_ASSIGN(
       auto opencl_command_queue,
-      env_options.GetOption(kLiteRtEnvOptionTagOpenClCommandQueue));
+      env_options.GetOption(
+          litert::EnvironmentOptions::Tag::kOpenClCommandQueue));
   ABSL_LOG(INFO) << "OpenCL command queue: "
                  << reinterpret_cast<cl_command_queue>(
                         std::get<int64_t>(opencl_command_queue));
@@ -907,14 +929,15 @@ TEST(CompiledModelGpuTest, BasicOpenGlWithProvidedEglEnvironment) {
   ASSERT_TRUE(
       tflite::gpu::gl::EglEnvironment::NewEglEnvironment(&egl_env).ok());
 
-  std::vector<litert::Environment::Option> env_options;
+  std::vector<litert::EnvironmentOptions::Option> env_options;
   env_options.push_back(
-      {litert::Environment::OptionTag::EglContext,
+      {litert::EnvironmentOptions::Tag::kEglContext,
        reinterpret_cast<int64_t>(egl_env->context().context())});
-  env_options.push_back({litert::Environment::OptionTag::EglDisplay,
+  env_options.push_back({litert::EnvironmentOptions::Tag::kEglDisplay,
                          reinterpret_cast<int64_t>(egl_env->display())});
-  LITERT_ASSERT_OK_AND_ASSIGN(auto env,
-                              litert::Environment::Create(env_options));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto env,
+      litert::Environment::Create(litert::EnvironmentOptions(env_options)));
 #else
   LITERT_ASSERT_OK_AND_ASSIGN(auto env, litert::Environment::Create({}));
 #endif  // LITERT_HAS_OPENGL_SUPPORT

@@ -359,6 +359,7 @@ cc_library(
         "//litert/cc:litert_compiled_model",
         "//litert/cc:litert_element_type",
         "//litert/cc:litert_environment",
+        "//litert/cc:litert_environment_options",
         "//litert/cc:litert_expected",
         "//litert/cc:litert_macros",
         "//litert/cc:litert_model",
@@ -378,7 +379,6 @@ cc_library(
         "//tflite/c:common",
         "//tflite/profiling:model_runtime_info",
         "//tflite/profiling:profile_buffer",
-        "//tflite/profiling:profile_summarizer",
         "//tflite/tools:command_line_flags",
         "//tflite/tools:utils",
         "//tflite/tools/benchmark:benchmark_model_lib",
@@ -493,11 +493,14 @@ cc_binary(
         "//litert/cc:litert_compiled_model",
         "//litert/cc:litert_element_type",
         "//litert/cc:litert_environment",
+        "//litert/cc:litert_environment_options",
         "//litert/cc:litert_expected",
         "//litert/cc:litert_macros",
         "//litert/cc:litert_model",
         "//litert/cc:litert_options",
         "//litert/cc:litert_tensor_buffer",
+        "//litert/cc/internal:scoped_file",
+        "//litert/cc/internal:scoped_weight_source",
         "//litert/tools/flags/vendors:google_tensor_flags",
         "//litert/tools/flags/vendors:intel_openvino_flags",
         "//litert/tools/flags/vendors:mediatek_flags",
@@ -512,6 +515,113 @@ cc_binary(
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
     ] + litert_gpu_accelerator_deps(),
+)
+
+tool_test(
+    name = "run_external_cpu_test",
+    data = [
+        "//litert/test:extern_weight_model_file",
+        "//litert/test:extern_weight_test_data",
+    ],
+    tags = [
+    ],
+    tool = ":run_model",
+    tool_args = [
+        "--graph=$(location //litert/test:extern_weight_model_file)",
+        "--accelerator=cpu",
+        "--compare_numerical=true",
+    ],
+)
+
+tool_test(
+    name = "run_external_gpu_test",
+    data = [
+        "//litert/test:extern_weight_model_file",
+        "//litert/test:extern_weight_test_data",
+    ],
+    tags = [
+        "requires-gpu-nvidia",
+    ],
+    tool = ":run_model",
+    tool_args = [
+        "--graph=$(location //litert/test:extern_weight_model_file)",
+        "--accelerator=gpu",
+        "--compare_numerical=true",
+    ],
+)
+
+tool_test(
+    name = "run_external_cpu_test_single_weight",
+    data = [
+        "//litert/test:extern_weight_model_file_single_weight",
+        "//litert/test:extern_weight_test_data_single_weight",
+    ],
+    tags = [
+    ],
+    tool = ":run_model",
+    tool_args = [
+        "--graph=$(location //litert/test:extern_weight_model_file_single_weight)",
+        "--accelerator=cpu",
+        "--compare_numerical=true",
+    ],
+)
+
+tool_test(
+    name = "run_external_gpu_test_single_weight",
+    data = [
+        "//litert/test:extern_weight_model_file_single_weight",
+        "//litert/test:extern_weight_test_data_single_weight",
+    ],
+    tags = [
+        "requires-gpu-nvidia",
+    ],
+    tool = ":run_model",
+    tool_args = [
+        "--graph=$(location //litert/test:extern_weight_model_file_single_weight)",
+        "--accelerator=gpu,cpu",
+        "--compare_numerical=true",
+    ],
+)
+
+tool_test(
+    name = "run_external_scoped_cpu_test",
+    data = [
+        "//litert/test:extern_weight_model_file_single_weight",
+        "//litert/test:extern_weight_test_data_single_weight",
+    ],
+    tags = [
+    ],
+    tool = ":run_model",
+    tool_args = [
+        "--graph=$(location //litert/test:extern_weight_model_file_single_weight)",
+        "--accelerator=cpu",
+        "--compare_numerical=true",
+        "--scoped_weight_file=$(location //litert/test:extern_weight_test_data_single_weight)",
+        "--scoped_weight_group=weights.bin",
+        "--scoped_weight_offset=0",
+        "--scoped_weight_length=-1",
+    ],
+)
+
+tool_test(
+    name = "run_external_scoped_gpu_test",
+    data = [
+        "//litert/test:extern_weight_model_file_single_weight",
+        "//litert/test:extern_weight_test_data_single_weight",
+    ],
+    tags = [
+        "requires-gpu-nvidia",
+    ],
+    tool = ":run_model",
+    tool_args = [
+        "--graph={}".format(runfile_path("//litert/test:extern_weight_model_file_single_weight")),
+        "--accelerator=gpu,cpu",
+        "--compare_numerical=true",
+        "--scoped_weight_file={}".format(runfile_path("//litert/test:extern_weight_test_data_single_weight")),
+        "--scoped_weight_group=weights.bin",
+        "--scoped_weight_offset=0",
+        "--scoped_weight_length=-1",
+    ],
 )
 
 [
@@ -576,6 +686,7 @@ NUMERICS_CHECK_DEPS = [
     "//litert/cc:litert_compiled_model",
     "//litert/cc:litert_element_type",
     "//litert/cc:litert_environment",
+    "//litert/cc:litert_environment_options",
     "//litert/cc:litert_expected",
     "//litert/cc:litert_macros",
     "//litert/cc:litert_model",
@@ -590,8 +701,8 @@ cc_binary(
     deps = NUMERICS_CHECK_DEPS + [
         ":tensor_utils",
         "//litert/cc:litert_common",
-        "//litert/cc:litert_environment_options",
         "//litert/tools/flags/vendors:google_tensor_flags",
+        "//litert/tools/flags/vendors:intel_openvino_flags",
         "//litert/tools/flags/vendors:mediatek_flags",
         "//litert/tools/flags/vendors:qualcomm_flags",
     ] + select({
@@ -857,6 +968,8 @@ cc_library(
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:span",
     ],
 )
 

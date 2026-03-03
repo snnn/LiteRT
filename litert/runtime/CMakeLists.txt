@@ -39,6 +39,8 @@ set(LITERT_RUNTIME_SOURCES
     gl_buffer.cc
     gl_texture.cc
     ion_buffer.cc
+    litert_cpu_options.cc
+    litert_runtime_options.cc
     magic_number_utils.cc
     profiler.cc
     profiler_summarizer.cc
@@ -46,6 +48,7 @@ set(LITERT_RUNTIME_SOURCES
     tensor_buffer_registry.cc
     tensor_buffer_requirements.cc
     tfl_utils.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../weight_loader/external_weight_loader_litert.cc
     ${TFLITE_SOURCE_DIR}/delegates/utils/simple_opaque_delegate.cc
     ${TFLITE_SOURCE_DIR}/profiling/memory_info.cc
     ${TFLITE_SOURCE_DIR}/profiling/profile_buffer.cc

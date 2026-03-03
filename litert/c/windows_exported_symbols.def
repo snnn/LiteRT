@@ -44,8 +44,6 @@ EXPORTS
   LiteRtCompiledModelStopMetricsCollection
   LiteRtCreateAccelerator
   LiteRtCreateCompiledModel
-  LiteRtCreateCompilerOptions
-  LiteRtCreateCpuOptions
   LiteRtCreateEnvironment
   LiteRtCreateEventFromEglSyncFence
   LiteRtCreateEventFromOpenClEvent
@@ -60,7 +58,6 @@ EXPORTS
   LiteRtCreateOpaqueOptions
   LiteRtCreateOptions
   LiteRtCreateProfiler
-  LiteRtCreateRuntimeOptions
   LiteRtCreateTensorBufferFromGlBuffer
   LiteRtCreateTensorBufferFromGlTexture
   LiteRtCreateTensorBufferFromHostMemory
@@ -89,24 +86,13 @@ EXPORTS
   LiteRtExternalLiteRtBufferContextIsAsyncExecutionMode
   LiteRtExternalLiteRtBufferContextRegisterBufferRequirements
   LiteRtExternalLiteRtBufferContextRegisterTensorBuffer
-  LiteRtFindCompilerOptions
-  LiteRtFindCpuOptions
   LiteRtFindOpaqueOptionsData
-  LiteRtFindRuntimeOptions
   LiteRtGetAcceleratorEnvironment
   LiteRtGetCompiledModelEnvironment
   LiteRtGetCompiledModelInputBufferRequirements
   LiteRtGetCompiledModelInputTensorLayout
   LiteRtGetCompiledModelOutputBufferRequirements
   LiteRtGetCompiledModelOutputTensorLayouts
-  LiteRtGetCompilerOptionsIdentifier
-  LiteRtGetCompilerOptionsPartitionStrategy
-  LiteRtGetCpuOptionsIdentifier
-  LiteRtGetCpuOptionsNumThread
-  LiteRtGetCpuOptionsXNNPackFlags
-  LiteRtGetCpuOptionsXnnPackWeightCacheFileDescriptor
-  LiteRtGetCpuOptionsXnnPackWeightCachePath
-  LiteRtGetDummyCompilerOptions
   LiteRtGetEnvironmentOptions
   LiteRtGetEnvironmentOptionsValue
   LiteRtGetEventCustomNativeEvent
@@ -116,9 +102,10 @@ EXPORTS
   LiteRtGetEventSyncFenceFd
   LiteRtGetExternalLiteRtBufferContextTensorBuffer
   LiteRtGetGpuAcceleratorCompilationOptionsAllowSrcQuantizedFcConvOps
-  LiteRtGetGpuAcceleratorCompilationOptionsBufferStorageType
-  LiteRtGetGpuAcceleratorCompilationOptionsDisableShaderOptimization
   LiteRtGetGpuAcceleratorCompilationOptionsBufferStorageTensorPattern
+  LiteRtGetGpuAcceleratorCompilationOptionsBufferStorageType
+  LiteRtGetGpuAcceleratorCompilationOptionsCacheCompiledProgramsOnly
+  LiteRtGetGpuAcceleratorCompilationOptionsDisableShaderOptimization
   LiteRtGetGpuAcceleratorCompilationOptionsExternalTensorPattern
   LiteRtGetGpuAcceleratorCompilationOptionsMadviseOriginalSharedTensors
   LiteRtGetGpuAcceleratorCompilationOptionsModelCacheKey
@@ -133,6 +120,7 @@ EXPORTS
   LiteRtGetGpuAcceleratorRuntimeOptionsNumThreadsToCompile
   LiteRtGetGpuAcceleratorRuntimeOptionsNumThreadsToUpload
   LiteRtGetGpuAcceleratorRuntimeOptionsPreferredDeviceSubstr
+  LiteRtGetGpuAcceleratorRuntimeOptionsWaitForWeightsConversionComplete
   LiteRtGetGpuAcceleratorRuntimeOptionsWaitType
   LiteRtGetGpuOptionsBenchmarkMode
   LiteRtGetGpuOptionsConstantTensorSharing
@@ -176,10 +164,6 @@ EXPORTS
   LiteRtGetProfilerEvents
   LiteRtGetQuantizationTypeId
   LiteRtGetRankedTensorType
-  LiteRtGetRuntimeOptionsCompressQuantizationZeroPoints
-  LiteRtGetRuntimeOptionsEnableProfiling
-  LiteRtGetRuntimeOptionsErrorReporterMode
-  LiteRtGetRuntimeOptionsIdentifier
   LiteRtGetSignatureInputName
   LiteRtGetSignatureInputTensor
   LiteRtGetSignatureInputTensorByIndex
@@ -220,22 +204,22 @@ EXPORTS
   LiteRtGoogleTensorOptionsGet
   LiteRtGoogleTensorOptionsGetDumpOpTimings
   LiteRtGoogleTensorOptionsGetEnable4BitCompilation
+  LiteRtGoogleTensorOptionsGetEnableDynamicRangeQuantization
   LiteRtGoogleTensorOptionsGetEnableLargeModelSupport
   LiteRtGoogleTensorOptionsGetFloatTruncationType
   LiteRtGoogleTensorOptionsGetIdentifier
   LiteRtGoogleTensorOptionsGetInt64ToInt32Truncation
   LiteRtGoogleTensorOptionsGetOutputDir
   LiteRtGoogleTensorOptionsGetShardingIntensity
-  LiteRtGoogleTensorOptionsGetEnableDynamicRangeQuantization
   LiteRtGoogleTensorOptionsGetTestingFlags
   LiteRtGoogleTensorOptionsSetDumpOpTimings
   LiteRtGoogleTensorOptionsSetEnable4BitCompilation
+  LiteRtGoogleTensorOptionsSetEnableDynamicRangeQuantization
   LiteRtGoogleTensorOptionsSetEnableLargeModelSupport
   LiteRtGoogleTensorOptionsSetFloatTruncationType
   LiteRtGoogleTensorOptionsSetInt64ToInt32Truncation
   LiteRtGoogleTensorOptionsSetOutputDir
   LiteRtGoogleTensorOptionsSetShardingIntensity
-  LiteRtGoogleTensorOptionsSetEnableDynamicRangeQuantization
   LiteRtGoogleTensorOptionsSetTestingFlags
   LiteRtGpuEnvironmentCreate
   LiteRtHasTensorBufferEvent
@@ -317,26 +301,21 @@ EXPORTS
   LiteRtResetProfiler
   LiteRtRunCompiledModel
   LiteRtRunCompiledModelAsync
-  LiteRtRunCompiledModelWithOptions
   LiteRtRunCompiledModelAsyncWithOptions
-  LiteRtRunCompiledModelWithSchedulingInfo
   LiteRtRunCompiledModelAsyncWithSchedulingInfo
+  LiteRtRunCompiledModelWithOptions
+  LiteRtRunCompiledModelWithSchedulingInfo
   LiteRtSerializeModel
   LiteRtSerializeModelWithSignatures
   LiteRtSetAcceleratorGetHardwareSupport
   LiteRtSetAcceleratorGetName
   LiteRtSetAcceleratorGetVersion
   LiteRtSetCompiledModelCancellationFunction
-  LiteRtSetCompilerOptionsPartitionStrategy
-  LiteRtSetCpuOptionsNumThread
-  LiteRtSetCpuOptionsXNNPackFlags
-  LiteRtSetCpuOptionsXnnPackWeightCacheFileDescriptor
-  LiteRtSetCpuOptionsXnnPackWeightCachePath
   LiteRtSetCustomEvent
   LiteRtSetDelegateFunction
-  LiteRtSetDummyCompilerOptions
   LiteRtSetEnvironmentOptionsValue
   LiteRtSetGpuAcceleratorCompilationOptionsAllowSrcQuantizedFcConvOps
+  LiteRtSetGpuAcceleratorCompilationOptionsCacheCompiledProgramsOnly
   LiteRtSetGpuAcceleratorCompilationOptionsDisableShaderOptimization
   LiteRtSetGpuAcceleratorCompilationOptionsMadviseOriginalSharedTensors
   LiteRtSetGpuAcceleratorCompilationOptionsModelCacheKey
@@ -352,6 +331,7 @@ EXPORTS
   LiteRtSetGpuAcceleratorRuntimeOptionsNumThreadsToCompile
   LiteRtSetGpuAcceleratorRuntimeOptionsNumThreadsToUpload
   LiteRtSetGpuAcceleratorRuntimeOptionsPreferredDeviceSubstr
+  LiteRtSetGpuAcceleratorRuntimeOptionsWaitForWeightsConversionComplete
   LiteRtSetGpuAcceleratorRuntimeOptionsWaitType
   LiteRtSetGpuOptionsBenchmarkMode
   LiteRtSetGpuOptionsConstantTensorSharing
@@ -364,9 +344,6 @@ EXPORTS
   LiteRtSetOpaqueOptionsHash
   LiteRtSetOptionsHardwareAccelerators
   LiteRtSetProfilerCurrentEventSource
-  LiteRtSetRuntimeOptionsCompressQuantizationZeroPoints
-  LiteRtSetRuntimeOptionsEnableProfiling
-  LiteRtSetRuntimeOptionsErrorReporterMode
   LiteRtSetTensorBufferEvent
   LiteRtSignalEvent
   LiteRtStartProfiler

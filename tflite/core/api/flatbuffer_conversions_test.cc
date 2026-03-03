@@ -754,8 +754,9 @@ TEST_F(StablehloCompositeFlatbufferConversionsTest, Succeeds) {
   EXPECT_THAT(output_data->name, StrEq("odml.rms_norm.impl"));
   EXPECT_THAT(output_data->version, Eq(7));
   EXPECT_THAT(output_data->subgraph_index, Eq(3));
-  EXPECT_THAT(std::make_tuple(output_data->attributes, output_data->attributes_size),
-              ElementsAre(1, 2, 3, 4));
+  EXPECT_THAT(
+      std::make_tuple(output_data->attributes, output_data->attributes_size),
+      ElementsAre(1, 2, 3, 4));
 }
 
 TEST_F(StablehloCompositeFlatbufferConversionsTest,
@@ -774,10 +775,9 @@ TEST_F(StablehloCompositeFlatbufferConversionsTest,
       ParseOpData(stablehlo_composite_op, BuiltinOperator_STABLEHLO_COMPOSITE,
                   &mock_reporter_, &mock_allocator_, (void**)&output_data),
       kTfLiteError);
-  EXPECT_THAT(
-      mock_reporter_.GetString(),
-      HasSubstr("'stablehlo.composite' missing required option "
-                "'composite_attributes'."));
+  EXPECT_THAT(mock_reporter_.GetString(),
+              HasSubstr("'stablehlo.composite' missing required option "
+                        "'composite_attributes'."));
 }
 
 TEST_F(StablehloCompositeFlatbufferConversionsTest, FailsWithMissingName) {
