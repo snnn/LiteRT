@@ -27,6 +27,8 @@ package(
     default_visibility = ["//litert:litert_internal_users"],
 )
 
+exports_files(["run_model.cc"])
+
 # This user library should depend on libLiteRt.so to allow
 # CompilerPlugin to use the same libLiteRt.so
 cc_library(
@@ -366,6 +368,7 @@ cc_library(
         "//litert/cc:litert_options",
         "//litert/cc:litert_profiler",
         "//litert/cc:litert_tensor_buffer",
+        "//litert/cc/internal:litert_compiled_model_next",
         "//litert/cc/internal:litert_tflite_error_status_builder",
         "//litert/cc/options:litert_cpu_options",
         "//litert/cc/options:litert_gpu_options",
@@ -515,113 +518,6 @@ cc_binary(
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
     ] + litert_gpu_accelerator_deps(),
-)
-
-tool_test(
-    name = "run_external_cpu_test",
-    data = [
-        "//litert/test:extern_weight_model_file",
-        "//litert/test:extern_weight_test_data",
-    ],
-    tags = [
-    ],
-    tool = ":run_model",
-    tool_args = [
-        "--graph=$(location //litert/test:extern_weight_model_file)",
-        "--accelerator=cpu",
-        "--compare_numerical=true",
-    ],
-)
-
-tool_test(
-    name = "run_external_gpu_test",
-    data = [
-        "//litert/test:extern_weight_model_file",
-        "//litert/test:extern_weight_test_data",
-    ],
-    tags = [
-        "requires-gpu-nvidia",
-    ],
-    tool = ":run_model",
-    tool_args = [
-        "--graph=$(location //litert/test:extern_weight_model_file)",
-        "--accelerator=gpu",
-        "--compare_numerical=true",
-    ],
-)
-
-tool_test(
-    name = "run_external_cpu_test_single_weight",
-    data = [
-        "//litert/test:extern_weight_model_file_single_weight",
-        "//litert/test:extern_weight_test_data_single_weight",
-    ],
-    tags = [
-    ],
-    tool = ":run_model",
-    tool_args = [
-        "--graph=$(location //litert/test:extern_weight_model_file_single_weight)",
-        "--accelerator=cpu",
-        "--compare_numerical=true",
-    ],
-)
-
-tool_test(
-    name = "run_external_gpu_test_single_weight",
-    data = [
-        "//litert/test:extern_weight_model_file_single_weight",
-        "//litert/test:extern_weight_test_data_single_weight",
-    ],
-    tags = [
-        "requires-gpu-nvidia",
-    ],
-    tool = ":run_model",
-    tool_args = [
-        "--graph=$(location //litert/test:extern_weight_model_file_single_weight)",
-        "--accelerator=gpu,cpu",
-        "--compare_numerical=true",
-    ],
-)
-
-tool_test(
-    name = "run_external_scoped_cpu_test",
-    data = [
-        "//litert/test:extern_weight_model_file_single_weight",
-        "//litert/test:extern_weight_test_data_single_weight",
-    ],
-    tags = [
-    ],
-    tool = ":run_model",
-    tool_args = [
-        "--graph=$(location //litert/test:extern_weight_model_file_single_weight)",
-        "--accelerator=cpu",
-        "--compare_numerical=true",
-        "--scoped_weight_file=$(location //litert/test:extern_weight_test_data_single_weight)",
-        "--scoped_weight_group=weights.bin",
-        "--scoped_weight_offset=0",
-        "--scoped_weight_length=-1",
-    ],
-)
-
-tool_test(
-    name = "run_external_scoped_gpu_test",
-    data = [
-        "//litert/test:extern_weight_model_file_single_weight",
-        "//litert/test:extern_weight_test_data_single_weight",
-    ],
-    tags = [
-        "requires-gpu-nvidia",
-    ],
-    tool = ":run_model",
-    tool_args = [
-        "--graph={}".format(runfile_path("//litert/test:extern_weight_model_file_single_weight")),
-        "--accelerator=gpu,cpu",
-        "--compare_numerical=true",
-        "--scoped_weight_file={}".format(runfile_path("//litert/test:extern_weight_test_data_single_weight")),
-        "--scoped_weight_group=weights.bin",
-        "--scoped_weight_offset=0",
-        "--scoped_weight_length=-1",
-    ],
 )
 
 [

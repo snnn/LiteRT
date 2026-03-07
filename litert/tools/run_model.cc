@@ -420,7 +420,7 @@ Expected<void> RunModel() {
     // Non-language model, Fill input buffers with sample data.
     for (size_t i = 0; i < input_buffers.size(); ++i) {
       auto& buffer = input_buffers[i];
-      LITERT_RETURN_IF_ERROR(FillInputBuffer(buffer));
+      LITERT_RETURN_IF_ERROR(tensor_utils::FillBufferWithRandomData(buffer));
     }
   }
 
@@ -429,6 +429,7 @@ Expected<void> RunModel() {
       LITERT_RETURN_IF_ERROR(PrintTensorBuffer(input_buffers[i], "Input", i));
     }
   }
+
   ABSL_LOG(INFO) << "Prepare output buffers";
 
   LITERT_ASSIGN_OR_RETURN(auto output_buffers,

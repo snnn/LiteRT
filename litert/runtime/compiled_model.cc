@@ -84,7 +84,9 @@
 #include "litert/runtime/custom_op_dispatcher.h"
 #include "litert/runtime/dispatch/dispatch_opaque_options.h"
 #include "litert/runtime/external_litert_buffer_context.h"
+#if !defined(LITERT_DISABLE_CPU)
 #include "litert/runtime/litert_cpu_options.h"
+#endif  // !defined(LITERT_DISABLE_CPU)
 #include "litert/runtime/litert_runtime_options.h"
 #include "litert/runtime/magic_number_utils.h"
 #include "litert/runtime/metrics.h"
@@ -324,6 +326,7 @@ Expected<void> LiteRtCompiledModelT::InitializeRuntime(
       }
     }
 
+#if !defined(LITERT_DISABLE_CPU)
     if (auto cpu_options_data = litert::FindOpaqueData<const char>(
             opaque_options, LiteRtCpuOptionsT::Identifier());
         cpu_options_data) {
@@ -337,6 +340,7 @@ Expected<void> LiteRtCompiledModelT::InitializeRuntime(
         num_threads = cpu_options.xnn.num_threads;
       }
     }
+#endif  // !defined(LITERT_DISABLE_CPU)
   }
 
   tflite::InterpreterBuilder builder(
@@ -993,7 +997,8 @@ LiteRtCompiledModelT::GetTensorBufferRequirements(const TfLiteTensor* tensor) {
       /*num_strides=*/1, cpu_buffer_strides, &litert_cpu_buffer_requirements));
   cpu_buffer_requirements_[tensor_id] =
       LiteRtTensorBufferRequirementsPtr(litert_cpu_buffer_requirements);
-  return litert_cpu_buffer_requirements;
+  return const_cast<LiteRtTensorBufferRequirementsT*>(
+      litert_cpu_buffer_requirements);
 }
 
 Expected<const LiteRtTensorBufferRequirementsT*>
@@ -1592,7 +1597,7 @@ Expected<void> LiteRtCompiledModelT::RunCApi(
   return result;
 }
 
-Expected<void> LiteRtCompiledModelT::StartMetricsCollection(int detail_level) {
+Expected<void> LiteRtCompiledModelT::StartMetricsCollection(int detail_level) const {
   if (detail_level < 0) {
     return Unexpected(kLiteRtStatusErrorInvalidArgument,
                       "Detail level must be >= 0");
@@ -1606,7 +1611,7 @@ Expected<void> LiteRtCompiledModelT::StartMetricsCollection(int detail_level) {
   return {};
 }
 
-Expected<LiteRtMetricsT> LiteRtCompiledModelT::StopMetricsCollection() {
+Expected<LiteRtMetricsT> LiteRtCompiledModelT::StopMetricsCollection() const {
   std::vector<LiteRtMetricsT::Metric> metrics;
   for (auto& delegate : delegates_) {
     if (delegate.StopMetricsCollection) {
@@ -1846,7 +1851,7 @@ void LiteRtCompiledModelT::ReportError(const char* format, ...) {
   va_end(args);
 }
 
-Expected<void> LiteRtCompiledModelT::ClearErrors() {
+Expected<void> LiteRtCompiledModelT::ClearErrors() const {
   if (!error_reporter_) {
     return Unexpected(kLiteRtStatusErrorInvalidArgument,
                       "No error reporter configured");
@@ -1864,7 +1869,7 @@ Expected<void> LiteRtCompiledModelT::ClearErrors() {
   return {};
 }
 
-Expected<std::string> LiteRtCompiledModelT::GetErrorMessages() {
+Expected<std::string> LiteRtCompiledModelT::GetErrorMessages() const {
   if (!error_reporter_) {
     return Unexpected(kLiteRtStatusErrorInvalidArgument,
                       "No error reporter configured");
