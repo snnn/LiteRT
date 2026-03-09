@@ -154,6 +154,18 @@ class CompiledModel:
     """
     return self._model.GetInputTensorDetails(signature_key)
 
+  def get_output_tensor_details(self, signature_key: str) -> Dict[str, Any]:
+    """Returns details of output tensors for a given signature.
+
+    Args:
+      signature_key: Name of the signature.
+
+    Returns:
+      Dictionary mapping output tensor names to their details (name, index,
+      dtype, shape, etc.).
+    """
+    return self._model.GetOutputTensorDetails(signature_key)
+
   def get_input_buffer_requirements(
       self, input_index: int, signature_index: int = 0
   ) -> Dict[str, Any]:

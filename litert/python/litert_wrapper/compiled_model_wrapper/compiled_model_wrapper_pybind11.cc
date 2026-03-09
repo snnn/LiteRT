@@ -190,6 +190,14 @@ PYBIND11_MODULE(_pywrap_litert_compiled_model_wrapper, m) {
              }
              return py::reinterpret_steal<py::object>(r);
            })
+      .def("GetOutputTensorDetails",
+           [](CompiledModelWrapper& self, const std::string& sig_key) {
+             PyObject* r = self.GetOutputTensorDetails(sig_key.c_str());
+             if (!r) {
+               throw py::error_already_set();
+             }
+             return py::reinterpret_steal<py::object>(r);
+           })
       .def("RunByName",
            [](CompiledModelWrapper& self, const std::string& sig_key,
               py::object input_map, py::object output_map) {
