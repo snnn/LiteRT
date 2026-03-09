@@ -55,6 +55,56 @@ enum class ElementType {
   TfVariant = kLiteRtElementTypeTfVariant,
 };
 
+// Converts ElementType to a string representation for Python.
+inline const char* ElementTypeToString(ElementType dtype) {
+  switch (dtype) {
+    case litert::ElementType::None:
+      return "None";
+    case litert::ElementType::Bool:
+      return "Bool";
+    case litert::ElementType::Int2:
+      return "Int2";
+    case litert::ElementType::Int4:
+      return "Int4";
+    case litert::ElementType::Int8:
+      return "Int8";
+    case litert::ElementType::Int16:
+      return "Int16";
+    case litert::ElementType::Int32:
+      return "Int32";
+    case litert::ElementType::Int64:
+      return "Int64";
+    case litert::ElementType::UInt8:
+      return "UInt8";
+    case litert::ElementType::UInt16:
+      return "UInt16";
+    case litert::ElementType::UInt32:
+      return "UInt32";
+    case litert::ElementType::UInt64:
+      return "UInt64";
+    case litert::ElementType::Float16:
+      return "Float16";
+    case litert::ElementType::BFloat16:
+      return "BFloat16";
+    case litert::ElementType::Float32:
+      return "Float32";
+    case litert::ElementType::Float64:
+      return "Float64";
+    case litert::ElementType::Complex64:
+      return "Complex64";
+    case litert::ElementType::Complex128:
+      return "Complex128";
+    case litert::ElementType::TfResource:
+      return "TfResource";
+    case litert::ElementType::TfString:
+      return "TfString";
+    case litert::ElementType::TfVariant:
+      return "TfVariant";
+    default:
+      return "unknown";
+  }
+}
+
 /// @brief Gets the number of bytes of a single element of a given type.
 inline constexpr std::optional<ByteWidth> GetByteWidth(ElementType ty) {
   if (ty == ElementType::Bool)
