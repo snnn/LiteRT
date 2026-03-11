@@ -19,6 +19,8 @@ set(LITERT_C_API_SOURCES
     internal/litert_accelerator.cc
     internal/litert_accelerator_registration.cc
     internal/litert_delegate_wrapper.cc
+    internal/litert_external_litert_buffer_context.cc
+    internal/litert_runtime_context.cc
     internal/litert_tensor_buffer_registry.cc
     litert_common.cc
     litert_compiled_model.cc
@@ -128,7 +130,7 @@ add_subdirectory(options)
 # C API shared library
 add_library(litert_runtime_c_api_shared_lib SHARED empty.cc)
 set_target_properties(litert_runtime_c_api_shared_lib PROPERTIES
-    OUTPUT_NAME "LiteRtRuntimeCApi"
+    OUTPUT_NAME "LiteRt"
     POSITION_INDEPENDENT_CODE ON
 )
 set_target_properties(litert_runtime_c_api_shared_lib PROPERTIES INTERFACE_LINK_LIBRARIES "")

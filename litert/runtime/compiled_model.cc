@@ -52,6 +52,7 @@
 #include "litert/c/internal/litert_accelerator.h"
 #include "litert/c/internal/litert_delegate_wrapper.h"
 #include "litert/c/internal/litert_logging.h"
+#include "litert/c/internal/litert_runtime_context.h"
 #include "litert/c/internal/litert_scheduling_info.h"
 #include "litert/c/litert_any.h"
 #include "litert/c/litert_common.h"
@@ -265,7 +266,9 @@ Expected<void> LiteRtCompiledModelT::InitializeRuntime(
   if (hardware_accelerators & kLiteRtHwAcceleratorGpu) {
     const char* accelerator_supported_custom_ops[] = {
         "Convolution2DTransposeBias", "MaxPoolingWithArgmax2D",
-        "MaxUnpooling2D", "Resampler"};
+        "MaxUnpooling2D", "Resampler", "custom_call.GroupNorm",
+        "custom_call.LayerNorm", "custom_call.RmsNorm",
+        "custom_call.PixelShuffle"};
     for (const auto& op_name : accelerator_supported_custom_ops) {
       resolver.AddCustom(op_name, &sStubRegistration);
     }
@@ -780,14 +783,18 @@ Expected<LiteRtCompiledModelT::Ptr> LiteRtCompiledModelT::Create(
 
     LiteRtDelegateWrapper delegate_wrapper = nullptr;
     LITERT_RETURN_IF_ERROR(accelerator->CreateDelegate(
-        accelerator.get(), jit_compilation_options, &delegate_wrapper));
+        LrtGetRuntimeContext(), env, accelerator.get(), jit_compilation_options,
+        &delegate_wrapper));
 
     TfLiteOpaqueDelegate* delegate_ptr = nullptr;
-    LiteRtUnwrapDelegate(delegate_wrapper, &delegate_ptr);
+    LrtGetRuntimeContext()->unwrap_delegate(delegate_wrapper, &delegate_ptr);
 
     auto delegate = std::unique_ptr<LiteRtDelegateWrapperT,
                                     std::function<void(LiteRtDelegateWrapper)>>{
-        delegate_wrapper, accelerator->DestroyDelegate};
+        delegate_wrapper, [destroy_fn = accelerator->DestroyDelegate](
+                              LiteRtDelegateWrapper wrapper) {
+          if (destroy_fn) destroy_fn(LrtGetRuntimeContext(), wrapper);
+        }};
 
     if (compiled_model->interp_->ModifyGraphWithDelegate(delegate_ptr) !=
         kTfLiteOk) {
@@ -1605,7 +1612,7 @@ Expected<void> LiteRtCompiledModelT::StartMetricsCollection(int detail_level) co
   for (auto& delegate : delegates_) {
     if (delegate.StartMetricsCollection) {
       LITERT_RETURN_IF_ERROR(delegate.StartMetricsCollection(
-          delegate.delegate.get(), detail_level));
+          LrtGetRuntimeContext(), delegate.delegate.get(), detail_level));
     }
   }
   return {};
@@ -1617,7 +1624,8 @@ Expected<LiteRtMetricsT> LiteRtCompiledModelT::StopMetricsCollection() const {
     if (delegate.StopMetricsCollection) {
       LiteRtMetricsT accelerator_metrics;
       LITERT_RETURN_IF_ERROR(delegate.StopMetricsCollection(
-          delegate.delegate.get(), &accelerator_metrics));
+          LrtGetRuntimeContext(), delegate.delegate.get(),
+          &accelerator_metrics));
       metrics.insert(
           metrics.end(),
           std::make_move_iterator(accelerator_metrics.metrics.begin()),

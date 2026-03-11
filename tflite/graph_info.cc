@@ -293,8 +293,8 @@ TfLiteStatus PartitionGraphIntoIndependentNodeSubsets(
     }
   }
   return PartitionGraphIntoIndependentNodeSubsetsImpl(
-      info, nodes_to_partition, node_subsets, greedily, *control_edges,
-      disable_node_fusion)
+             info, nodes_to_partition, node_subsets, greedily, *control_edges,
+             disable_node_fusion)
       .Partition();
 }
 

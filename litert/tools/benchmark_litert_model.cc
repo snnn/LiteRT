@@ -97,8 +97,8 @@ Expected<Options> CreateCompiledModelOptions(const BenchmarkParams& params) {
             kOptimizeForInferenceO3);
 
     // MTK options
-    LITERT_ASSIGN_OR_ABORT(auto mtk_opts,
-                           ::litert::mediatek::MediatekOptions::Create());
+    LITERT_ASSIGN_OR_ABORT(auto& mtk_opts,
+                           compilation_options.GetMediatekOptions());
     if (mediatek_nerun_pilot_version == "version9") {
       mtk_opts.SetNeronSDKVersionType(
           kLiteRtMediatekOptionsNeronSDKVersionTypeVersion9);
@@ -108,7 +108,6 @@ Expected<Options> CreateCompiledModelOptions(const BenchmarkParams& params) {
     mtk_opts.SetPerformanceMode(
         kLiteRtMediatekNeuronAdapterPerformanceModeNeuronPreferTurboBoost);
     mtk_opts.SetEnableL1CacheOptimizations(true);
-    compilation_options.AddOpaqueOptions(std::move(mtk_opts));
     // TODO(yunandrew): Add options for other NPU backends.
   }
 

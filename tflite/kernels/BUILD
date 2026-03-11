@@ -535,7 +535,6 @@ cc_library(
         ":op_macros",
         "//tflite:array",
         "//tflite:kernel_api",
-        "//tflite/core:subgraph",
         "//tflite/core/c:common",
         "//tflite/kernels/internal:cppmath",
         "//tflite/kernels/internal:quantization_util",
@@ -3462,6 +3461,14 @@ tflite_combine_cc_tests(
     name = "combined_all_kernel_with_simple_allocator_tests",
     args = ["--use_simple_allocator=true"],
     deps_conditions = [":test_main"],
+)
+
+# Test the XNNPACK delegate
+tflite_combine_cc_tests(
+    name = "combined_all_kernel_with_xnnpack_tests",
+    args = ["--use_xnnpack=true"],
+    deps_conditions = [":test_main"],
+    shard_count = 50,
 )
 
 tflite_self_contained_libs_test_suite(name = "self_contained_libs_tests")

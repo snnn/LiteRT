@@ -175,12 +175,14 @@ Qnn_DataType_t TensorWrapper::GetDataType() const {
 }
 
 bool TensorWrapper::operator==(const TensorWrapper& other) const {
-  // Compare the address
+  // Compare the address.
   if (this == &other) {
     return true;
   }
-
-  // Compare the value
+  // Compare the name.
+  if (!miscs::IsStrEq(qnn_tensor_.v2.name, other.qnn_tensor_.v2.name))
+    return false;
+  // Compare the value.
   if (qnn_tensor_.version != other.qnn_tensor_.version) return false;
   if (qnn_tensor_.v2.type != other.qnn_tensor_.v2.type) return false;
   if (qnn_tensor_.v2.dataFormat != other.qnn_tensor_.v2.dataFormat)
@@ -325,15 +327,11 @@ void TensorWrapper::ConvertQint16ToQuint16() {
   } else if (IsPerChannelQuant()) {
     const auto& q_param =
         std::get<AxisScaleOffsetQuantizeParamsWrapper>(GetQuantParams());
-    std::int32_t axis = q_param.GetAxis();
-    std::vector<float> scales;
-    q_param.GetScales(scales);
-    std::vector<std::int32_t> zero_points;
-    q_param.GetZeroPoints(zero_points);
+    std::vector<int32_t> zero_points = q_param.GetZeroPoints();
     std::for_each(zero_points.begin(), zero_points.end(),
                   [](std::int32_t& val) { val += kUint16ZeroPoint; });
     quantize_params_.emplace<AxisScaleOffsetQuantizeParamsWrapper>(
-        axis, absl::MakeSpan(scales), absl::MakeSpan(zero_points));
+        q_param.GetAxis(), q_param.GetScales(), zero_points);
   }
 
   UpdateQnnQuantParams();

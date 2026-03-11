@@ -100,11 +100,6 @@ TfLiteStatus GetOutputSafe(const TfLiteContext* context, const TfLiteNode* node,
 const TfLiteTensor* GetOptionalInputTensor(const TfLiteContext* context,
                                            const TfLiteNode* node, int index);
 
-// Returns true if `tensor_index` is backed by an external buffer identifier in
-// the current subgraph.
-bool IsTensorBackedByExternalBuffer(const TfLiteContext* context,
-                                    int tensor_index);
-
 #ifndef TF_LITE_STATIC_MEMORY
 // Note: You must check if result is not null:
 //
@@ -336,6 +331,9 @@ TfLiteStatus CalculateShapeForBroadcast(TfLiteContext* context,
 
 // Return the size of given type in bytes. Return 0 in case of string.
 int TfLiteTypeGetSize(TfLiteType type);
+
+// Return the size of given type in bits. Returns 0 in case of string.
+int TfLiteTypeGetSizeBits(TfLiteType type);
 
 // Whether the current platform is mobile (Android or iOS).
 bool IsMobilePlatform();
