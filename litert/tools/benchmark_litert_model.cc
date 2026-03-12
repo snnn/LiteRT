@@ -254,7 +254,9 @@ TfLiteStatus BenchmarkLiteRtModel::Init() {
       AsTfLiteStatus(_ << "Failed to create litert environment."));
   environment_ = std::make_unique<litert::Environment>(std::move(env_result));
 
-  auto compilation_options = CreateCompiledModelOptions(params_);
+  LITERT_ASSIGN_OR_RETURN(
+      auto compilation_options, CreateCompiledModelOptions(params_),
+      AsTfLiteStatus(_ << "Failed to create compilation options."));
   LITERT_ASSIGN_OR_RETURN(auto compiled_model_result,
                           litert::CompiledModelNext::Create(
                               *environment_, *model_, compilation_options),
