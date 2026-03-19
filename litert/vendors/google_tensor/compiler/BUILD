@@ -58,12 +58,15 @@ litert_dynamic_lib(
     ],
     deps = [
         ":google_tensor_options_cc_proto",
+        "//litert/c:litert_common",
+        "//litert/c:litert_op_options",
         "//litert/c:litert_runtime_c_api_shared_lib",
         "//litert/c/internal:litert_logging",
+        "//litert/c/options:litert_google_tensor_options",
         "//litert/cc:litert_buffer_ref",
         "//litert/cc:litert_macros",
         "//litert/cc/dynamic_runtime:litert_extended_model",
-        "//litert/cc/dynamic_runtime/options:litert_google_tensor_options",
+        "//litert/cc/options:litert_google_tensor_options",
         "//litert/vendors/cc:options_helper",
         "//litert/vendors/google_tensor:adapter",
         "@com_google_absl//absl/cleanup",
@@ -80,6 +83,7 @@ cc_test(
     ],
     data = [
         "//litert/test:mlir_test_data",
+        "//litert/test:mlir_test_data_stablehlo",
         "//litert/test:tflite_test_data",
     ],
     linkopts = select({
@@ -110,11 +114,13 @@ cc_test(
     }),
     deps = [
         ":compiler_plugin",  # buildcleaner: keep
+        "//litert/c:litert_common",
         "//litert/c/options:litert_google_tensor_options",
         "//litert/cc:litert_api_with_dynamic_runtime",
         "//litert/test:common",
         "//litert/test:matchers",
         "//litert/vendors/cc:litert_compiler_plugin",
+        "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest_main",
     ],

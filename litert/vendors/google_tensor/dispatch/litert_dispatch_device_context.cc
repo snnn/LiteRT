@@ -15,8 +15,8 @@
 #include "litert/vendors/google_tensor/dispatch/litert_dispatch_device_context.h"
 
 #include <inttypes.h>
+
 #include <cstddef>
-#include <cstdint>
 #include <optional>
 #include <utility>
 
@@ -24,25 +24,26 @@
 #include <android/hardware_buffer.h>
 #endif  // __ANDROID__
 
-#include "absl/base/nullability.h"  // from @com_google_absl
 #include "absl/cleanup/cleanup.h"  // from @com_google_absl
 #include "litert/c/internal/litert_logging.h"
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_model_types.h"
 #include "litert/c/litert_tensor_buffer.h"
 #include "litert/c/litert_tensor_buffer_types.h"
-#include "litert/cc/litert_expected.h"
 #include "litert/cc/litert_macros.h"
 #include "litert/vendors/c/litert_dispatch.h"
+#if LITERT_HAS_DARWINN_OPTIONS_SUPPORT
+#include "litert/vendors/google_tensor/dispatch/google/darwinn_options_utils.h"
+#include "litert/vendors/google_tensor/dispatch/google/litert_darwinn_runtime_options.h"
+#endif  // LITERT_HAS_DARWINN_OPTIONS_SUPPORT
 #include "litert/vendors/google_tensor/dispatch/dispatch_api_config.h"
 #include "litert/vendors/google_tensor/dispatch/dispatch_api_macros.h"
-#include "litert/vendors/google_tensor/dispatch/litert_darwinn_runtime_options.h"
 #include "litert/vendors/google_tensor/dispatch/sb_api.h"
 
 namespace gt = litert::google_tensor;
 
 LiteRtStatus LiteRtDispatchDeviceContextT::Create(
-    LiteRtDispatchDeviceContext& device_context) {
+    LiteRtOptions options, LiteRtDispatchDeviceContext& device_context) {
   ThrContext* thr_context = thrContextCreate();
   if (thr_context == nullptr) {
     LITERT_LOG(LITERT_ERROR, "Failed to create SB context");
@@ -56,34 +57,15 @@ LiteRtStatus LiteRtDispatchDeviceContextT::Create(
                                 thr_context, "edgetpu_use_tpu_tachyon", "1"),
                             "Failed to enable Tachyon SB");
 
-  // If provided, store DarwiNN options to be applied to graphs.
-  std::optional<DarwinnOptionsData> options_data;
-  if (litert::LiteRtDarwinnRuntimeOptionsT* absl_nullable darwinn_options =
-          gt::GetTheDarwinnOptions();
-      darwinn_options != nullptr) {
-    options_data.emplace();
-
-    options_data->inference_power_state =
-        darwinn_options->inference_power_state;
-    options_data->inference_memory_power_state =
-        darwinn_options->inference_memory_power_state;
-
-    // Use default values if explicitly set to -1
-    if (darwinn_options->inference_priority != -1) {
-      options_data->inference_priority = darwinn_options->inference_priority;
-    }
-
-    options_data->atomic_inference = darwinn_options->atomic_inference;
-    options_data->prefer_coherent = darwinn_options->prefer_coherent;
-
-    LITERT_LOG(LITERT_INFO,
-               "DarwiNN runtime options will be applied to graphs");
-  }
-
   // The returned instance must be allocated with `new`, as it will be
   // deallocated via `delete` in `Destroy`.
-  device_context =
-      new LiteRtDispatchDeviceContextT(thr_context, std::move(options_data));
+  device_context = new LiteRtDispatchDeviceContextT(thr_context);
+
+#if LITERT_HAS_DARWINN_OPTIONS_SUPPORT
+  std::optional<litert::LiteRtDarwinnRuntimeOptionsT> options_data =
+      gt::GetDarwinnOptionsData(options);
+  device_context->darwinn_options() = std::move(options_data);
+#endif  // LITERT_HAS_DARWINN_OPTIONS_SUPPORT
 
   std::move(thr_context_cleanup).Cancel();
   return kLiteRtStatusOk;

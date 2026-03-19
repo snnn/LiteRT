@@ -45,11 +45,20 @@ cc_library(
 )
 
 cc_library(
+    name = "litert_options_helper",
+    hdrs = ["litert_options_helper.h"],
+    deps = [
+        "@com_google_absl//absl/strings:string_view",
+    ],
+)
+
+cc_library(
     name = "litert_accelerator",
     srcs = ["litert_accelerator.cc"],
     hdrs = ["litert_accelerator.h"],
     deps = [
         "//litert/c:litert_common",
+        "//litert/cc:litert_common",
         "//litert/cc:litert_expected",
         "//litert/core:environment",
         "//litert/runtime:accelerator",
@@ -129,6 +138,7 @@ cc_library(
         "//litert/c:litert_common",
         "//litert/c:litert_metrics",
         "//litert/c:litert_opaque_options",
+        "//litert/cc:litert_common",
         "//litert/cc:litert_expected",
         "//litert/core:environment",
         "//litert/runtime:accelerator",

@@ -91,8 +91,11 @@ class CpuAccelerator final
         return options_data_status;
     }
 
-    // TODO: b/403547017 - Make the CPU accelerator configurable using the
-    // compilation options.
+    if (parsed_options.kernel_mode != kLiteRtCpuKernelModeXnnpack) {
+      *delegate_wrapper = nullptr;
+      return kLiteRtStatusOk;
+    }
+
     auto xnn_options = parsed_options.xnn;
     TfLiteOpaqueDelegate* xnnpack_delegate =
         TfLiteXNNPackDelegateCreate(&xnn_options);
@@ -108,6 +111,9 @@ class CpuAccelerator final
   // Destroys an XNNPack delegate instance.
   static void DestroyDelegate(LiteRtRuntimeContext* runtime_context,
                               LiteRtDelegateWrapper delegate_wrapper) {
+    if (delegate_wrapper == nullptr) {
+      return;
+    }
     TfLiteOpaqueDelegate* xnnpack_delegate;
     runtime_context->unwrap_delegate(delegate_wrapper, &xnnpack_delegate);
     TfLiteXNNPackDelegateDelete(xnnpack_delegate);
@@ -136,9 +142,8 @@ class CpuAccelerator final
 extern "C" {
 
 // Discovery C object for the CPU (Xnnpack) accelerator by LiteRT.
-// This object is used by the LiteRT environment constructor and the
-// object name is looked up by dlsym().
-LiteRtAcceleratorDef LiteRtCpuAcceleratorImpl = {
+// This object is used by the LiteRT environment constructor.
+static LiteRtAcceleratorDef LiteRtCpuAcceleratorImpl = {
     .version = 1,  // LiteRtAcceleratorDefV1
     .get_name = litert::CpuAccelerator::GetName,
     .get_version = litert::CpuAccelerator::GetVersion,
@@ -156,20 +161,8 @@ LiteRtAcceleratorDef LiteRtCpuAcceleratorImpl = {
     .num_supported_buffer_types = 0,
 };
 
-// Accelerator definition pointer defined in auto_registration.cc.
-extern LiteRtAcceleratorDef* LiteRtStaticLinkedAcceleratorCpuDef;
+// Accelerator definition pointer referenced by auto_registration.cc.
+LiteRtAcceleratorDef* LiteRtStaticLinkedAcceleratorCpuDef =
+    &LiteRtCpuAcceleratorImpl;
 
 }  // extern "C"
-
-namespace {
-
-class StaticCpuAcceleratorInitializer {
- public:
-  StaticCpuAcceleratorInitializer() {
-    LiteRtStaticLinkedAcceleratorCpuDef = &LiteRtCpuAcceleratorImpl;
-  }
-};
-
-StaticCpuAcceleratorInitializer g_cpu_accelerator_initializer;
-
-}  // namespace

@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "litert/c/internal/litert_options_helper.h"
 #include "litert/c/litert_common.h"
 #include "litert/cc/litert_expected.h"
 #include "litert/cc/litert_macros.h"
@@ -320,9 +321,7 @@ LiteRtStatus LrtGetOpaqueGpuOptionsData(const LrtGpuOptions* options,
   }
   *identifier = LrtGetGpuOptionsIdentifier();
   std::string toml_str = ss.str();
-  *payload = new char[toml_str.size() + 1];
-  memcpy(*payload, toml_str.c_str(), toml_str.size() + 1);
-  *payload_deleter = [](void* p) { delete[] static_cast<char*>(p); };
+  litert::internal::MakeCStringPayload(toml_str, payload, payload_deleter);
   return kLiteRtStatusOk;
 }
 
@@ -1065,7 +1064,7 @@ LiteRtStatus LrtGetGpuAcceleratorRuntimeOptionsConvertWeightsOnGpu(
       << "`convert_weights_on_gpu` cannot be null.";
   LITERT_RETURN_IF_ERROR(options, ErrorStatusBuilder::InvalidArgument())
       << "`options` cannot be null.";
-  *convert_weights_on_gpu = options->convert_weights_on_gpu.value_or(false);
+  *convert_weights_on_gpu = options->convert_weights_on_gpu.value_or(true);
   return kLiteRtStatusOk;
 }
 

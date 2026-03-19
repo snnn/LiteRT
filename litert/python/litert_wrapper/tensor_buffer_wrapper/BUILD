@@ -16,7 +16,7 @@ load("@org_tensorflow//tensorflow:tensorflow.default.bzl", "pybind_extension")
 
 # copybara:uncomment load("@org_tensorflow//tensorflow:strict.default.bzl", "py_strict_test")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_python//python:py_library.bzl", "py_library")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 
 WINDOWS_PYBIND_UNDEFS = select({
     "@platforms//os:windows": [
@@ -39,6 +39,7 @@ cc_library(
         "tensor_buffer_wrapper.h",
     ],
     deps = [
+        "//litert/c:litert_common",
         "//litert/cc:litert_api_with_dynamic_runtime",
         "//litert/python/litert_wrapper/common:litert_wrapper_utils",
         "//tflite:framework",

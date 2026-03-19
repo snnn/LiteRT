@@ -566,6 +566,7 @@ cc_library(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
+        "//litert/c/options:litert_cpu_options",
         "//litert/c:litert_any",
         "//litert/c:litert_common",
         "//litert/c:litert_environment_options_header",
@@ -595,7 +596,7 @@ cc_library(
         "//litert/core/util:flatbuffer_tools",
         "//litert/runtime/dispatch:dispatch_opaque_options",
         # copybara:uncomment "//third_party/odml/litert/weight_loader:external_weight_loader",
-        # "//weight_loader:external_weight_loader",  # copybara:uncomment
+        "//weight_loader:external_weight_loader",  # copybara:comment
         "//tflite/converter:allocation",
         "//tflite:builtin_ops",
         "//tflite:framework",
@@ -624,11 +625,13 @@ cc_library(
         "//litert/build_common:litert_disable_cpu": [
             # No support for CPU backend. Builtin ops are still needed for GPU.
             "//tflite/kernels:builtin_ops",
+            "//tflite/kernels:reference_ops",
         ],
         "//conditions:default": [
             ":litert_cpu_options",
             "//litert/runtime/accelerators/xnnpack:xnnpack_accelerator",  # buildcleaner: keep
             "//tflite/kernels:builtin_ops",
+            "//tflite/kernels:reference_ops",
         ],
     }),
 )
@@ -842,6 +845,7 @@ cc_library(
     hdrs = ["litert_cpu_options.h"],
     deps = [
         "//litert/c:litert_common",
+        "//litert/c/options:litert_cpu_options",
         "//litert/cc:litert_macros",
         "//litert/core:litert_toml_parser",
         "//tflite/delegates/xnnpack:xnnpack_delegate",
@@ -855,14 +859,9 @@ cc_test(
     deps = [
         ":litert_cpu_options",
         "//litert/c:litert_common",
+        "//litert/c/options:litert_cpu_options",
         "@com_google_googletest//:gtest_main",
     ],
-)
-
-cc_library(
-    name = "litert_google_tensor",
-    hdrs = ["litert_google_tensor.h"],
-    deps = ["//litert/c/options:litert_google_tensor_options_type"],
 )
 
 cc_library(

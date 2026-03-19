@@ -22,12 +22,14 @@
 #include "litert/c/litert_options.h"
 #include "litert/c/options/litert_compiler_options.h"
 #include "litert/c/options/litert_cpu_options.h"
+#include "litert/c/options/litert_google_tensor_options.h"
 #include "litert/c/options/litert_gpu_options.h"
 #include "litert/c/options/litert_intel_openvino_options.h"
 #include "litert/c/options/litert_mediatek_options.h"
 #include "litert/c/options/litert_qualcomm_options.h"
 #include "litert/c/options/litert_runtime_options.h"
 #include "litert/cc/internal/scoped_file.h"
+#include "litert/cc/litert_common.h"
 #include "litert/cc/litert_expected.h"
 #include "litert/cc/litert_macros.h"
 #include "litert/cc/litert_opaque_options.h"
@@ -39,9 +41,7 @@
 #include "litert/cc/options/litert_mediatek_options.h"
 #include "litert/cc/options/litert_qualcomm_options.h"
 #include "litert/cc/options/litert_runtime_options.h"
-#if defined(LITERT_WITH_EXTERNAL_WEIGHT_LOADER)
 #include "litert/core/options.h"
-#endif  // defined(LITERT_WITH_EXTERNAL_WEIGHT_LOADER)
 
 namespace litert {
 
@@ -132,7 +132,8 @@ Expected<void> Options::Build() {
       Get(), qualcomm_options_, LrtGetOpaqueQualcommOptionsData));
   LITERT_RETURN_IF_ERROR(AppendAndResetOpaqueData(
       Get(), mediatek_options_, LrtGetOpaqueMediatekOptionsData));
-  LITERT_RETURN_IF_ERROR(AppendAndReset(Get(), google_tensor_options_));
+  LITERT_RETURN_IF_ERROR(AppendAndResetOpaqueData(
+      Get(), google_tensor_options_, LrtGetOpaqueGoogleTensorOptionsData));
   LITERT_RETURN_IF_ERROR(AppendAndResetOpaqueData(
       Get(), intel_openvino_options_, LrtGetOpaqueIntelOpenVinoOptionsData));
   LITERT_RETURN_IF_ERROR(AppendAndResetOpaqueData(
@@ -144,33 +145,28 @@ Expected<void> Options::Build() {
 
 Expected<void> Options::SetExternalWeightScopedFile(
     ScopedFile& scoped_file, ScopedWeightSectionMap sections) {
-#if defined(LITERT_WITH_EXTERNAL_WEIGHT_LOADER)
   if (!scoped_file.IsValid()) {
-    return Unexpected(kLiteRtStatusErrorInvalidArgument,
+    return Unexpected(Status::kErrorInvalidArgument,
                       "Scoped file handle must be valid");
   }
   if (sections.empty()) {
-    return Unexpected(kLiteRtStatusErrorInvalidArgument,
+    return Unexpected(Status::kErrorInvalidArgument,
                       "At least one external buffer group must be provided");
   }
   for (const auto& [name, section] : sections) {
     if (section.length == 0) {
-      return Unexpected(kLiteRtStatusErrorInvalidArgument,
+      return Unexpected(Status::kErrorInvalidArgument,
                         "Section length must be positive for group " + name);
     }
   }
   auto* options_impl = reinterpret_cast<LiteRtOptionsT*>(Get());
   if (!options_impl) {
-    return Unexpected(kLiteRtStatusErrorRuntimeFailure,
+    return Unexpected(Status::kErrorRuntimeFailure,
                       "Options handle must not be null");
   }
   options_impl->scoped_weight_source = std::make_unique<ScopedWeightSource>(
       std::move(scoped_file), std::move(sections));
   return {};
-#else
-  return Unexpected(kLiteRtStatusErrorInvalidArgument,
-                    "LiteRT was built without external weight loader support");
-#endif
 }
 
 }  // namespace litert

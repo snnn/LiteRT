@@ -13,8 +13,21 @@
 # limitations under the License.
 
 cmake_minimum_required(VERSION 3.20)
+
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW)
+endif()
+if(POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
+
 project(LiteRT VERSION 1.4.0 LANGUAGES CXX C)
 
+set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL
+    "Suppress deprecation warnings from vendored CMake dependencies" FORCE)
+set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS 1 CACHE INTERNAL
+    "Suppress developer warnings from vendored CMake dependencies")
+set(ENV{PYTHONWARNINGS} "ignore::DeprecationWarning")
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -29,6 +42,15 @@ add_compile_options(
   -Wno-return-type
   -fpermissive
 )
+add_compile_definitions(CL_TARGET_OPENCL_VERSION=300)
+
+# Cmake flattens the transitive public and interface link to emit the final link
+# command. Which will trigger a warning on Apple platforms (ld64 still dedups
+# those archives correctly) For more details, see
+# https://gitlab.kitware.com/cmake/cmake/-/issues/25297
+if(APPLE)
+  add_link_options(-Wl,-no_warn_duplicate_libraries)
+endif()
 
 if(CMAKE_SYSTEM_PROCESSOR)
   string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" LITERT_SYSTEM_PROCESSOR_LOWER)
@@ -83,8 +105,8 @@ if(LITERT_DISABLE_KLEIDIAI)
   set(XNNPACK_ENABLE_KLEIDIAI OFF CACHE BOOL "Disable KleidiAI in XNNPACK")
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Android")
-  # Build or reuse host flatc for cross compilation.
+if(CMAKE_CROSSCOMPILING)
+  # Build or reuse a host flatc for cross compilation.
   if(NOT TFLITE_HOST_TOOLS_DIR)
     set(_root_host_flatc_dir "${CMAKE_CURRENT_SOURCE_DIR}/../host_flatc_build")
     if(EXISTS "${_root_host_flatc_dir}/_deps/flatbuffers-build/flatc")
@@ -96,10 +118,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
       set(_litert_host_flatc_cmake_args -S . -B . -DCMAKE_BUILD_TYPE=Release)
       set(_litert_host_c_compiler "${LITERT_HOST_C_COMPILER}")
       if(NOT _litert_host_c_compiler)
-        if(NOT CMAKE_CROSSCOMPILING AND CMAKE_C_COMPILER)
-          set(_litert_host_c_compiler "${CMAKE_C_COMPILER}")
-        elseif(EXISTS "/usr/bin/clang")
+        if(EXISTS "/usr/bin/clang")
           set(_litert_host_c_compiler "/usr/bin/clang")
+        else()
+          find_program(_litert_host_c_compiler NAMES clang cc gcc)
         endif()
       endif()
       if(_litert_host_c_compiler)
@@ -107,10 +129,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
       endif()
       set(_litert_host_cxx_compiler "${LITERT_HOST_CXX_COMPILER}")
       if(NOT _litert_host_cxx_compiler)
-        if(NOT CMAKE_CROSSCOMPILING AND CMAKE_CXX_COMPILER)
-          set(_litert_host_cxx_compiler "${CMAKE_CXX_COMPILER}")
-        elseif(EXISTS "/usr/bin/clang++")
+        if(EXISTS "/usr/bin/clang++")
           set(_litert_host_cxx_compiler "/usr/bin/clang++")
+        else()
+          find_program(_litert_host_cxx_compiler NAMES clang++ c++ g++)
         endif()
       endif()
       if(_litert_host_cxx_compiler)

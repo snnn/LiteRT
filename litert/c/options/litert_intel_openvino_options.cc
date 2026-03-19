@@ -28,7 +28,9 @@
 
 #include "absl/strings/match.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "litert/c/internal/litert_options_helper.h"
 #include "litert/c/litert_common.h"
+#include "litert/cc/litert_common.h"
 #include "litert/cc/litert_expected.h"
 #include "litert/cc/litert_macros.h"
 #include "litert/core/litert_toml_parser.h"
@@ -78,9 +80,7 @@ LiteRtStatus LrtGetOpaqueIntelOpenVinoOptionsData(
 
   *identifier = LrtGetIntelOpenVinoOptionsIdentifier();
   std::string toml_str = ss.str();
-  *payload = new char[toml_str.size() + 1];
-  memcpy(*payload, toml_str.c_str(), toml_str.size() + 1);
-  *payload_deleter = [](void* p) { delete[] static_cast<char*>(p); };
+  litert::internal::MakeCStringPayload(toml_str, payload, payload_deleter);
 
   return kLiteRtStatusOk;
 }
@@ -104,13 +104,17 @@ LiteRtStatus LrtCreateIntelOpenVinoOptionsFromToml(
                       absl::string_view value) -> LiteRtStatus {
         if (key == "device_type") {
           auto parsed_int = litert::internal::ParseTomlInt(value);
-          if (!parsed_int.HasValue()) return parsed_int.Error().Status();
+          if (!parsed_int.HasValue()) {
+            return litert::ToLiteRtStatus(parsed_int.Error().StatusCC());
+          }
           return LrtIntelOpenVinoOptionsSetDeviceType(
               local_options,
               static_cast<LiteRtIntelOpenVinoDeviceType>(*parsed_int));
         } else if (key == "performance_mode") {
           auto parsed_int = litert::internal::ParseTomlInt(value);
-          if (!parsed_int.HasValue()) return parsed_int.Error().Status();
+          if (!parsed_int.HasValue()) {
+            return litert::ToLiteRtStatus(parsed_int.Error().StatusCC());
+          }
           return LrtIntelOpenVinoOptionsSetPerformanceMode(
               local_options,
               static_cast<LiteRtIntelOpenVinoPerformanceMode>(*parsed_int));

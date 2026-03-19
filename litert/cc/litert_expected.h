@@ -29,7 +29,6 @@
 #include "absl/strings/str_format.h"  // from @com_google_absl
 #include "litert/c/litert_common.h"
 #include "litert/cc/litert_common.h"
-#include "litert/cc/internal/litert_detail.h"
 
 /// @file
 /// @brief Defines an `Expected` class for handling return values that may be
@@ -47,10 +46,10 @@ class Error {
  public:
   /// @brief Constructs an `Error` from a status and an optional error message.
   /// @note `::litert::Status::kOk` should not be passed.
-  explicit Error(Status status, std::string message = "")
+  explicit Error(::litert::Status status, std::string message = "")
       : status_(static_cast<LiteRtStatus>(status)),
         message_(std::move(message)) {
-    ABSL_DCHECK(status != Status::kOk);
+    ABSL_DCHECK(status != ::litert::Status::kOk);
   }
 
   [[deprecated("Use the constructor that takes ::litert::Status instead.")]]
@@ -61,8 +60,8 @@ class Error {
 
   /// @brief Gets the status.
   /// @todo Rename to `Status()` after the deprecated function is removed.
-  constexpr Status StatusCC() const {
-    return static_cast<enum Status>(status_);
+  constexpr ::litert::Status StatusCC() const {
+    return static_cast<enum ::litert::Status>(status_);
   }
 
   [[deprecated("Use StatusCC() instead.")]]
@@ -73,7 +72,7 @@ class Error {
   const std::string& Message() const { return message_; }
 
   friend std::ostream& operator<<(std::ostream& stream, const Error& error) {
-    stream << LiteRtGetStatusString(error.Status());
+    stream << LiteRtGetStatusString(error.status_);
     if (!error.Message().empty()) {
       stream << ": " << error.Message();
     }
@@ -82,7 +81,7 @@ class Error {
 
   template <class Sink>
   friend void AbslStringify(Sink& sink, const Error& error) {
-    absl::Format(&sink, "%s", LiteRtGetStatusString(error.Status()));
+    absl::Format(&sink, "%s", LiteRtGetStatusString(error.status_));
     if (!error.Message().empty()) {
       absl::Format(&sink, ": %v", error.Message());
     }
@@ -96,9 +95,18 @@ class Error {
 /// @brief A utility for generic return values that represents a failure.
 class Unexpected {
  public:
-  template <class... Args>
-  constexpr explicit Unexpected(Args&&... args)
-      : error_(std::forward<Args>(args)...) {}
+  explicit Unexpected(Status status, std::string message = "")
+      : error_(status, std::move(message)) {}
+
+  explicit Unexpected(LiteRtStatus status, std::string message = "")
+      : error_(ToStatus(status), std::move(message)) {}
+
+  template <class First, class... Rest,
+            class = std::enable_if_t<
+                !std::is_same_v<std::decay_t<First>, Status> &&
+                !std::is_same_v<std::decay_t<First>, LiteRtStatus>>>
+  constexpr explicit Unexpected(First&& first, Rest&&... rest)
+      : error_(std::forward<First>(first), std::forward<Rest>(rest)...) {}
 
   /// @brief Allows for implicit conversion from a convertible `Error` value
   /// in-place.
@@ -141,7 +149,7 @@ class Unexpected {
 /// Expected<Foo> Bar() {
 ///   bool success = ...
 ///   if (!success) {
-///     return Unexpected(kLiteRtStatus, "Bad Baz");
+///     return Unexpected(Status::kErrorUnknown, "Bad Baz");
 ///   }
 ///   return Foo();
 /// }
@@ -198,18 +206,19 @@ class Expected {
 
   Expected(Expected&& other) : has_value_(other.HasValue()) {
     if (HasValue()) {
-      ConstructAt(std::addressof(value_), std::move(other.value_));
+      ::new (std::addressof(value_)) StorageType(std::move(other.value_));
     } else {
-      ConstructAt(std::addressof(unexpected_), std::move(other.unexpected_));
+      ::new (std::addressof(unexpected_))
+          Unexpected(std::move(other.unexpected_));
     }
   }
 
   Expected(const Expected& other) : has_value_(other.has_value_) {
     if (HasValue()) {
-      ConstructAt(std::addressof(value_), other.value_);
+      ::new (std::addressof(value_)) StorageType(other.value_);
       value_ = other.value_;
     } else {
-      ConstructAt(std::addressof(unexpected_), other.unexpected_);
+      ::new (std::addressof(unexpected_)) Unexpected(other.unexpected_);
     }
   }
 
@@ -220,13 +229,13 @@ class Expected {
           value_ = std::move(other.value_);
         } else {
           value_.~StorageType();
-          ConstructAt(std::addressof(unexpected_),
-                      std::move(other.unexpected_));
+          ::new (std::addressof(unexpected_))
+              Unexpected(std::move(other.unexpected_));
         }
       } else {
         if (other.HasValue()) {
           unexpected_.~Unexpected();
-          ConstructAt(std::addressof(value_), std::move(other.value_));
+          ::new (std::addressof(value_)) StorageType(std::move(other.value_));
         } else {
           unexpected_ = std::move(other.unexpected_);
         }
@@ -243,12 +252,12 @@ class Expected {
           value_ = other.value_;
         } else {
           value_.~StorageType();
-          ConstructAt(std::addressof(unexpected_), other.unexpected_);
+          ::new (std::addressof(unexpected_)) Unexpected(other.unexpected_);
         }
       } else {
         if (other.HasValue()) {
           unexpected_.~Unexpected();
-          ConstructAt(std::addressof(value_), other.value_);
+          ::new (std::addressof(value_)) StorageType(other.value_);
         } else {
           unexpected_ = other.unexpected_;
         }

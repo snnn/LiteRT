@@ -16,6 +16,7 @@
 #include <Python.h>
 #include <stdlib.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,6 +30,7 @@
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Conversion/Passes.h"
@@ -273,6 +275,14 @@ GetTFLConverterFlagsAndPassConfig(mlir::ModuleOp module_op,
   return std::make_pair(converter_flags, pass_config);
 }
 
+absl::StatusOr<mlir::ModuleOp> GetModuleOp(mlir::Operation* op) {
+  auto module_op = llvm::dyn_cast<mlir::ModuleOp>(op);
+  if (module_op == nullptr) {
+    return absl::InvalidArgumentError("Failed to cast input to module op.");
+  }
+  return module_op;
+}
+
 }  // namespace
 
 void RegisterPasses() {
@@ -290,6 +300,10 @@ void RegisterPasses() {
       []() { return mlir::TFL::CreatePrepareQuantizePass(); });
   mlir::PassRegistration<mlir::OperationPass<mlir::ModuleOp>>(
       []() { return mlir::TFL::CreatePropagateQsvPass(); });
+  mlir::PassRegistration<mlir::OperationPass<mlir::ModuleOp>>(
+      []() { return mlir::TFL::CreatePostQuantizePass(true); });
+  mlir::PassRegistration<mlir::OperationPass<mlir::ModuleOp>>(
+      []() { return mlir::TFL::CreateFuseQDQPass(); });
 }
 
 void PrepareMlirContext(mlir::MLIRContext* context) {
@@ -448,6 +462,15 @@ absl::StatusOr<llvm::SmallVector<char>> ExportFlatbufferToBytes(
   return std::move(buffer);
 }
 
+absl::StatusOr<llvm::SmallVector<char>> ExportFlatbufferToBytes(
+    mlir::Operation* op) {
+  auto module_op_or = GetModuleOp(op);
+  if (!module_op_or.ok()) {
+    return module_op_or.status();
+  }
+  return ExportFlatbufferToBytes(*module_op_or);
+}
+
 absl::Status ExportFlatbufferToFile(mlir::ModuleOp module_op,
                                     absl::string_view output_path) {
   std::error_code ec;
@@ -457,6 +480,66 @@ absl::Status ExportFlatbufferToFile(mlir::ModuleOp module_op,
                                             output_path, ": ", ec.message()));
   }
   return ExportFlatbuffer(module_op, export_stream);
+}
+
+absl::Status ExportFlatbufferToFile(mlir::Operation* op,
+                                    absl::string_view output_path) {
+  auto module_op_or = GetModuleOp(op);
+  if (!module_op_or.ok()) {
+    return module_op_or.status();
+  }
+  return ExportFlatbufferToFile(*module_op_or, output_path);
+}
+
+absl::StatusOr<NumpyArrayMeta> GetNumpyArrayMetaFromDenseResourceElementsAttr(
+    mlir::Attribute attr) {
+  auto resource_attr = mlir::dyn_cast<mlir::DenseResourceElementsAttr>(attr);
+  if (resource_attr == nullptr) {
+    return absl::InvalidArgumentError(
+        "Failed to cast the input to mlir::DenseResourceElementsAttr.");
+  }
+  auto shaped_type = mlir::dyn_cast<mlir::ShapedType>(resource_attr.getType());
+  if (shaped_type == nullptr) {
+    return absl::InvalidArgumentError(
+        "Failed to cast the input to mlir::ShapedType.");
+  }
+  auto element_type = shaped_type.getElementType();
+
+  auto mlir_shape = shaped_type.getShape();
+  std::vector<size_t> shape(mlir_shape.begin(), mlir_shape.end());
+
+  NumpyArrayMeta::DType dtype;
+  uint8_t bits = 0;
+  if (element_type.isF32()) {
+    dtype = NumpyArrayMeta::DType::kFloat;
+    bits = 32;
+  } else if (element_type.isF64()) {
+    dtype = NumpyArrayMeta::DType::kFloat;
+    bits = 64;
+  } else if (element_type.isInteger(32)) {
+    dtype = NumpyArrayMeta::DType::kInt;
+    bits = 32;
+  } else if (element_type.isInteger(64)) {
+    dtype = NumpyArrayMeta::DType::kInt;
+    bits = 64;
+  } else if (element_type.isInteger(8)) {
+    dtype = NumpyArrayMeta::DType::kInt;
+    bits = 8;
+  } else if (element_type.isInteger(1)) {
+    dtype = NumpyArrayMeta::DType::kBool;
+    bits = 8;
+  } else {
+    return absl::InvalidArgumentError("Unsupported MLIR element type.");
+  }
+
+  auto data = resource_attr.getData();
+
+  return NumpyArrayMeta{
+      .data = data.data(),
+      .shape = shape,
+      .dtype = dtype,
+      .bits = bits,
+  };
 }
 
 }  // namespace litert

@@ -29,6 +29,7 @@
 #include "litert/cc/internal/litert_handle.h"
 #include "litert/cc/internal/litert_runtime_proxy.h"
 #include "litert/cc/litert_any.h"
+#include "litert/cc/litert_common.h"
 #include "litert/cc/litert_environment_options.h"
 #include "litert/cc/litert_expected.h"
 #include "litert/cc/litert_macros.h"
@@ -89,6 +90,7 @@ class Environment {
     WebGpuInstance = kLiteRtEnvOptionTagWebGpuInstance,
     WebGpuProcs = kLiteRtEnvOptionTagWebGpuProcs,
     RuntimeLibraryDir = kLiteRtEnvOptionTagRuntimeLibraryDir,
+    AutoRegisterAccelerators = kLiteRtEnvOptionTagAutoRegisterAccelerators,
   };
 
   struct [[deprecated("Use EnvironmentOptions::Option instead.")]] Option {
@@ -132,7 +134,7 @@ class Environment {
     if (auto status = runtime->CreateEnvironment(c_options->size(),
                                                  c_options->data(), &env);
         status != kLiteRtStatusOk) {
-      return Error(status);
+      return Error(ToStatus(status));
     } else {
       return Environment(env, std::move(runtime));
     }
@@ -275,7 +277,7 @@ class Environment {
   Expected<EnvironmentOptions> FromCOptions(
       LiteRtEnvironmentOptions options) const {
     std::vector<EnvironmentOptions::Option> env_options;
-    for (int i = 0; i <= kLiteRtEnvOptionTagRuntimeLibraryDir; ++i) {
+    for (int i = 0; i <= kLiteRtEnvOptionTagAutoRegisterAccelerators; ++i) {
       LiteRtAny value;
       if (runtime_->GetEnvironmentOptionsValue(
               options, static_cast<LiteRtEnvOptionTag>(i), &value) ==

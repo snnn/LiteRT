@@ -1,4 +1,5 @@
-// Copyright 2025 Google LLC.
+// Copyright (C) 2026 Samsung Electronics Co. LTD.
+// SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,10 +12,18 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#ifndef ODML_LITERT_LITERT_VENDORS_SAMSUNG_COMPILER_COMPILE_MODEL_H_
+#define ODML_LITERT_LITERT_VENDORS_SAMSUNG_COMPILER_COMPILE_MODEL_H_
 
-#ifndef LITERT_BUILD_COMMON_BUILD_CONFIG_H_
-#define LITERT_BUILD_COMMON_BUILD_CONFIG_H_
-#define LITERT_DISABLE_GPU
-#define LITERT_DISABLE_OPENCL_SUPPORT
+#include <vector>
 
-#endif  // LITERT_BUILD_COMMON_BUILD_CONFIG_H_
+#include "litert/vendors/samsung/ai_litecore_manager.h"
+
+namespace litert::samsung {
+
+Expected<std::vector<char>> Compile(AiLiteCoreManager::Ptr ai_lite_core,
+                                    const std::vector<char>& g_buffer,
+                                    int soc_model_id);
+
+}
+#endif
