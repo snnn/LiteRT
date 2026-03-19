@@ -100,7 +100,6 @@ if [[ "${USE_LOCAL_TF}" == "true" ]]; then
   BUILD_FLAGS+=("--config=use_local_tf")
 fi
 
-BAZEL_FLAGS+=(--repo_env=HERMETIC_PYTHON_VERSION=3.13 --action_env=HERMETIC_PYTHON_VERSION=3.13)
 # Set linkopt for arm64 architecture, and remote_cache for x86_64.
 case "${ARCH}" in
   x86_64)
