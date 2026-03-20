@@ -38,6 +38,7 @@ load(
 )
 load(
     "//litert/build_common:special_rule.bzl",
+    "get_compatible_with_portable",
     "gles_deps",
     "gles_headers",
     "gles_linkopts",
@@ -66,6 +67,7 @@ cc_library(
     name = "litert_common",
     srcs = ["litert_common.cc"],
     hdrs = ["litert_common.h"],
+    compatible_with = get_compatible_with_portable(),
     deps = ["//litert/build_common:build_config"],
 )
 
@@ -81,6 +83,7 @@ cc_test(
 cc_library(
     name = "litert_custom_op_kernel",
     hdrs = ["litert_custom_op_kernel.h"],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":litert_common",
         ":litert_layout",
@@ -115,12 +118,18 @@ cc_test(
 cc_library(
     name = "litert_any",
     hdrs = ["litert_any.h"],
+    compatible_with = get_compatible_with_portable(),
 )
 
 litert_c_api_library(
     name = "litert_metrics",
     srcs = ["litert_metrics.cc"],
     hdrs = ["litert_metrics.h"],
+    # We want `compatible_with = get_compatible_with_portable()` only
+    # for the header target, not for the impl target, to avoid having
+    # to propagage similar `compatible_with` declarations into all the
+    # transitive implementation dependencies.
+    header_kwargs = {"compatible_with": get_compatible_with_portable()},
     impl_deps = ["//litert/runtime:metrics"],
     deps = [
         ":litert_any",
@@ -133,6 +142,7 @@ litert_c_api_library(
     srcs = ["litert_environment.cc"],
     hdrs = ["litert_environment.h"],
     header_deps = [":litert_environment_options_header"],
+    header_kwargs = {"compatible_with": get_compatible_with_portable()},
     impl_deps = [
         ":litert_environment_options",
         "@com_google_absl//absl/base:core_headers",
@@ -154,6 +164,11 @@ litert_c_api_library(
     name = "litert_environment_options",
     srcs = ["litert_environment_options.cc"],
     hdrs = ["litert_environment_options.h"],
+    # We want `compatible_with = get_compatible_with_portable()` only
+    # for the header target, not for the impl target, to avoid having
+    # to propagage similar `compatible_with` declarations into all the
+    # transitive implementation dependencies.
+    header_kwargs = {"compatible_with": get_compatible_with_portable()},
     impl_deps = [
         "//litert/cc:litert_macros",
         "//litert/core:environment_options",
@@ -183,12 +198,14 @@ cc_library(
     name = "litert_layout",
     srcs = ["litert_layout.cc"],
     hdrs = ["litert_layout.h"],
+    compatible_with = get_compatible_with_portable(),
     deps = [":litert_common"],
 )
 
 cc_library(
     name = "litert_model_types",
     hdrs = ["litert_model_types.h"],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":litert_common",
         ":litert_layout",
@@ -246,6 +263,7 @@ cc_test(
 cc_library(
     name = "litert_op_code",
     hdrs = ["litert_op_code.h"],
+    compatible_with = get_compatible_with_portable(),
 )
 
 litert_c_api_library(
@@ -291,6 +309,7 @@ cc_test(
 cc_library(
     name = "litert_event_type",
     hdrs = ["litert_event_type.h"],
+    compatible_with = get_compatible_with_portable(),
 )
 
 litert_c_api_library(
@@ -314,29 +333,32 @@ litert_c_api_library(
 cc_library(
     name = "litert_tensor_buffer_types",
     hdrs = ["litert_tensor_buffer_types.h"],
+    compatible_with = get_compatible_with_portable(),
 )
 
 cc_library(
     name = "litert_gl_types",
     hdrs = ["litert_gl_types.h"],
+    compatible_with = get_compatible_with_portable(),
 )
 
 cc_library(
     name = "litert_opencl_types",
     hdrs = ["litert_opencl_types.h"],
+    compatible_with = get_compatible_with_portable(),
     deps = ["@opencl_headers"],
 )
 
 cc_library(
     name = "litert_webgpu_types",
     hdrs = ["litert_webgpu_types.h"],
+    compatible_with = get_compatible_with_portable(),
 )
 
 litert_c_api_library(
     name = "litert_tensor_buffer",
     srcs = [
         "litert_tensor_buffer.cc",
-        "litert_tensor_buffer_requirements.cc",
     ],
     hdrs = [
         "litert_tensor_buffer.h",
@@ -351,6 +373,7 @@ litert_c_api_library(
         "//litert/cc:litert_expected",
         "//litert/cc:litert_macros",
         "//litert/runtime:tensor_buffer",
+        "//litert/runtime:tensor_buffer_requirements",
         "@opencl_headers",
     ] + gles_deps(),
     linkopts = litert_android_linkopts() + gles_linkopts() + litert_metal_linkopts(),
@@ -360,8 +383,24 @@ litert_c_api_library(
         ":litert_gl_types",
         ":litert_model_types",
         ":litert_opencl_types",
+        ":litert_tensor_buffer_requirements",
         ":litert_tensor_buffer_types",
         ":litert_webgpu_types",
+    ],
+)
+
+litert_c_api_library(
+    name = "litert_tensor_buffer_requirements",
+    srcs = ["litert_tensor_buffer_requirements.cc"],
+    hdrs = ["litert_tensor_buffer_requirements.h"],
+    impl_deps = [
+        "//litert/cc:litert_expected",
+        "//litert/cc:litert_macros",
+        "//litert/runtime:tensor_buffer_requirements",
+    ],
+    deps = [
+        ":litert_common",
+        ":litert_tensor_buffer_types",
     ],
 )
 
@@ -434,6 +473,11 @@ litert_c_api_library(
     name = "litert_options",
     srcs = ["litert_options.cc"],
     hdrs = ["litert_options.h"],
+    # We want `compatible_with = get_compatible_with_portable()` only
+    # for the header target, not for the impl target, to avoid having
+    # to propagage similar `compatible_with` declarations into all the
+    # transitive implementation dependencies.
+    header_kwargs = {"compatible_with": get_compatible_with_portable()},
     impl_deps = [
         ":litert_opaque_options",
         "//litert/c/internal:litert_logging",
@@ -544,6 +588,11 @@ litert_c_api_library(
     name = "litert_opaque_options",
     srcs = ["litert_opaque_options.cc"],
     hdrs = ["litert_opaque_options.h"],
+    # We want `compatible_with = get_compatible_with_portable()` only
+    # for the header target, not for the impl target, to avoid having
+    # to propagage similar `compatible_with` declarations into all the
+    # transitive implementation dependencies.
+    header_kwargs = {"compatible_with": get_compatible_with_portable()},
     deps = [":litert_common"],
 )
 
@@ -564,6 +613,7 @@ cc_test(
 cc_library(
     name = "litert_custom_tensor_buffer",
     hdrs = ["litert_custom_tensor_buffer.h"],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":litert_common",
         ":litert_model_types",

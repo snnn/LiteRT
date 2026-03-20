@@ -15,6 +15,7 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//litert/build_common:special_rule.bzl", "get_compatible_with_portable")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["@org_tensorflow//tensorflow:license"],
@@ -247,6 +248,7 @@ cc_test(
 cc_library(
     name = "litert_source_location",
     hdrs = ["litert_source_location.h"],
+    compatible_with = get_compatible_with_portable(),
     visibility = ["//visibility:public"],
 )
 
@@ -651,6 +653,7 @@ cc_library(
     # The visibility is for testing only, otherwise it would be private.
     visibility = ["//litert/cc/dynamic_runtime:__pkg__"],
     deps = [
+        "//litert/c:litert_common",
         "//litert/c:litert_compiled_model_header",
         "//litert/c:litert_environment_header",
         "//litert/c:litert_environment_options_header",
@@ -676,6 +679,7 @@ cc_library(
         "//litert/kotlin/src/tests/google:__pkg__",
     ],
     deps = [
+        "//litert/c:litert_common",
         "//litert/c:litert_compiled_model_impl",
         "//litert/c:litert_environment_impl",
         "//litert/c:litert_environment_options_impl",

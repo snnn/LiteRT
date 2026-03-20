@@ -18,6 +18,7 @@
 #include <Python.h>
 
 #include <string>
+#include <vector>
 
 #include "litert/cc/internal/litert_extended_model.h"
 #include "litert/cc/litert_compiled_model.h"
@@ -148,6 +149,10 @@ class CompiledModelWrapper {
 
   // Returns whether the model is fully accelerated with selected accelerators.
   PyObject* IsFullyAccelerated();
+
+  // Resizes an input tensor by signature and input index.
+  PyObject* ResizeInputTensor(int signature_index, int input_index,
+                              const std::vector<int>& dims, bool strict);
 
  private:
   // Returns the size in bytes of a single element of the given data type.

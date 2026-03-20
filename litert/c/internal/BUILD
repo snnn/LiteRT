@@ -15,7 +15,9 @@
 # copybara:uncomment_begin(google-only)
 # load("@rules_cc//cc:cc_library.bzl", "cc_library")
 # load("@rules_cc//cc:cc_test.bzl", "cc_test")
+#
 # copybara:uncomment_end
+load("//litert/build_common:special_rule.bzl", "get_compatible_with_portable")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//third_party/odml:license"],
@@ -39,6 +41,7 @@ package(
 cc_library(
     name = "litert_scheduling_info",
     hdrs = ["litert_scheduling_info.h"],
+    compatible_with = get_compatible_with_portable(),
     visibility = [
         "//visibility:public",
     ],
@@ -118,9 +121,9 @@ cc_library(
         ":litert_delegate_wrapper",
         ":litert_external_litert_buffer_context",
         "//litert/c:litert_common",
-        "//litert/c:litert_opaque_options_header",
+        "//litert/c:litert_opaque_options",
         "//litert/c:litert_options",
-        "//litert/c:litert_tensor_buffer",
+        "//litert/c:litert_tensor_buffer_requirements",
         "//litert/c:litert_tensor_buffer_types",
         "//litert/c/options:litert_cpu_options",
         "//litert/c/options:litert_gpu_options",
@@ -153,7 +156,7 @@ cc_test(
     srcs = ["litert_accelerator_registration_test.cc"],
     deps = [
         ":litert_accelerator_registration",
-        ":litert_runtime_context_header",
+        ":litert_runtime_context",
         "//litert/c:litert_common",
         "//litert/c:litert_environment",
         "//litert/c:litert_opaque_options",
@@ -328,6 +331,7 @@ cc_library(
     name = "litert_logging",
     srcs = ["litert_logging.cc"],
     hdrs = ["litert_logging.h"],
+    compatible_with = get_compatible_with_portable(),
     linkopts = select({
         "@org_tensorflow//tensorflow:android": ["-llog"],
         "//conditions:default": [],
@@ -366,7 +370,9 @@ cc_test(
 cc_library(
     name = "litert_runtime_c_api",
     hdrs = ["litert_runtime_c_api.h"],
+    compatible_with = get_compatible_with_portable(),
     visibility = [
+        "//litert:litert_friends",
         "//litert/cc/internal:__pkg__",
     ],
     deps = [
