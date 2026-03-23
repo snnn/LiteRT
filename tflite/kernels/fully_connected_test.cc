@@ -37,6 +37,16 @@ limitations under the License.
 #include "tflite/string_type.h"
 
 namespace tflite {
+namespace ops {
+namespace builtin {
+namespace fully_connected {
+TfLiteStatus ValidateInt16FilterInt16Indexing(
+    TfLiteContext* context, const RuntimeShape& filter_shape,
+    const RuntimeShape& output_shape);
+}  // namespace fully_connected
+}  // namespace builtin
+}  // namespace ops
+
 namespace {
 
 using ::testing::ElementsAre;
@@ -2776,6 +2786,41 @@ TEST_P(SparseQuantizedFullyConnectedOpTest,
 
   EXPECT_THAT(m.GetOutputShape(), ElementsAre(2, 3));
   EXPECT_THAT(m.GetOutput(), ElementsAre(11, 1, 25, 0, 1, 21));
+}
+
+TEST(FullyConnectedInt16FilterInt16IndexingTest, AcceptsLargeSafeShapes) {
+  Interpreter interpreter;
+  TfLiteContext* context = interpreter.primary_subgraph().context();
+  const RuntimeShape filter_shape({std::numeric_limits<int>::max(), 1});
+  const RuntimeShape output_shape({1, std::numeric_limits<int>::max()});
+
+  EXPECT_EQ(ops::builtin::fully_connected::ValidateInt16FilterInt16Indexing(
+                context, filter_shape, output_shape),
+            kTfLiteOk);
+}
+
+TEST(FullyConnectedInt16FilterInt16IndexingTest, RejectsBatchCountOverflow) {
+  Interpreter interpreter;
+  TfLiteContext* context = interpreter.primary_subgraph().context();
+  const RuntimeShape filter_shape({1, 1});
+  const RuntimeShape output_shape({65536, 65536, 1});
+
+  EXPECT_EQ(ops::builtin::fully_connected::ValidateInt16FilterInt16Indexing(
+                context, filter_shape, output_shape),
+            kTfLiteError);
+}
+
+TEST(FullyConnectedInt16FilterInt16IndexingTest,
+     RejectsShapeProductOverflow) {
+  Interpreter interpreter;
+  TfLiteContext* context = interpreter.primary_subgraph().context();
+  const int kMaxInt = std::numeric_limits<int>::max();
+  const RuntimeShape filter_shape({1, 1});
+  const RuntimeShape output_shape({kMaxInt, kMaxInt, kMaxInt, 1});
+
+  EXPECT_EQ(ops::builtin::fully_connected::ValidateInt16FilterInt16Indexing(
+                context, filter_shape, output_shape),
+            kTfLiteError);
 }
 
 INSTANTIATE_TEST_SUITE_P(

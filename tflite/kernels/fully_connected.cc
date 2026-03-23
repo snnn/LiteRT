@@ -19,6 +19,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -40,6 +41,7 @@ limitations under the License.
 #include "tflite/kernels/internal/types.h"
 #include "tflite/kernels/kernel_util.h"
 #include "tflite/minimal_logging.h"
+#include "tflite/util.h"
 
 #ifdef TFLITE_HAVE_CPUINFO
 #include "include/cpuinfo.h"
@@ -56,6 +58,76 @@ namespace builtin {
 namespace fully_connected {
 
 namespace {
+TfLiteStatus CheckedFlatSizeSkipDim(TfLiteContext* context,
+                                    const RuntimeShape& shape, int skip_dim,
+                                    size_t* flat_size) {
+  const int dims_count = shape.DimensionsCount();
+  TF_LITE_ENSURE(context, skip_dim >= 0 && skip_dim < dims_count);
+  *flat_size = 1;
+  for (int i = 0; i < dims_count; ++i) {
+    if (i == skip_dim) continue;
+    const int dim = shape.Dims(i);
+    TF_LITE_ENSURE_MSG(context, dim >= 0,
+                       "FullyConnected encountered a negative dimension.");
+    TF_LITE_ENSURE_MSG(
+        context,
+        MultiplyAndCheckOverflow(*flat_size, static_cast<size_t>(dim),
+                                 flat_size) == kTfLiteOk,
+        "FullyConnected shape product overflowed.");
+  }
+  return kTfLiteOk;
+}
+
+struct CheckedFullyConnectedIndexing {
+  int batches;
+  int output_depth;
+  int accum_depth;
+};
+
+TfLiteStatus GetCheckedFullyConnectedIndexing(
+    TfLiteContext* context, const RuntimeShape& filter_shape,
+    const RuntimeShape& output_shape, CheckedFullyConnectedIndexing* indexing) {
+  const int output_dim_count = output_shape.DimensionsCount();
+  const int filter_dim_count = filter_shape.DimensionsCount();
+  TF_LITE_ENSURE(context, output_dim_count >= 1);
+  TF_LITE_ENSURE(context, filter_dim_count >= 2);
+
+  size_t batches = 0;
+  TF_LITE_ENSURE_OK(context, CheckedFlatSizeSkipDim(
+                                 context, output_shape, output_dim_count - 1,
+                                 &batches));
+  const int output_depth = output_shape.Dims(output_dim_count - 1);
+  const int accum_depth = filter_shape.Dims(filter_dim_count - 1);
+  TF_LITE_ENSURE_MSG(context, output_depth >= 0 && accum_depth >= 0,
+                     "FullyConnected encountered a negative dimension.");
+  TF_LITE_ENSURE_MSG(
+      context, batches <= static_cast<size_t>(std::numeric_limits<int>::max()),
+      "FullyConnected batch count overflowed.");
+
+  size_t flat_size = 0;
+  TF_LITE_ENSURE_MSG(
+      context,
+      MultiplyAndCheckOverflow(batches, static_cast<size_t>(accum_depth),
+                               &flat_size) == kTfLiteOk,
+      "FullyConnected input indexing overflowed.");
+  TF_LITE_ENSURE_MSG(
+      context,
+      MultiplyAndCheckOverflow(static_cast<size_t>(output_depth),
+                               static_cast<size_t>(accum_depth),
+                               &flat_size) == kTfLiteOk,
+      "FullyConnected filter indexing overflowed.");
+  TF_LITE_ENSURE_MSG(
+      context,
+      MultiplyAndCheckOverflow(batches, static_cast<size_t>(output_depth),
+                               &flat_size) == kTfLiteOk,
+      "FullyConnected output indexing overflowed.");
+
+  indexing->batches = static_cast<int>(batches);
+  indexing->output_depth = output_depth;
+  indexing->accum_depth = accum_depth;
+  return kTfLiteOk;
+}
+
 bool SupportedSparsityFormat(const TfLiteSparsity& sparsity) {
   if (sparsity.dim_metadata[0].format == kTfLiteDimDense &&
       sparsity.dim_metadata[1].format == kTfLiteDimSparseCSR) {
@@ -137,6 +209,14 @@ TfLiteStatus VerifyQuantizationZeroPoint(const TfLiteTensor* tensor,
 }
 
 }  // namespace
+
+TfLiteStatus ValidateInt16FilterInt16Indexing(
+    TfLiteContext* context, const RuntimeShape& filter_shape,
+    const RuntimeShape& output_shape) {
+  CheckedFullyConnectedIndexing indexing;
+  return GetCheckedFullyConnectedIndexing(context, filter_shape, output_shape,
+                                          &indexing);
+}
 
 // This file has four implementations of FullyConnected
 enum KernelType {
@@ -1275,30 +1355,34 @@ void FullyConnectedInt16(const OpData* data, const TfLiteTensor* input,
 }
 
 template <typename BiasType>
-void FullyConnectedInt16FilterInt16Impl(const FullyConnectedParams& op_params,
-                                        const int16_t* input_data,
-                                        const RuntimeShape& filter_shape,
-                                        const int16_t* filter_data,
-                                        const BiasType* bias_data,
-                                        const RuntimeShape& output_shape,
-                                        int16_t* output_data) {
+TfLiteStatus FullyConnectedInt16FilterInt16Impl(
+    TfLiteContext* context, const FullyConnectedParams& op_params,
+    const int16_t* input_data, const RuntimeShape& filter_shape,
+    const int16_t* filter_data, const BiasType* bias_data,
+    const RuntimeShape& output_shape, int16_t* output_data) {
   const int32_t input_offset = op_params.input_offset;
   const int32_t filter_offset = op_params.weights_offset;
   const int32_t output_offset = op_params.output_offset;
   const int32_t output_activation_min = op_params.quantized_activation_min;
   const int32_t output_activation_max = op_params.quantized_activation_max;
-  const int output_dim_count = output_shape.DimensionsCount();
-  const int filter_dim_count = filter_shape.DimensionsCount();
-  const int batches = FlatSizeSkipDim(output_shape, output_dim_count - 1);
-  const int output_depth = output_shape.Dims(output_dim_count - 1);
-  const int accum_depth = filter_shape.Dims(filter_dim_count - 1);
+  CheckedFullyConnectedIndexing indexing;
+  TF_LITE_ENSURE_OK(
+      context, GetCheckedFullyConnectedIndexing(context, filter_shape,
+                                                output_shape, &indexing));
+  const size_t output_depth = static_cast<size_t>(indexing.output_depth);
+  const size_t accum_depth = static_cast<size_t>(indexing.accum_depth);
 
-  for (int b = 0; b < batches; ++b) {
-    for (int out_c = 0; out_c < output_depth; ++out_c) {
+  for (int b = 0; b < indexing.batches; ++b) {
+    const size_t input_row_offset = static_cast<size_t>(b) * accum_depth;
+    const size_t output_row_offset = static_cast<size_t>(b) * output_depth;
+    for (int out_c = 0; out_c < indexing.output_depth; ++out_c) {
+      const size_t filter_row_offset =
+          static_cast<size_t>(out_c) * accum_depth;
       int64_t acc = 0;
-      for (int d = 0; d < accum_depth; ++d) {
-        const int64_t input_val = input_data[b * accum_depth + d];
-        const int64_t filter_val = filter_data[out_c * accum_depth + d];
+      for (int d = 0; d < indexing.accum_depth; ++d) {
+        const size_t depth_index = static_cast<size_t>(d);
+        const int64_t input_val = input_data[input_row_offset + depth_index];
+        const int64_t filter_val = filter_data[filter_row_offset + depth_index];
         acc += (filter_val + filter_offset) * (input_val + input_offset);
       }
       if (bias_data) {
@@ -1309,17 +1393,20 @@ void FullyConnectedInt16FilterInt16Impl(const FullyConnectedParams& op_params,
       acc_scaled += output_offset;
       acc_scaled = std::max(acc_scaled, output_activation_min);
       acc_scaled = std::min(acc_scaled, output_activation_max);
-      output_data[out_c + output_depth * b] = static_cast<int16_t>(acc_scaled);
+      output_data[output_row_offset + static_cast<size_t>(out_c)] =
+          static_cast<int16_t>(acc_scaled);
     }
   }
+  return kTfLiteOk;
 }
 
 template <typename BiasType>
-void FullyConnectedInt16FilterInt16(const OpData* data,
-                                    const TfLiteTensor* input,
-                                    const TfLiteTensor* filter,
-                                    const TfLiteTensor* bias,
-                                    TfLiteTensor* output) {
+TfLiteStatus FullyConnectedInt16FilterInt16(TfLiteContext* context,
+                                            const OpData* data,
+                                            const TfLiteTensor* input,
+                                            const TfLiteTensor* filter,
+                                            const TfLiteTensor* bias,
+                                            TfLiteTensor* output) {
   FullyConnectedParams op_params;
   op_params.input_offset = -input->params.zero_point;
   op_params.weights_offset = -filter->params.zero_point;
@@ -1329,8 +1416,8 @@ void FullyConnectedInt16FilterInt16(const OpData* data,
   op_params.quantized_activation_min = data->output_activation_min;
   op_params.quantized_activation_max = data->output_activation_max;
 
-  FullyConnectedInt16FilterInt16Impl(
-      op_params, GetTensorData<int16_t>(input), GetTensorShape(filter),
+  return FullyConnectedInt16FilterInt16Impl(
+      context, op_params, GetTensorData<int16_t>(input), GetTensorShape(filter),
       GetTensorData<int16_t>(filter),
       bias ? GetTensorData<BiasType>(bias) : nullptr, GetTensorShape(output),
       GetTensorData<int16_t>(output));
@@ -1377,28 +1464,34 @@ void FullyConnectedPerChannelInt8(const OpData* data, const TfLiteTensor* input,
 }
 
 template <typename BiasType>
-void FullyConnectedPerChannelInt16FilterInt16Impl(
-    const FullyConnectedParams& op_params, const int32_t* output_multiplier,
-    const int* output_shift, const int16_t* input_data,
-    const RuntimeShape& filter_shape, const int16_t* filter_data,
-    const BiasType* bias_data, const RuntimeShape& output_shape,
-    int16_t* output_data) {
+TfLiteStatus FullyConnectedPerChannelInt16FilterInt16Impl(
+    TfLiteContext* context, const FullyConnectedParams& op_params,
+    const int32_t* output_multiplier, const int* output_shift,
+    const int16_t* input_data, const RuntimeShape& filter_shape,
+    const int16_t* filter_data, const BiasType* bias_data,
+    const RuntimeShape& output_shape, int16_t* output_data) {
   const int32_t input_offset = op_params.input_offset;
   const int32_t output_offset = op_params.output_offset;
   const int32_t output_activation_min = op_params.quantized_activation_min;
   const int32_t output_activation_max = op_params.quantized_activation_max;
-  const int output_dim_count = output_shape.DimensionsCount();
-  const int filter_dim_count = filter_shape.DimensionsCount();
-  const int batches = FlatSizeSkipDim(output_shape, output_dim_count - 1);
-  const int output_depth = output_shape.Dims(output_dim_count - 1);
-  const int accum_depth = filter_shape.Dims(filter_dim_count - 1);
+  CheckedFullyConnectedIndexing indexing;
+  TF_LITE_ENSURE_OK(
+      context, GetCheckedFullyConnectedIndexing(context, filter_shape,
+                                                output_shape, &indexing));
+  const size_t output_depth = static_cast<size_t>(indexing.output_depth);
+  const size_t accum_depth = static_cast<size_t>(indexing.accum_depth);
 
-  for (int b = 0; b < batches; ++b) {
-    for (int out_c = 0; out_c < output_depth; ++out_c) {
+  for (int b = 0; b < indexing.batches; ++b) {
+    const size_t input_row_offset = static_cast<size_t>(b) * accum_depth;
+    const size_t output_row_offset = static_cast<size_t>(b) * output_depth;
+    for (int out_c = 0; out_c < indexing.output_depth; ++out_c) {
+      const size_t filter_row_offset =
+          static_cast<size_t>(out_c) * accum_depth;
       int64_t acc = 0;
-      for (int d = 0; d < accum_depth; ++d) {
-        const int64_t input_val = input_data[b * accum_depth + d];
-        const int64_t filter_val = filter_data[out_c * accum_depth + d];
+      for (int d = 0; d < indexing.accum_depth; ++d) {
+        const size_t depth_index = static_cast<size_t>(d);
+        const int64_t input_val = input_data[input_row_offset + depth_index];
+        const int64_t filter_val = filter_data[filter_row_offset + depth_index];
         acc += filter_val * (input_val + input_offset);
       }
       if (bias_data) {
@@ -1409,25 +1502,26 @@ void FullyConnectedPerChannelInt16FilterInt16Impl(
       acc_scaled += output_offset;
       acc_scaled = std::max(acc_scaled, output_activation_min);
       acc_scaled = std::min(acc_scaled, output_activation_max);
-      output_data[out_c + output_depth * b] = static_cast<int16_t>(acc_scaled);
+      output_data[output_row_offset + static_cast<size_t>(out_c)] =
+          static_cast<int16_t>(acc_scaled);
     }
   }
+  return kTfLiteOk;
 }
 
 template <typename BiasType>
-void FullyConnectedPerChannelInt16FilterInt16(const OpData* data,
-                                              const TfLiteTensor* input,
-                                              const TfLiteTensor* filter,
-                                              const TfLiteTensor* bias,
-                                              TfLiteTensor* output) {
+TfLiteStatus FullyConnectedPerChannelInt16FilterInt16(
+    TfLiteContext* context, const OpData* data, const TfLiteTensor* input,
+    const TfLiteTensor* filter, const TfLiteTensor* bias,
+    TfLiteTensor* output) {
   FullyConnectedParams op_params;
   op_params.input_offset = -input->params.zero_point;
   op_params.output_offset = output->params.zero_point;
   op_params.quantized_activation_min = data->output_activation_min;
   op_params.quantized_activation_max = data->output_activation_max;
 
-  FullyConnectedPerChannelInt16FilterInt16Impl(
-      op_params, data->per_channel_output_multiplier.data(),
+  return FullyConnectedPerChannelInt16FilterInt16Impl(
+      context, op_params, data->per_channel_output_multiplier.data(),
       data->per_channel_output_shift.data(), GetTensorData<int16_t>(input),
       GetTensorShape(filter), GetTensorData<int16_t>(filter),
       bias ? GetTensorData<BiasType>(bias) : nullptr, GetTensorShape(output),
@@ -1657,17 +1751,21 @@ TfLiteStatus EvalQuantized(TfLiteContext* context, TfLiteNode* node,
             const bool use_int64_bias =
                 data->quantized_bias_type == kTfLiteInt64;
             if (use_int64_bias) {
-              is_per_channel
-                  ? FullyConnectedPerChannelInt16FilterInt16<int64_t>(
-                        data, input, filter, bias, output)
-                  : FullyConnectedInt16FilterInt16<int64_t>(data, input, filter,
-                                                            bias, output);
+              TF_LITE_ENSURE_OK(
+                  context,
+                  is_per_channel
+                      ? FullyConnectedPerChannelInt16FilterInt16<int64_t>(
+                            context, data, input, filter, bias, output)
+                      : FullyConnectedInt16FilterInt16<int64_t>(
+                            context, data, input, filter, bias, output));
             } else {
-              is_per_channel
-                  ? FullyConnectedPerChannelInt16FilterInt16<int32_t>(
-                        data, input, filter, bias, output)
-                  : FullyConnectedInt16FilterInt16<int32_t>(data, input, filter,
-                                                            bias, output);
+              TF_LITE_ENSURE_OK(
+                  context,
+                  is_per_channel
+                      ? FullyConnectedPerChannelInt16FilterInt16<int32_t>(
+                            context, data, input, filter, bias, output)
+                      : FullyConnectedInt16FilterInt16<int32_t>(
+                            context, data, input, filter, bias, output));
             }
           } else {
             // To avoid 32bit accum overflow, it enables RUY only
