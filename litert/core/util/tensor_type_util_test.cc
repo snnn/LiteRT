@@ -52,6 +52,14 @@ TEST(TensorTypeUtil, GetNumPackedBytes) {
   EXPECT_EQ(*num_bytes, sizeof(int32_t) * 6);
 }
 
+TEST(TensorTypeUtil, GetNumPackedBytesComplex64) {
+  LiteRtElementType element_type = kLiteRtElementTypeComplex64;
+  constexpr std::array<int, 2> dimensions = {3, 2};
+  auto num_bytes = GetNumPackedBytes(element_type, absl::MakeSpan(dimensions));
+  EXPECT_TRUE(num_bytes);
+  EXPECT_EQ(*num_bytes, 6 * 8);
+}
+
 TEST(TensorTypeUtil, GetNumBytes) {
   LiteRtElementType element_type = kLiteRtElementTypeInt32;
   constexpr std::array<int, 3> dimensions = {3, 2, 1};
