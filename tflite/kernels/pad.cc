@@ -17,6 +17,7 @@ limitations under the License.
 #include <stdint.h>
 
 #include <limits>
+#include <memory>
 #include <type_traits>
 
 #include "tflite/core/c/common.h"
@@ -140,26 +141,27 @@ TfLiteStatus ResizeOutputTensor(TfLiteContext* context,
 
   // Right now we only support paddings between INT32_MIN and INT32_MAX, so
   // we are using int here and below.
-  TfLiteIntArray* input_size = op_context->input->dims;
-  TfLiteIntArray* output_size = TfLiteIntArrayCopy(input_size);
+  const TfLiteIntArray* input_size = op_context->input->dims;
+  std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> output_size(
+      TfLiteIntArrayCopy(input_size), TfLiteIntArrayFree);
+  TF_LITE_ENSURE(context, output_size != nullptr);
   const PaddingIntegerType* paddings_data =
       GetTensorData<PaddingIntegerType>(op_context->paddings);
   for (int idx = 0; idx < op_context->dims; ++idx) {
-    // Paddings are between INT32_MIN and INT32_MAX.
-    int before_padding = static_cast<int>(*paddings_data++);
-    int after_padding = static_cast<int>(*paddings_data++);
+    const int64_t before_padding = static_cast<int64_t>(*paddings_data++);
+    const int64_t after_padding = static_cast<int64_t>(*paddings_data++);
     TF_LITE_ENSURE_MSG(context, (before_padding >= 0 && after_padding >= 0),
                        "Pad value has to be greater than equal to 0.");
+    TF_LITE_ENSURE_OK(
+        context,
+        CheckedShapeDimension(
+            context,
+            static_cast<int64_t>(input_size->data[idx]) + before_padding +
+                after_padding,
+            "Pad output dimension overflowed.", &output_size->data[idx]));
   }
-  paddings_data = GetTensorData<PaddingIntegerType>(op_context->paddings);
-  for (int idx = 0; idx < op_context->dims; ++idx) {
-    // Paddings are between INT32_MIN and INT32_MAX.
-    int before_padding = static_cast<int>(*paddings_data++);
-    int after_padding = static_cast<int>(*paddings_data++);
-    output_size->data[idx] =
-        (input_size->data[idx] + before_padding + after_padding);
-  }
-  return context->ResizeTensor(context, op_context->output, output_size);
+  return context->ResizeTensor(context, op_context->output,
+                               output_size.release());
 }
 
 // Resizes output array based on the input size and padding size. This function

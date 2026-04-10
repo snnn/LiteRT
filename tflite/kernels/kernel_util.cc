@@ -33,6 +33,7 @@ limitations under the License.
 #include "tflite/core/c/common.h"
 #include "tflite/kernels/internal/cppmath.h"
 #include "tflite/kernels/internal/quantization_util.h"
+#include "tflite/util.h"
 
 #if defined(__APPLE__)
 #include "TargetConditionals.h"
@@ -593,6 +594,35 @@ bool HasUnspecifiedDimension(const TfLiteTensor* tensor) {
   }
 #endif  // TF_LITE_STATIC_MEMORY
   return false;
+}
+
+TfLiteStatus CheckedShapeDimension(TfLiteContext* context, int64_t dim,
+                                   const char* error_message, int* out) {
+  TF_LITE_ENSURE_MSG(context, CheckedDimToInt(dim, out) == kTfLiteOk, "%s",
+                     error_message);
+  return kTfLiteOk;
+}
+
+TfLiteStatus CheckedShapeProduct(TfLiteContext* context,
+                                 absl::Span<const int> dims,
+                                 const char* error_message, size_t* product) {
+  for (const int dim : dims) {
+    TF_LITE_ENSURE_MSG(context, dim >= 0, "Encountered a negative dimension.");
+  }
+  TF_LITE_ENSURE_MSG(context, CheckedNumElements(dims, product) == kTfLiteOk,
+                     "%s", error_message);
+  return kTfLiteOk;
+}
+
+TfLiteStatus CheckedShapeProductToInt(TfLiteContext* context,
+                                      absl::Span<const int> dims,
+                                      const char* error_message, int* product) {
+  for (const int dim : dims) {
+    TF_LITE_ENSURE_MSG(context, dim >= 0, "Encountered a negative dimension.");
+  }
+  TF_LITE_ENSURE_MSG(context, CheckedNumElements(dims, product) == kTfLiteOk,
+                     "%s", error_message);
+  return kTfLiteOk;
 }
 
 }  // namespace tflite

@@ -1216,6 +1216,7 @@ cc_library(
         ":macros",
         "//tflite/core/c:common",
         "//tflite/schema:schema_fbs",
+        "@com_google_absl//absl/types:span",
     ],
 )
 

@@ -41,6 +41,12 @@ namespace {
 // Nil value for paddingMode/offset.
 const int kUnsetOffset = -1;
 
+struct OpData {
+  std::vector<int> output_dims_num_elements;
+  std::vector<int> input_dims_num_elements;
+  int output_size = 0;
+};
+
 // Wrapper for params passed to the Eval<T> function.
 template <typename T>
 struct EvalData {
@@ -65,33 +71,85 @@ inline void GetPadding(const T* data, int offset, int64_t* left_pad,
   *right_pad = static_cast<int64_t>(*(data + offset * 2 + 1));
 }
 
-inline void GetPadding(const TfLiteTensor* padding_matrix, int dimension,
-                       int64_t* left_pad, int64_t* right_pad) {
+TfLiteStatus GetPadding(const TfLiteTensor* padding_matrix, int dimension,
+                        int64_t* left_pad, int64_t* right_pad) {
   switch (padding_matrix->type) {
     case kTfLiteInt32:
       GetPadding(padding_matrix->data.i32, dimension, left_pad, right_pad);
-      break;
+      return kTfLiteOk;
     case kTfLiteInt64:
       GetPadding(padding_matrix->data.i64, dimension, left_pad, right_pad);
-      break;
+      return kTfLiteOk;
     default:
-      return;
+      return kTfLiteError;
   }
 }
 
 // Returns the shape of the final output after padding.
 std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> GetPaddedOutputShape(
-    const TfLiteTensor* input, const TfLiteTensor* padding_matrix) {
+    TfLiteContext* context, const TfLiteTensor* input,
+    const TfLiteTensor* padding_matrix) {
   const int input_dims = NumDimensions(input);
   std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> shape(
       TfLiteIntArrayCreate(input_dims), TfLiteIntArrayFree);
+  if (shape == nullptr) {
+    return {nullptr, TfLiteIntArrayFree};
+  }
 
   int64_t left_pad = 0, right_pad = 0;
   for (int i = 0; i < input_dims; ++i) {
-    GetPadding(padding_matrix, i, &left_pad, &right_pad);
-    shape->data[i] = SizeOfDimension(input, i) + left_pad + right_pad;
+    if (GetPadding(padding_matrix, i, &left_pad, &right_pad) != kTfLiteOk) {
+      return {nullptr, TfLiteIntArrayFree};
+    }
+    if (CheckedShapeDimension(context,
+                              static_cast<int64_t>(SizeOfDimension(input, i)) +
+                                  left_pad + right_pad,
+                              "MirrorPad output dimension overflowed.",
+                              &shape->data[i]) != kTfLiteOk) {
+      return {nullptr, TfLiteIntArrayFree};
+    }
   }
   return shape;
+}
+
+TfLiteStatus BuildDimMetadata(TfLiteContext* context, const TfLiteTensor* tensor,
+                              const char* error_message,
+                              std::vector<int>* dims_num_elements,
+                              int* flat_size) {
+  const int num_dims = NumDimensions(tensor);
+  dims_num_elements->assign(num_dims, 1);
+  int running_product = 1;
+  for (int i = num_dims - 2; i >= 0; --i) {
+    const int factors[2] = {running_product, tensor->dims->data[i + 1]};
+    TF_LITE_ENSURE_OK(context,
+                      CheckedShapeProductToInt(context, absl::Span<const int>(
+                                                            factors, 2),
+                                               error_message, &running_product));
+    (*dims_num_elements)[i] = running_product;
+  }
+  if (flat_size != nullptr) {
+    TF_LITE_ENSURE_OK(context, CheckedShapeProductToInt(
+                                   context,
+                                   absl::Span<const int>(tensor->dims->data,
+                                                         num_dims),
+                                   error_message, flat_size));
+  }
+  return kTfLiteOk;
+}
+
+TfLiteStatus BuildEvalMetadata(TfLiteContext* context, const TfLiteTensor* input,
+                               const TfLiteTensor* output, OpData* op_data) {
+  TF_LITE_ENSURE_OK(context,
+                    BuildDimMetadata(context, output,
+                                     "MirrorPad output has too many elements.",
+                                     &op_data->output_dims_num_elements,
+                                     &op_data->output_size));
+  TF_LITE_ENSURE_OK(context,
+                    BuildDimMetadata(context, input,
+                                     "MirrorPad input has too many elements.",
+                                     &op_data->input_dims_num_elements,
+                                     /*flat_size=*/nullptr));
+  return kTfLiteOk;
 }
 
 // Given dimension index and the left/right padding.
@@ -118,17 +176,13 @@ int GetFlatIndex(int index, EvalData<T>* eval_data) {
   int flat_index = 0;
   int64_t left_pad = 0, right_pad = 0, dimension_index, index_in_input;
   for (int i = 0; i < eval_data->num_dims; ++i) {
-    switch (eval_data->padding_matrix->type) {
-      case kTfLiteInt32:
-        GetPadding(eval_data->padding_matrix->data.i32, i, &left_pad,
-                   &right_pad);
-        break;
-      case kTfLiteInt64:
-        GetPadding(eval_data->padding_matrix->data.i64, i, &left_pad,
-                   &right_pad);
-        break;
-      default:
-        break;
+    if (eval_data->padding_matrix->type == kTfLiteInt32) {
+      GetPadding(eval_data->padding_matrix->data.i32, i, &left_pad,
+                 &right_pad);
+    } else {
+      TFLITE_DCHECK_EQ(eval_data->padding_matrix->type, kTfLiteInt64);
+      GetPadding(eval_data->padding_matrix->data.i64, i, &left_pad,
+                 &right_pad);
     }
     dimension_index = index / (*eval_data->output_dims_num_elements)[i];
     index_in_input =
@@ -172,27 +226,32 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
   if (params == nullptr) {
     return kTfLiteError;
   }
+  auto* op_data = reinterpret_cast<OpData*>(node->user_data);
+  TF_LITE_ENSURE(context, op_data != nullptr);
+  TF_LITE_ENSURE(context, padding_matrix->type == kTfLiteInt32 ||
+                              padding_matrix->type == kTfLiteInt64);
   const int input_dims = NumDimensions(input_tensor);
 
   TfLiteTensor* output_tensor;
   TF_LITE_ENSURE_OK(context, GetOutputSafe(context, node, 0, &output_tensor));
   if (IsDynamicTensor(output_tensor)) {
-    auto output_size = GetPaddedOutputShape(input_tensor, padding_matrix);
+    auto output_size =
+        GetPaddedOutputShape(context, input_tensor, padding_matrix);
     if (output_size == nullptr) {
       return kTfLiteError;
     }
     TF_LITE_ENSURE_STATUS(
         context->ResizeTensor(context, output_tensor, output_size.release()));
+    TF_LITE_ENSURE_OK(context,
+                      BuildEvalMetadata(context, input_tensor, output_tensor,
+                                        op_data));
   }
-
-  std::vector<int> output_dims_num_elements(input_dims, 1);
-  std::vector<int> input_dims_num_elements(input_dims, 1);
-  for (int i = input_dims - 2; i >= 0; i--) {
-    output_dims_num_elements[i] =
-        output_dims_num_elements[i + 1] * output_tensor->dims->data[i + 1];
-    input_dims_num_elements[i] =
-        input_dims_num_elements[i + 1] * input_tensor->dims->data[i + 1];
-  }
+  TF_LITE_ENSURE_EQ(
+      context, static_cast<int>(op_data->output_dims_num_elements.size()),
+      input_dims);
+  TF_LITE_ENSURE_EQ(
+      context, static_cast<int>(op_data->input_dims_num_elements.size()),
+      input_dims);
 
   const int offset =
       params->mode != TfLiteMirrorPaddingMode::kTfLiteMirrorPaddingReflect ? 0
@@ -202,14 +261,13 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
       CpuBackendContext::GetFromContext(context);
   const int thread_count = cpu_backend_context->max_num_threads();
   TfLiteStatus status = kTfLiteOk;
-  const int output_size = NumElements(output_tensor);
 #define TF_LITE_MIRROR_PAD(type)                                           \
   EvalData<type> eval_data;                                                \
   eval_data.input_data = GetTensorData<type>(input_tensor);                \
   eval_data.input_dims = input_tensor->dims;                               \
   eval_data.input_dims = input_tensor->dims;                               \
-  eval_data.output_dims_num_elements = &output_dims_num_elements;          \
-  eval_data.input_dims_num_elements = &input_dims_num_elements;            \
+  eval_data.output_dims_num_elements = &op_data->output_dims_num_elements; \
+  eval_data.input_dims_num_elements = &op_data->input_dims_num_elements;   \
   eval_data.num_dims = input_dims;                                         \
   eval_data.offset = offset;                                               \
   eval_data.output_data = GetTensorData<type>(output_tensor);              \
@@ -218,7 +276,7 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
   tasks.reserve(thread_count);                                             \
   int start = 0;                                                           \
   for (int i = 0; i < thread_count; ++i) {                                 \
-    int end = start + (output_size - start) / (thread_count - i);          \
+    int end = start + (op_data->output_size - start) / (thread_count - i); \
     tasks.emplace_back(MirrorPadWorkerTask<type>(&eval_data, start, end)); \
     start = end;                                                           \
   }                                                                        \
@@ -251,10 +309,12 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
 }
 
 void* Init(TfLiteContext* context, const char* buffer, size_t length) {
-  return nullptr;
+  return new OpData;
 }
 
-void Free(TfLiteContext* context, void* buffer) {}
+void Free(TfLiteContext* context, void* buffer) {
+  delete reinterpret_cast<OpData*>(buffer);
+}
 
 TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   const TfLiteTensor* input_tensor;
@@ -263,10 +323,17 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, 1, &padding_matrix));
   TfLiteTensor* output_tensor;
   TF_LITE_ENSURE_OK(context, GetOutputSafe(context, node, 0, &output_tensor));
+  auto* op_data = reinterpret_cast<OpData*>(node->user_data);
+  TF_LITE_ENSURE(context, op_data != nullptr);
+  op_data->input_dims_num_elements.clear();
+  op_data->output_dims_num_elements.clear();
+  op_data->output_size = 0;
 
   TF_LITE_ENSURE_EQ(context, NumDimensions(padding_matrix), 2);
   TF_LITE_ENSURE_EQ(context, SizeOfDimension(padding_matrix, 0),
                     NumDimensions(input_tensor));
+  TF_LITE_ENSURE(context, padding_matrix->type == kTfLiteInt32 ||
+                              padding_matrix->type == kTfLiteInt64);
 
   if (input_tensor->type == kTfLiteUInt8 || input_tensor->type == kTfLiteInt8 ||
       input_tensor->type == kTfLiteInt16) {
@@ -286,11 +353,17 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
     return kTfLiteOk;
   }
   // We have constant padding, so we can infer output size.
-  auto output_size = GetPaddedOutputShape(input_tensor, padding_matrix);
+  auto output_size = GetPaddedOutputShape(context, input_tensor, padding_matrix);
   if (output_size == nullptr) {
     return kTfLiteError;
   }
-  return context->ResizeTensor(context, output_tensor, output_size.release());
+  TF_LITE_ENSURE_OK(context,
+                    context->ResizeTensor(context, output_tensor,
+                                          output_size.release()));
+  TF_LITE_ENSURE_OK(context,
+                    BuildEvalMetadata(context, input_tensor, output_tensor,
+                                      op_data));
+  return kTfLiteOk;
 }
 
 }  // namespace mirror_pad

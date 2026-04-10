@@ -535,9 +535,11 @@ cc_library(
         ":op_macros",
         "//tflite:array",
         "//tflite:kernel_api",
+        "//tflite:util",
         "//tflite/core/c:common",
         "//tflite/kernels/internal:cppmath",
         "//tflite/kernels/internal:quantization_util",
+        "@com_google_absl//absl/types:span",
     ],
 )
 

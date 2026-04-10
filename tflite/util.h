@@ -32,6 +32,7 @@ limitations under the License.
 #include <type_traits>
 #include <vector>
 
+#include "absl/types/span.h"
 #include "tflite/array.h"
 #include "tflite/core/c/common.h"
 #include "tflite/schema/schema_generated.h"
@@ -100,6 +101,43 @@ bool IsValidationSubgraph(const char* name);
 // have unsigned numbers. It is also generalized to work where sizeof(size_t)
 // is not 8.
 TfLiteStatus MultiplyAndCheckOverflow(size_t a, size_t b, size_t* product);
+
+// Computes the number of elements described by the provided dimensions while
+// checking for negative sizes and size_t overflow.
+TfLiteStatus CheckedNumElements(absl::Span<const int> dims, size_t* count);
+
+// Computes the number of elements described by the provided dimensions while
+// checking for negative sizes, size_t overflow, and narrowing to int.
+TfLiteStatus CheckedNumElements(absl::Span<const int> dims, int* count);
+
+inline TfLiteStatus CheckedNumElements(const TfLiteIntArray* dims,
+                                       size_t* count) {
+  if (dims == nullptr) return kTfLiteError;
+  return CheckedNumElements(
+      absl::Span<const int>(dims->data, static_cast<size_t>(dims->size)),
+      count);
+}
+
+inline TfLiteStatus CheckedNumElements(const TfLiteIntArray* dims, int* count) {
+  if (dims == nullptr) return kTfLiteError;
+  return CheckedNumElements(
+      absl::Span<const int>(dims->data, static_cast<size_t>(dims->size)),
+      count);
+}
+
+inline TfLiteStatus CheckedNumElements(const TfLiteTensor* tensor,
+                                       size_t* count) {
+  if (tensor == nullptr) return kTfLiteError;
+  return CheckedNumElements(tensor->dims, count);
+}
+
+inline TfLiteStatus CheckedNumElements(const TfLiteTensor* tensor, int* count) {
+  if (tensor == nullptr) return kTfLiteError;
+  return CheckedNumElements(tensor->dims, count);
+}
+
+// Validates that a derived dimension is non-negative and fits in int.
+TfLiteStatus CheckedDimToInt(int64_t dim, int* out);
 
 // Returns whether the TfLiteTensor is a resource or variant tensor.
 inline bool IsResourceOrVariant(const TfLiteTensor* tensor) {
