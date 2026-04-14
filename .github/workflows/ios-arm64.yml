@@ -3,6 +3,7 @@ on:
   push:
     branches:
     - main
+    - add-ios-github-workflow
   pull_request:
     branches:
     - main
