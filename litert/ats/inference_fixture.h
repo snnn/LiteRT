@@ -256,32 +256,105 @@ class AtsInferenceTest : public RngTest {
   }
 
   void CheckOutputs(const VarBuffers& actual, const VarBuffers& ref) {
-    // const ConformanceSpec spec = Conformance();
+    const ConformanceSpec spec = Conformance();
     ASSERT_EQ(actual.size(), ref.size());
     for (size_t i = 0; i < actual.size(); ++i) {
       ASSERT_EQ(actual[i].Type(), ref[i].Type());
-      if (actual[i].Type().ElementType() == ElementType::Float32) {
-        CheckOutputImpl(actual[i].AsView<float>(), ref[i].AsView<float>());
-      } else if (actual[i].Type().ElementType() == ElementType::Int32) {
-        CheckOutputImpl(actual[i].AsView<int32_t>(), ref[i].AsView<int32_t>());
-      } else {
-        // TODO: Finish type support and pull specialization logic into
-        // generic helper.
-        FAIL() << "Unsupported element type";
+      if (spec.comparator_kind == ConformanceComparatorKind::kExact) {
+        CheckExactOutputBytesImpl(actual[i], ref[i]);
+        continue;
+      }
+
+      switch (actual[i].Type().ElementType()) {
+        case ElementType::Bool:
+          CheckOutputImpl(actual[i].AsView<bool>(), ref[i].AsView<bool>(),
+                          spec);
+          break;
+        case ElementType::Int8:
+          CheckOutputImpl(actual[i].AsView<int8_t>(), ref[i].AsView<int8_t>(),
+                          spec);
+          break;
+        case ElementType::UInt8:
+          CheckOutputImpl(actual[i].AsView<uint8_t>(), ref[i].AsView<uint8_t>(),
+                          spec);
+          break;
+        case ElementType::Int16:
+          CheckOutputImpl(actual[i].AsView<int16_t>(), ref[i].AsView<int16_t>(),
+                          spec);
+          break;
+        case ElementType::UInt16:
+          CheckOutputImpl(actual[i].AsView<uint16_t>(),
+                          ref[i].AsView<uint16_t>(), spec);
+          break;
+        case ElementType::Int32:
+          CheckOutputImpl(actual[i].AsView<int32_t>(), ref[i].AsView<int32_t>(),
+                          spec);
+          break;
+        case ElementType::UInt32:
+          CheckOutputImpl(actual[i].AsView<uint32_t>(),
+                          ref[i].AsView<uint32_t>(), spec);
+          break;
+        case ElementType::Int64:
+          CheckOutputImpl(actual[i].AsView<int64_t>(), ref[i].AsView<int64_t>(),
+                          spec);
+          break;
+        case ElementType::UInt64:
+          CheckOutputImpl(actual[i].AsView<uint64_t>(),
+                          ref[i].AsView<uint64_t>(), spec);
+          break;
+        case ElementType::Float16:
+          CheckOutputImpl(actual[i].AsView<tflite::half>(),
+                          ref[i].AsView<tflite::half>(), spec);
+          break;
+        case ElementType::Float32:
+          CheckOutputImpl(actual[i].AsView<float>(), ref[i].AsView<float>(),
+                          spec);
+          break;
+        case ElementType::Float64:
+          CheckOutputImpl(actual[i].AsView<double>(), ref[i].AsView<double>(),
+                          spec);
+          break;
+        default:
+          FAIL() << "Unsupported element type for comparator "
+                 << static_cast<int>(spec.comparator_kind) << ": "
+                 << actual[i].Type().ElementType();
       }
     }
   }
 
   template <typename T>
-  void CheckOutputImpl(const BufferView<T>& actual, const BufferView<T>& ref) {
-#if 0
-    const ConformanceSpec spec = Conformance();
-    double mse = std::numeric_limits<double>::max();
-    EXPECT_THAT(actual.data, MeanSquaredErrorLt(ref.data, Tol(), &mse));
-    cap_.numerics.NewMse(mse);
-#else
-    abort();  // NOT IMPLEMENTED
-#endif
+  void CheckOutputImpl(const BufferView<T>& actual, const BufferView<T>& ref,
+                       const ConformanceSpec& spec) {
+    switch (spec.comparator_kind) {
+      case ConformanceComparatorKind::kMse: {
+        const double tol =
+            std::max(spec.absolute_tolerance,
+                     static_cast<double>(NumericLimits<T>::Epsilon()) * 10.0);
+        CheckMseOutputImpl(actual, ref, tol);
+        return;
+      }
+      case ConformanceComparatorKind::kExact:
+        CheckExactOutputImpl(actual, ref);
+        return;
+      case ConformanceComparatorKind::kFloatAccumulationAware:
+        if constexpr (std::is_same_v<T, float>) {
+          CheckFloatAccumulationAwareOutputImpl(actual, ref, spec);
+        } else {
+          FAIL() << "Float-accumulation-aware comparator requires float32 "
+                 << "outputs, got " << GetElementType<T>();
+        }
+        return;
+      case ConformanceComparatorKind::kQuantizedBucket:
+        if constexpr (std::is_integral_v<T>) {
+          CheckQuantizedBucketOutputImpl(actual, ref, spec.bucket_tolerance);
+        } else {
+          FAIL() << "Quantized-bucket comparator requires integral outputs, "
+                 << "got " << GetElementType<T>();
+        }
+        return;
+    }
+
+    FAIL() << "Unknown comparator kind: " << static_cast<int>(spec.comparator_kind);
   }
 
   LiteRtModelT& Graph() const { return graph_->Graph(); }
