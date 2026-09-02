@@ -14,6 +14,9 @@
 
 #include "litert/core/model/ops/slice.h"
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -21,10 +24,8 @@
 #include <utility>
 #include <vector>
 
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
 #include "absl/strings/string_view.h"  // from @com_google_absl
-#include "absl/types/span.h"  // from @com_google_absl
+#include "absl/types/span.h"           // from @com_google_absl
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_model_types.h"
 #include "litert/c/litert_op_code.h"
@@ -72,12 +73,20 @@ TEST(SliceOpTest, SliceStatic) {
       {1, 10, 10, 3}, {4}, {4}};  // Input, Begin, Size
   std::vector<Dims> output_shapes(1);
 
+  LiteRtTensorT begin_tensor;
   LiteRtTensorT size_tensor;
   op.Inputs().push_back(nullptr);
-  op.Inputs().push_back(nullptr);
+  op.Inputs().push_back(&begin_tensor);
   op.Inputs().push_back(&size_tensor);
 
+  int32_t begin_data[] = {0, 2, 3, 0};
   int32_t size_data[] = {1, 5, 5, 3};
+  begin_tensor.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {4}));
+  size_tensor.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {4}));
+  SetWeightsFromOwnedBuffer(
+      begin_tensor.Weights(),
+      OwningBufferRef<uint8_t>(reinterpret_cast<const uint8_t*>(begin_data),
+                               sizeof(begin_data)));
   SetWeightsFromOwnedBuffer(
       size_tensor.Weights(),
       OwningBufferRef<uint8_t>(reinterpret_cast<const uint8_t*>(size_data),
@@ -156,32 +165,122 @@ TEST(SliceOpTest, StridedSliceShrinkAxis) {
   EXPECT_THAT(output_shapes[0], ElementsAre(-1, -1));
 }
 
-TEST(SliceOpTest, Int64SizeTensorBaseFailure) {
+TEST(SliceOpTest, Int64SizeTensor) {
   LiteRtOpT op;
   std::vector<Dims> input_shapes = {{10}, {1}, {1}};
   std::vector<Dims> output_shapes(1);
 
   LiteRtTensorT begin, size;
-  int32_t begin_data[] = {0};
+  int64_t begin_data[] = {0};
   int64_t size_data[] = {5};  // INT64 size tensor
   SetWeightsFromOwnedBuffer(begin.Weights(),
                             OwningBufferRef<uint8_t>(absl::string_view(
-                                reinterpret_cast<char*>(begin_data), 4)));
+                                reinterpret_cast<char*>(begin_data), 8)));
   SetWeightsFromOwnedBuffer(size.Weights(),
                             OwningBufferRef<uint8_t>(absl::string_view(
                                 reinterpret_cast<char*>(size_data), 8)));
-  begin.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {1}));
+  begin.SetType(MakeRankedTensorType(kLiteRtElementTypeInt64, {1}));
   size.SetType(MakeRankedTensorType(kLiteRtElementTypeInt64, {1}));
 
   op.Inputs().push_back(nullptr);
   op.Inputs().push_back(&begin);
   op.Inputs().push_back(&size);
 
-  // Must return `{5}`, but on base commit casts INT64 to int32_t*, reading `{5,
-  // 0}` (`rank = 2`).
   ASSERT_EQ(InferSlice(op, absl::MakeSpan(input_shapes), output_shapes),
             kLiteRtStatusOk);
   EXPECT_THAT(output_shapes[0], ElementsAre(5));
+}
+
+TEST(SliceOpTest, ResolvesMinusOneSizeFromBegin) {
+  LiteRtOpT op;
+  std::vector<Dims> input_shapes = {{10}, {1}, {1}};
+  std::vector<Dims> output_shapes(1);
+
+  LiteRtTensorT begin, size;
+  int32_t begin_data[] = {3};
+  int32_t size_data[] = {-1};
+  begin.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {1}));
+  size.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {1}));
+  SetWeightsFromOwnedBuffer(
+      begin.Weights(),
+      OwningBufferRef<uint8_t>(reinterpret_cast<const uint8_t*>(begin_data),
+                               sizeof(begin_data)));
+  SetWeightsFromOwnedBuffer(
+      size.Weights(),
+      OwningBufferRef<uint8_t>(reinterpret_cast<const uint8_t*>(size_data),
+                               sizeof(size_data)));
+  op.Inputs() = {nullptr, &begin, &size};
+
+  ASSERT_EQ(InferSlice(op, absl::MakeSpan(input_shapes), output_shapes),
+            kLiteRtStatusOk);
+  EXPECT_THAT(output_shapes[0], ElementsAre(7));
+}
+
+TEST(SliceOpTest, RejectsNegativeBegin) {
+  LiteRtOpT op;
+  std::vector<Dims> input_shapes = {{10}, {1}, {1}};
+  std::vector<Dims> output_shapes(1);
+
+  LiteRtTensorT begin, size;
+  int32_t begin_data[] = {-1};
+  int32_t size_data[] = {1};
+  begin.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {1}));
+  size.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {1}));
+  SetWeightsFromOwnedBuffer(
+      begin.Weights(),
+      OwningBufferRef<uint8_t>(reinterpret_cast<const uint8_t*>(begin_data),
+                               sizeof(begin_data)));
+  SetWeightsFromOwnedBuffer(
+      size.Weights(),
+      OwningBufferRef<uint8_t>(reinterpret_cast<const uint8_t*>(size_data),
+                               sizeof(size_data)));
+  op.Inputs() = {nullptr, &begin, &size};
+
+  EXPECT_EQ(InferSlice(op, absl::MakeSpan(input_shapes), output_shapes),
+            kLiteRtStatusErrorShapeInferenceFailed);
+}
+
+TEST(SliceOpTest, RejectsMismatchedIndexTypes) {
+  LiteRtOpT op;
+  std::vector<Dims> input_shapes = {{10}, {1}, {1}};
+  std::vector<Dims> output_shapes(1);
+
+  LiteRtTensorT begin, size;
+  begin.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {1}));
+  size.SetType(MakeRankedTensorType(kLiteRtElementTypeInt64, {1}));
+  op.Inputs() = {nullptr, &begin, &size};
+
+  EXPECT_EQ(InferSlice(op, absl::MakeSpan(input_shapes), output_shapes),
+            kLiteRtStatusErrorShapeInferenceFailed);
+}
+
+TEST(SliceOpTest, RejectsIndexLengthDifferentFromInputRank) {
+  LiteRtOpT op;
+  std::vector<Dims> input_shapes = {{2, 3}, {1}, {1}};
+  std::vector<Dims> output_shapes(1);
+
+  LiteRtTensorT begin, size;
+  begin.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {1}));
+  size.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {1}));
+  op.Inputs() = {nullptr, &begin, &size};
+
+  EXPECT_EQ(InferSlice(op, absl::MakeSpan(input_shapes), output_shapes),
+            kLiteRtStatusErrorShapeInferenceFailed);
+}
+
+TEST(SliceOpTest, DynamicIndicesProduceUnknownDimensions) {
+  LiteRtOpT op;
+  std::vector<Dims> input_shapes = {{2, 3}, {2}, {2}};
+  std::vector<Dims> output_shapes(1);
+
+  LiteRtTensorT begin, size;
+  begin.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {2}));
+  size.SetType(MakeRankedTensorType(kLiteRtElementTypeInt32, {2}));
+  op.Inputs() = {nullptr, &begin, &size};
+
+  ASSERT_EQ(InferSlice(op, absl::MakeSpan(input_shapes), output_shapes),
+            kLiteRtStatusOk);
+  EXPECT_THAT(output_shapes[0], ElementsAre(-1, -1));
 }
 
 TEST(SliceOpTest, ZeroStrideBaseFailure) {

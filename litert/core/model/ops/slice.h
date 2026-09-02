@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -30,53 +31,139 @@
 
 namespace litert::internal {
 
+namespace slice_detail {
+
+inline LiteRtElementType GetElementType(const LiteRtTensorT& tensor) {
+  if (tensor.Type().first == kLiteRtRankedTensorType) {
+    return tensor.Type().second.ranked_tensor_type.element_type;
+  }
+  if (tensor.Type().first == kLiteRtUnrankedTensorType) {
+    return tensor.Type().second.unranked_tensor_type.element_type;
+  }
+  return kLiteRtElementTypeNone;
+}
+
+inline LiteRtStatus ReadIndexData(const LiteRtTensorT& tensor,
+                                  LiteRtElementType element_type,
+                                  size_t expected_count,
+                                  std::vector<int64_t>& values,
+                                  bool& available) {
+  const auto buffer = tensor.Weights().Buffer();
+  available = buffer.Size() != 0;
+  if (!available) return kLiteRtStatusOk;
+
+  const size_t element_size = element_type == kLiteRtElementTypeInt32
+                                  ? sizeof(int32_t)
+                                  : sizeof(int64_t);
+  if (expected_count > std::numeric_limits<size_t>::max() / element_size ||
+      buffer.Size() != expected_count * element_size) {
+    return kLiteRtStatusErrorShapeInferenceFailed;
+  }
+
+  values.resize(expected_count);
+  for (size_t i = 0; i < expected_count; ++i) {
+    if (element_type == kLiteRtElementTypeInt32) {
+      int32_t value;
+      std::memcpy(&value, buffer.Data() + i * element_size, sizeof(value));
+      values[i] = value;
+    } else {
+      int64_t value;
+      std::memcpy(&value, buffer.Data() + i * element_size, sizeof(value));
+      values[i] = value;
+    }
+  }
+  return kLiteRtStatusOk;
+}
+
+}  // namespace slice_detail
+
 inline LiteRtStatus InferSlice(const LiteRtOpT& op,
                                absl::Span<const Dims> input_shapes,
                                std::vector<Dims>& output_shapes) {
-  constexpr int kSliceMinArgs = 3;
+  constexpr int kSliceNumArgs = 3;
   constexpr int kInputArgIndex = 0;
+  constexpr int kBeginArgIndex = 1;
   constexpr int kSizeArgIndex = 2;
 
   // Inputs: Input, Begin, Size.
-  if (input_shapes.size() < kSliceMinArgs) {
+  if (input_shapes.size() != kSliceNumArgs ||
+      op.Inputs().size() != kSliceNumArgs || output_shapes.size() != 1 ||
+      op.Inputs()[kBeginArgIndex] == nullptr ||
+      op.Inputs()[kSizeArgIndex] == nullptr) {
     return kLiteRtStatusErrorShapeInferenceFailed;
   }
   const auto& input_shape = input_shapes[kInputArgIndex];
-  const auto& size_tensor = op.Input(kSizeArgIndex);
-
-  // If size tensor is constant, use it.
-  if (size_tensor.Weights().Buffer().Size() >= sizeof(int32_t)) {
-    auto buf = size_tensor.Weights().Buffer();
-    Dims out_shape;
-    bool is_int64 =
-        (size_tensor.Type().first == kLiteRtRankedTensorType &&
-         size_tensor.Type().second.ranked_tensor_type.element_type ==
-             kLiteRtElementTypeInt64) ||
-        (size_tensor.Type().first == kLiteRtUnrankedTensorType &&
-         size_tensor.Type().second.unranked_tensor_type.element_type ==
-             kLiteRtElementTypeInt64);
-    if (!is_int64 && buf.Size() % sizeof(int32_t) == 0) {
-      const int32_t* data = reinterpret_cast<const int32_t*>(buf.Data());
-      int rank = buf.Size() / sizeof(int32_t);
-      for (int i = 0; i < rank; ++i) {
-        out_shape.push_back(data[i]);
-      }
-    } else if (is_int64 && buf.Size() % sizeof(int64_t) == 0) {
-      const int64_t* data = reinterpret_cast<const int64_t*>(buf.Data());
-      int rank = buf.Size() / sizeof(int64_t);
-      for (int i = 0; i < rank; ++i) {
-        out_shape.push_back(static_cast<int32_t>(data[i]));
-      }
-    } else {
-      return kLiteRtStatusErrorShapeInferenceFailed;
-    }
-    output_shapes[0] = std::move(out_shape);
-    return kLiteRtStatusOk;
+  const auto& begin_shape = input_shapes[kBeginArgIndex];
+  const auto& size_shape = input_shapes[kSizeArgIndex];
+  const size_t input_rank = input_shape.size();
+  if (begin_shape.size() != 1 || size_shape.size() != 1 ||
+      (begin_shape[0] >= 0 &&
+       static_cast<size_t>(begin_shape[0]) != input_rank) ||
+      (size_shape[0] >= 0 &&
+       static_cast<size_t>(size_shape[0]) != input_rank)) {
+    return kLiteRtStatusErrorShapeInferenceFailed;
   }
 
-  // If size is dynamic, output is dynamic rank (if input rank is known) or just
-  // matching rank.
-  output_shapes[0] = Dims(input_shape.size(), -1);
+  const auto& begin_tensor = op.Input(kBeginArgIndex);
+  const auto& size_tensor = op.Input(kSizeArgIndex);
+  const LiteRtElementType begin_type =
+      slice_detail::GetElementType(begin_tensor);
+  const LiteRtElementType size_type = slice_detail::GetElementType(size_tensor);
+  if ((begin_type != kLiteRtElementTypeInt32 &&
+       begin_type != kLiteRtElementTypeInt64) ||
+      begin_type != size_type) {
+    return kLiteRtStatusErrorShapeInferenceFailed;
+  }
+
+  std::vector<int64_t> begin_values;
+  std::vector<int64_t> size_values;
+  bool begin_available;
+  bool size_available;
+  if (slice_detail::ReadIndexData(begin_tensor, begin_type, input_rank,
+                                  begin_values,
+                                  begin_available) != kLiteRtStatusOk ||
+      slice_detail::ReadIndexData(size_tensor, size_type, input_rank,
+                                  size_values,
+                                  size_available) != kLiteRtStatusOk) {
+    return kLiteRtStatusErrorShapeInferenceFailed;
+  }
+
+  Dims inferred_shape(input_rank, -1);
+  for (size_t i = 0; i < input_rank; ++i) {
+    const int64_t input_dim = input_shape[i];
+    if (input_dim < -1) return kLiteRtStatusErrorShapeInferenceFailed;
+
+    int64_t begin_value = 0;
+    if (begin_available) {
+      begin_value = begin_values[i];
+      if (begin_value < 0 ||
+          begin_value > std::numeric_limits<int32_t>::max() ||
+          (input_dim >= 0 && begin_value > input_dim)) {
+        return kLiteRtStatusErrorShapeInferenceFailed;
+      }
+    }
+
+    if (!size_available) continue;
+    const int64_t size_value = size_values[i];
+    if (size_value < -1 || size_value > std::numeric_limits<int32_t>::max()) {
+      return kLiteRtStatusErrorShapeInferenceFailed;
+    }
+    if (size_value == -1) {
+      if (begin_available && input_dim >= 0) {
+        inferred_shape[i] = static_cast<int32_t>(input_dim - begin_value);
+      }
+      continue;
+    }
+
+    if (input_dim >= 0 &&
+        ((!begin_available && size_value > input_dim) ||
+         (begin_available && size_value > input_dim - begin_value))) {
+      return kLiteRtStatusErrorShapeInferenceFailed;
+    }
+    inferred_shape[i] = static_cast<int32_t>(size_value);
+  }
+
+  output_shapes[0] = std::move(inferred_shape);
   return kLiteRtStatusOk;
 }
 

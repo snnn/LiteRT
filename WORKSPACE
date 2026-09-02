@@ -11,6 +11,23 @@ workspace(name = "litert")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
+# Override TensorFlow's FuzzTest dependency with a newer revision. This must be
+# declared before tf_workspace2() so TensorFlow's tf_http_archive() keeps this
+# repository instead of registering its older pin.
+http_archive(
+    name = "com_google_fuzztest",
+    repo_mapping = {
+        "@abseil-cpp": "@com_google_absl",
+        "@com_google_riegeli": "@riegeli",
+        "@googletest": "@com_google_googletest",
+        "@protobuf": "@com_google_protobuf",
+        "@re2": "@com_googlesource_code_re2",
+    },
+    sha256 = "ca47d1c49429375de52be7a34f7c64a8ae891526d15c9ebf9105b9a531420ee3",
+    strip_prefix = "fuzztest-94c3cf3a4391eb0bb12999128e29cbe625bad2f3",
+    url = "https://github.com/google/fuzztest/archive/94c3cf3a4391eb0bb12999128e29cbe625bad2f3.zip",
+)
+
 # Darts Clone. Declare this before TensorFlow's workspace macros so they do not
 # install their own incompatible BUILD overlay.
 http_archive(

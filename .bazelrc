@@ -457,6 +457,19 @@ build:windows --features=compiler_param_file
 build:windows --define=build_with_mkl=false
 build:windows --define=build_with_openmp=false
 
+# Coverage-guided FuzzTest configuration for Windows. FuzzTest requires Clang
+# sanitizer-coverage instrumentation, so use the clang-cl toolchain even when
+# the normal Windows build uses MSVC. Do not instrument external dependencies:
+# coverage callbacks can re-enter instrumented helper code and exhaust the
+# stack before the test process reaches main().
+build:windows_fuzztest --compiler=clang-cl
+build:windows_fuzztest --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl
+build:windows_fuzztest --extra_execution_platforms=@com_google_absl//:x64_windows-clang-cl
+build:windows_fuzztest --platforms=@com_google_absl//:x64_windows-clang-cl
+build:windows_fuzztest --no@com_google_fuzztest//fuzztest:use_riegeli
+build:windows_fuzztest --copt=/clang:-fsanitize-coverage=inline-8bit-counters,trace-cmp
+build:windows_fuzztest --per_file_copt=external/.*@/clang:-fno-sanitize-coverage=inline-8bit-counters,/clang:-fno-sanitize-coverage=trace-cmp
+
 # Do not risk cache corruption. See:
 # https://github.com/bazelbuild/bazel/issues/3360
 build:linux --experimental_guard_against_concurrent_changes
