@@ -139,6 +139,10 @@ class GpuBackendMetal : public GpuBackend {
   CreateBuffer2TensorConverter(
       const ::ml_drift::BufferDescriptor& src_desc,
       const ::ml_drift::TensorDescriptor& dst_desc) override;
+  absl::StatusOr<uint64_t> GetSizeOfMemoryAllocatedForIntermediateTensors()
+      const override;
+  absl::StatusOr<uint64_t> GetSizeOfMemoryAllocatedForConstantTensors()
+      const override;
 
   void SetResidencyRuntimeEnabled(bool enabled);
 
@@ -199,7 +203,7 @@ class GpuBackendMetal : public GpuBackend {
       ABSL_GUARDED_BY(residency_mutex_);
 
   bool residency_active_ ABSL_GUARDED_BY(residency_mutex_) = false;
-  bool residency_runtime_enabled_ ABSL_GUARDED_BY(residency_mutex_) = true;
+  bool residency_runtime_enabled_ ABSL_GUARDED_BY(residency_mutex_) = false;
 };
 
 class GpuInferenceContextMetal : public GpuInferenceContext {

@@ -53,6 +53,9 @@ public final class Environment {
       let libName = "libLiteRtMetalAccelerator.dylib"
       let candidateURLs = [
         Bundle(identifier: "com.google.odml.litert.CLiteRT")?.bundleURL,
+        Bundle(identifier: "com.google.litert.metal_accelerator")?.bundleURL,
+        Bundle(identifier: "com.google.odml.litert.LiteRtMetalAccelerator")?.bundleURL,
+        Bundle.main.privateFrameworksURL?.appendingPathComponent("LiteRtMetalAccelerator.framework"),
         Bundle.main.privateFrameworksURL,
         Bundle.main.resourceURL,
         Bundle.main.bundleURL,
@@ -67,7 +70,8 @@ public final class Environment {
     var environment: LiteRtEnvironment?
     var cOptions: [LiteRtEnvOption] = []
 
-    // Recursive wrapper helper to keep C-strings alive until LiteRtCreateEnvironment finishes executing.
+    // Recursive wrapper helper to keep C-strings alive until LiteRtCreateEnvironment
+    // finishes executing.
     func buildAndRun(index: Int) throws {
       if index == resolvedOptions.count {
         let status: LiteRtStatus

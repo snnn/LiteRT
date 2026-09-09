@@ -7,6 +7,12 @@ on:
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'g3doc/**'
+      - 'site/**'
+      - 'LICENSE'
   merge_group:
   workflow_dispatch:
 
@@ -60,6 +66,7 @@ jobs:
         shell: bash
         run: |
           bazel build \
+            --config=public_cache \
             --config=bulk_build_cpu \
             --nocheck_visibility \
             -- \

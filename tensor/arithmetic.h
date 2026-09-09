@@ -1149,6 +1149,14 @@ Tensor<Mixins...> FullyConnected(
   const graph::TensorInformation& input_info = *GetInfo(input.GetRaw());
   const graph::TensorInformation& weights_info = *GetInfo(weights.GetRaw());
   graph::TensorInformation& output_info = *GetInfo(output.GetRaw());
+  if (input_info.shape.empty()) {
+    return Tensor<Mixins...>(graph::ErrorTensor(absl::InvalidArgumentError(
+        "FullyConnected input must have rank >= 1.")));
+  }
+  if (weights_info.shape.empty()) {
+    return Tensor<Mixins...>(graph::ErrorTensor(absl::InvalidArgumentError(
+        "FullyConnected weights must have rank >= 1.")));
+  }
   if (keep_num_dims) {
     output_info.shape = input_info.shape;
     output_info.shape.back() = weights_info.shape[0];
@@ -1554,6 +1562,11 @@ std::vector<Tensor<Mixins...>> Split(
     axis_val += input_info.shape.size();
   }
 
+  if (axis_val < 0 || static_cast<size_t>(axis_val) >= input_info.shape.size()) {
+    return {Tensor<Mixins...>(graph::ErrorTensor(absl::InvalidArgumentError(
+        "The Split axis is out of range.")))};
+  }
+
   if (input_info.shape[axis_val] % num_splits != 0) {
     return {Tensor<Mixins...>(graph::ErrorTensor(absl::InvalidArgumentError(
         "Number of splits must evenly divide the dimension.")))};
@@ -1851,6 +1864,7 @@ Tensor<Mixins...> Select(Tensor<Mixins...> condition, Tensor<Mixins...> a,
   // first dimension of the inputs, or match the inputs completely.
   if (condition_info.shape != a_info.shape) {
     if (condition_info.shape.size() != 1 ||
+        a_info.shape.empty() ||
         condition_info.shape[0] != a_info.shape[0]) {
       return Tensor<Mixins...>(graph::ErrorTensor(absl::InvalidArgumentError(
           absl::StrCat("Shape of condition must match a and b or be 1D with "
@@ -1961,6 +1975,10 @@ Tensor<Mixins...> EmbeddingLookup(
 
   output_info.type = output_type;
 
+  if (value_info.shape.empty()) {
+    return Tensor<Mixins...>(graph::ErrorTensor(absl::InvalidArgumentError(
+        "EmbeddingLookup value must have rank >= 1.")));
+  }
   output_info.shape = ids_info.shape;
   output_info.shape.push_back(value_info.shape.back());
 
@@ -2116,6 +2134,11 @@ std::vector<Tensor<Mixins...>> TopK(
   graph::TensorInformation& values_info = *GetInfo(values.GetRaw());
   values_info.type = input_info.type;
   values_info.shape = input_info.shape;
+  if (values_info.shape.empty()) {
+    auto error = absl::InvalidArgumentError("TopK input must have rank >= 1.");
+    return {Tensor<Mixins...>(graph::ErrorTensor(error)),
+            Tensor<Mixins...>(graph::ErrorTensor(error))};
+  }
   if (GetInfo(k.GetRaw())->buffer == nullptr) {
     auto error = absl::InvalidArgumentError(
         "TopK k tensor must have a buffer.");
@@ -2306,7 +2329,15 @@ Tensor<Mixins...> GatherNd(Tensor<Mixins...> input, Tensor<Mixins...> indices,
 
   int indices_ndims = indices_info.shape.size();
   int input_ndims = input_info.shape.size();
+  if (indices_info.shape.empty()) {
+    return Tensor<Mixins...>(graph::ErrorTensor(absl::InvalidArgumentError(
+        "GatherNd indices must have rank >= 1.")));
+  }
   int index_depth = indices_info.shape.back();
+  if (index_depth < 0 || index_depth > input_ndims) {
+    return Tensor<Mixins...>(graph::ErrorTensor(absl::InvalidArgumentError(
+        "GatherNd index depth is out of range.")));
+  }
   int outer_dims = indices_ndims - 1;
 
   for (int i = 0; i < outer_dims; ++i) {

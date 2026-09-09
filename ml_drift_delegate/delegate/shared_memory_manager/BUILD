@@ -36,9 +36,13 @@ cc_library(
     hdrs = ["gf32_graph_adapter.h"],
     deps = [
         ":graph_adapter",
+        "//tflite/core/c:private_common",
+        "//tflite/kernels:kernel_util",
         "@ml_drift//ml_drift/common:data_type",
         "@ml_drift//ml_drift/common:model",
         "@ml_drift//ml_drift/common:shape",
+        "@ml_drift//ml_drift/common:types",
+        "@ml_drift//ml_drift/common/task:tensor_desc",
     ],
 )
 
@@ -48,9 +52,12 @@ cc_library(
     hdrs = ["ir_graph_adapter.h"],
     deps = [
         ":graph_adapter",
+        "//tflite/core/c:private_common",
+        "//tflite/kernels:kernel_util",
         "@ml_drift//ml_drift/common:data_type",
         "@ml_drift//ml_drift/common:ir_model",
         "@ml_drift//ml_drift/common:shape",
+        "@ml_drift//ml_drift/common:types",
         "@ml_drift//ml_drift/common/task:tensor_desc",
     ],
 )
@@ -59,8 +66,8 @@ cc_test(
     name = "ir_graph_adapter_test",
     srcs = ["ir_graph_adapter_test.cc"],
     deps = [
-        ":graph_adapter",
         ":ir_graph_adapter",
+        "//tflite/core/c:private_common",
         "@com_google_googletest//:gtest_main",
         "@ml_drift//ml_drift/common:data_type",
         "@ml_drift//ml_drift/common:ir_model",
@@ -99,7 +106,6 @@ cc_library(
         "@ml_drift//ml_drift/common:gpu_info",
         "@ml_drift//ml_drift/common:gpu_model",
         "@ml_drift//ml_drift/common:gpu_model_builder",
-        "@ml_drift//ml_drift/common:model",
         "@ml_drift//ml_drift/common:model_hints",
         "@ml_drift//ml_drift/common:operations",
         "@ml_drift//ml_drift/common:precision",
@@ -326,7 +332,6 @@ cc_test(
     name = "shared_memory_manager_webgpu_test",
     srcs = ["shared_memory_manager_webgpu_test.cc"],
     tags = [
-        "noasan",
         "requires-gpu-nvidia",
     ],
     deps = [
@@ -341,7 +346,7 @@ cc_test(
         "//third_party/vulkan_loader",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
-        "@com_google_googletest//:gtest_main_no_heapcheck",
+        "@com_google_googletest//:gtest_main",
         "@ml_drift//ml_drift/common:data_type",
         "@ml_drift//ml_drift/common:gpu_model",
         "@ml_drift//ml_drift/common:ir_model",
