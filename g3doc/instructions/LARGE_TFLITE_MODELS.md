@@ -1,125 +1,193 @@
+<!-- disableFinding(LINK_RELATIVE_G3DOC) -->
+
 # Large `.tflite` Models and Weight Storage Options
 
-This guide is for developers loading LiteRT/TFLite models and developers writing
-converters. It describes the current source tree; check the runtime and converter
-versions shipped with your application when using these features.
+LiteRT (previously known as TensorFlow Lite) provides multiple storage
+mechanisms for models whose weights exceed the FlatBuffer size limit (~2 GiB).
+Use this guide to choose the appropriate weight storage format for your
+deployment target—mobile, desktop, or web—and to verify support across model
+loading, execution, inspection, and serialization APIs.
 
-## Why this guide exists
+--------------------------------------------------------------------------------
 
-The TFLite FlatBuffer structure must fit below approximately 2 GiB. Embedding all
-constant tensors in `Buffer.data` can exceed that limit. The code supports two
-ways to move payloads outside the FlatBuffer structure:
+## Overview & Why This Guide Exists
 
-| Storage | Deployment | References in the model |
-| --- | --- | --- |
-| `buffer_offset` | One `.tflite` file, with appended payloads | `Buffer.offset/size`; `Operator.large_custom_options_offset/size` |
-| External buffers | `.tflite` plus weight files or application-provided storage | `Tensor.external_buffer`, `Model.external_buffers`, `Model.external_buffer_groups` |
+The TFLite FlatBuffer structure must fit below approximately 2 GiB due to 32-bit
+internal offset representations in FlatBuffers. Embedding all constant tensor
+weights directly inside `Buffer.data` can exceed that limit for modern deep
+learning models. To address that, the framework supports two mechanisms to move
+constant payloads outside the core FlatBuffer structure, alongside traditional
+inline storage:
 
-Both allow the total payload to exceed the FlatBuffer limit. Neither removes the
-limit on the FlatBuffer structure itself or the target device's memory limits.
+| Storage Model     | Deployment           | References in the Model                       | Max        |
+:                   :                      :                                               : Payload    :
+:                   :                      :                                               : Size       :
+| :---------------- | :------------------- | :-------------------------------------------- | :--------- |
+| **Inline          | Standard single      | `Tensor.buffer` indexes `Model.buffers`;      | < 2 GiB    |
+: Buffers**         : `.tflite` file       : `Buffer.data` is present                      : total      :
+:                   :                      :                                               : FlatBuffer :
+| **`buffer_offset` | Single `.tflite`     | `Buffer.offset` and `Buffer.size`;            | Total file |
+: Mode**            : file with appended   : `Operator.large_custom_options_offset`/`size` : can exceed :
+:                   : constants            :                                               : 2 GiB      :
+| **External        | `.tflite` plus       | `Tensor.external_buffer`,                     | Total      |
+: Buffers**         : separate weight      : `Model.external_buffers`,                     : weights    :
+:                   : files or             : `Model.external_buffer_groups`                : can exceed :
+:                   : application-provided :                                               : 2 GiB      :
+:                   : memory               :                                               : across     :
+:                   :                      :                                               : storage    :
+:                   :                      :                                               : sources    :
+
+Both `buffer_offset` and external buffers allow the total payload to exceed the
+FlatBuffer limit. Neither removes the ~2 GiB limit on the FlatBuffer
+graph/metadata structure itself or the target device's physical memory limits.
 External buffers describe immutable tensor data; appended payloads can also hold
-custom-op options. See the [schema](../../tflite/converter/schema/schema.fbs).
+custom-op options. See the
+[FlatBuffer schema](../../tflite/converter/schema/schema.fbs).
 
-## Option 1: `buffer_offset` mode (single-file deployment)
+**Default to the same `.tflite` file across web, desktop, and mobile.** For an
+ordinary model such as ResNet-50, use inline buffers when they fit; web
+deployment alone is not a reason to externalize weights or produce a different
+model. Preserve an existing model's storage layout when it works on all intended
+targets. Operator and tensor-type support must also be checked for each backend.
+
+Use `buffer_offset` when appended storage is needed and one deployable file is
+preferred; use external buffers when weights need separate storage or loading
+the complete file exceeds a target's memory limits. Change packaging for a
+target only when a concrete limitation requires it. If your pipeline inspects or
+rewrites models, first check the
+[Public API Support](#public-api-support-loading-inspection-and-serialization)
+table: the current LiteRT serializer does not preserve separate-weight metadata.
+See [Web Deployment](#web-deployment--streamed-loading-litertjs--webgpu) for the
+ordinary single-file loader and the separate-weight streaming alternative.
+
+--------------------------------------------------------------------------------
+
+## Option 1: `buffer_offset` Mode (Single-File Deployment)
+
+In `buffer_offset` mode, the model remains packaged as a single `.tflite` file
+on disk. The graph structure, op definitions, and metadata reside in a valid
+FlatBuffer at the beginning of the file, while constant tensor payloads are
+appended immediately after the FlatBuffer.
 
 ### Representation
 
-The graph and metadata remain in a FlatBuffer at the start of the `.tflite` file.
-Constant payloads are appended after it. For each appended constant:
+For each appended constant:
 
-- `Tensor.buffer` still indexes `Model.buffers`.
-- `Buffer.data` is absent; `Buffer.offset` and `Buffer.size` are 64-bit byte
-  values. The offset is relative to the beginning of the `.tflite` file and must
-  be greater than 1. Values 0 and 1 are not valid appended-payload offsets.
-- Appended custom-op options use the operator's
-  `large_custom_options_offset/size` fields, with the same offset convention.
+-   `Tensor.buffer` still indexes `Model.buffers`.
+-   `Buffer.data` is **absent** (omit the data vector).
+-   `Buffer.offset` and `Buffer.size` are 64-bit unsigned integers. The offset
+    is relative to the beginning of the `.tflite` file and must be greater
+    than 1. Offset values `0` and `1` are reserved sentinels and are not valid
+    appended-payload offsets.
+-   Appended custom-op options use the operator's `large_custom_options_offset`
+    and `large_custom_options_size` fields with the same offset convention.
 
-The exporter aligns appended constants to 16 bytes and adds `buffer_location`
-metadata with the value `outside flatbuffers`. Preserve this metadata when
-rewriting a model: converter utilities and `BuildFromModel` use it to recognize
-this storage mode. The payload locations themselves come from the offset fields.
+The exporter aligns appended constants to 16-byte boundaries and records a
+`buffer_location` metadata entry with the string value `outside flatbuffers`.
+Preserve this metadata when rewriting or transforming a model: converter
+utilities and `BuildFromModel` rely on it to recognize this storage mode. The
+payload locations themselves are determined by the `Buffer.offset` fields.
 
-### Converter guidance
+### Converter Guidance
 
-- Python TFLite converter: set
-  `converter._experimental_use_buffer_offset = True` before `convert()`.
-- Converter flags: set `use_buffer_offset = True` (C++:
-  `converter_flags.set_use_buffer_offset(true)`).
-- The MLIR translation command-line flag is `--use-buffer-offset`.
+-   **Python TFLite Converter**: Set
+    `converter._experimental_use_buffer_offset = True` before invoking
+    `convert()`.
+-   **C++ Converter Flags**: Set `converter_flags.set_use_buffer_offset(true)`.
+-   **MLIR Translation**: Pass the command-line flag `--use-buffer-offset`.
 
-The current [FlatBuffer exporter](../../tflite/converter/flatbuffer_export.cc)
-also enables this mode proactively when the estimated module size exceeds the
-FlatBuffer limit minus 512 MiB. If an initial export reports the FlatBuffer size
-limit error, it retries once with offsets enabled. These are exporter behaviors,
-not a guarantee that every conversion or postprocessing step can handle large
-models. The [StableHLO Python conversion pipeline](../../tflite/converter/python/stablehlo_tfl_pipeline.cc)
-explicitly enables buffer offsets even for small models.
+The FlatBuffer exporter(flatbuffer_export.cc) also
+enables this mode proactively when the estimated module size exceeds the
+FlatBuffer limit minus 512 MiB. If an initial export fails due to the FlatBuffer
+size limit, it automatically retries once with offsets enabled. The
+StableHLO Python conversion pipeline(stablehlo_tfl_pipeline.cc)
+explicitly enables buffer offsets even for smaller models.
 
-### Runtime guidance
+### Runtime Guidance
 
-Standard loading APIs work when the runtime receives the complete file allocation,
-including appended bytes:
+Use allocation-based loading APIs and supply the complete file, including
+appended bytes. Support for inspecting or rewriting the loaded model is
+described separately in the
+[API support table](#public-api-support-loading-inspection-and-serialization).
 
-- TFLite C++: `FlatBufferModel::BuildFromFile(...)` or
-  `FlatBufferModel::VerifyAndBuildFromFile(...)`, then construct the interpreter
-  from the `FlatBufferModel`.
-- TFLite Python: `Interpreter(model_path="model.tflite")`.
-- LiteRT C++: `Model::CreateFromFile(env, ...)` or the filename overload of
-  `CompiledModel::Create(env, ..., options)`.
-- In-memory loading (`BuildFromBuffer`, `model_content=...`, or LiteRT buffer
-  overloads) requires the entire `.tflite` byte sequence and its full size. Keep
-  caller-owned storage alive for its consumers.
+-   **TFLite C++**: Use `FlatBufferModel::BuildFromFile(...)` or
+    `FlatBufferModel::VerifyAndBuildFromFile(...)`, then construct the
+    interpreter from the `FlatBufferModel`.
+-   **TFLite Python**: Use `Interpreter(model_path="model.tflite")`.
+-   **LiteRT C++**: Use `Model::CreateFromFile(env, ...)` or the filename
+    overload of `CompiledModel::Create(env, ..., options)`.
+-   **LiteRT file descriptors**: `Model::CreateFromFd(env, fd, offset, size)`
+    requires a region containing the complete `.tflite` model. Model offsets are
+    relative to the start of that region, not the containing file. This API
+    requires mmap support in the runtime build.
+-   **In-Memory Loading**: APIs like
+    `tflite::FlatBufferModel::BuildFromBuffer(...)`, `model_content=...`, or
+    LiteRT buffer overloads require the **entire** `.tflite` byte sequence
+    including appended payloads, along with its full length. The caller must
+    keep the backing memory alive for the duration of model execution.
+-   **Avoid partial allocations**: Passing only the FlatBuffer prefix loses the
+    appended weights.
+-   **Avoid `FlatBufferModel::BuildFromModel(const tflite::Model*)`**: This
+    pointer-only overload rejects models marked with `buffer_location`.
+-   **Raw-model builder**: The raw-model `InterpreterBuilder` overload needs an
+    explicit backing `Allocation` to resolve appended offsets.
+-   **Model rewriting**: A standard FlatBuffer unpack/repack does not preserve
+    appended payloads or relocate their offsets. Rewriters must handle both
+    constant buffers and large custom-op options explicitly.
 
-File loading allows mmap where supported and avoids first reading the whole model
-into a Python bytes object. Passing only the FlatBuffer prefix loses the appended
-data. Also avoid `FlatBufferModel::BuildFromModel(const tflite::Model*)`, which
-rejects models marked with `buffer_location`. The raw-model `InterpreterBuilder`
-overload needs an explicit backing `Allocation` to resolve appended offsets.
-See [model loading](../../tflite/converter/core/model_builder_base.h) and
-[interpreter parsing](../../tflite/core/interpreter_builder.cc).
+LiteRT's native file, buffer, and file-descriptor APIs retain an allocation and
+avoid the pointer-only `BuildFromModel` path. See
+[LiteRT loading](../../litert/core/util/flatbuffer_tools.cc),
+[the C entry points](../../litert/c/litert_model.cc), and
+[TFLite interpreter parsing](../../tflite/core/interpreter_builder.cc).
 
-A plain FlatBuffer unpack/repack does not preserve appended payloads or relocate
-their offsets. Any tool that rewrites the model must handle both constant buffers
-and large custom-op options explicitly.
+--------------------------------------------------------------------------------
 
-## Option 2: External buffers (separate weight storage)
+## Option 2: External Buffers (Separate Weight Storage)
 
-Use external buffers when weight assets need separate packaging or sharding. The
-model records group names and slices; the loader supplies their backing storage.
+Use external buffers when weight assets need separate packaging, sharding across
+multiple files, or dynamic supply from host application memory. The model
+records group names and byte slices; the runtime loader supplies the backing
+storage.
 
-### Emitting FlatBuffers directly
+### Emitting FlatBuffers Directly
 
 For each external constant:
 
-- Set `Tensor.external_buffer` to a nonzero `ExternalBuffer.id`. This is an ID,
-  not an index into `Model.external_buffers`.
-- Set `Tensor.buffer = 0`, and keep `Model.buffers[0]` empty. Do not attach inline
-  or appended constant data to the same tensor, or mark it as variable.
-- Add an `ExternalBuffer` with a unique ID, a `group` index into
-  `Model.external_buffer_groups`, and 64-bit byte `offset`/`length` fields.
-- Give the referenced `ExternalBufferGroup` a name identifying its backing
-  storage. Group index 0 is valid; it is not the tensor-buffer sentinel.
+-   Set `Tensor.external_buffer` to a nonzero `ExternalBuffer.id`. This is an
+    ID, not an index into `Model.external_buffers`.
+-   Set `Tensor.buffer = 0`, and keep `Model.buffers[0]` empty. Do not attach
+    inline or appended constant data to the same tensor, or mark it as variable.
+-   Add an `ExternalBuffer` with a unique ID, a `group` index into
+    `Model.external_buffer_groups`, and 64-bit byte `offset` and `length`
+    fields.
+-   Give the referenced `ExternalBufferGroup` a `name` identifying its backing
+    storage (e.g. `weights.bin`). Group index `0` is valid; it is not a
+    sentinel.
 
-The current exporter assigns IDs as `0x80000000 | external_buffer_index`, setting
-the high bit to distinguish them from ordinary TFLite buffer indices. Follow that
-convention when generating models for the same runtime/delegate paths.
+The exporter assigns IDs following `0x80000000 | external_buffer_index`, setting
+the high bit to distinguish them from standard TFLite buffer indices. Follow
+that convention when generating models for the same runtime/delegate paths.
 
 The `packing` string records layout information. The built-in loader exposes it
 to consumers but does not decode arbitrary compression or packing formats. For
 CPU execution, provide bytes in the tensor's expected representation; the
-externalization tool below writes `packing = "unpacked"`.
+externalization tool writes `packing = "unpacked"`.
 
 For host access, the resolved tensor address must satisfy
 `LITERT_HOST_MEMORY_BUFFER_ALIGNMENT` (currently 64 bytes). Align file slice
-offsets accordingly. For a packed file, align `section.offset + buffer.offset`;
-for in-memory groups, align `group_base + buffer.offset`. The length must cover
-the tensor's required bytes. These requirements come from
-[host tensor buffer validation](../../litert/runtime/tensor_buffer.cc).
+offsets accordingly:
+
+-   For a packed file, align `section.offset + buffer.offset`.
+-   For in-memory groups, align `group_base + buffer.offset`.
+-   The length must cover the tensor's required byte size. These requirements
+    are enforced by
+    [host tensor buffer validation](../../litert/runtime/tensor_buffer.cc).
 
 ### Emitting MLIR
 
-Use `tfl.external_const` with an `external_buffer` attribute. The attribute uses
-named fields, for example:
+Use `tfl.external_const` with an `external_buffer` attribute specifying named
+fields:
 
 ```mlir
 %weights = "tfl.external_const"() <{
@@ -128,20 +196,22 @@ named fields, for example:
 }> : () -> tensor<4x4xf32>
 ```
 
-The exporter materializes the groups, buffers, and tensor references. Your
-converter must separately write the referenced bytes. A `tfl.external_const`
-with only `buffer_index` is a different form used to reference an existing
-FlatBuffer constant; it does not create a separate weight file. See the
+The exporter materializes the groups, buffers, and tensor references. The
+converter or pipeline must separately write the referenced weight bytes to disk.
+
+*(Note: `tfl.external_const` with only a `buffer_index` references an existing
+FlatBuffer constant rather than creating a separate weight file. See
 [op definition](../../tflite/converter/ir/tfl_ops.td),
 [attribute definition](../../tflite/converter/ir/tfl_op_enums.td), and
-[exporter](../../tflite/converter/flatbuffer_export.cc).
+[exporter](../../tflite/converter/flatbuffer_export.cc)).*
 
-### Externalizing an existing `.tflite` model
+### Externalizing an Existing `.tflite` Model
 
+The tool
 [`litert/tools/externalize_tflite_flatbuffer.py`](../../litert/tools/externalize_tflite_flatbuffer.py)
-writes `model.tflite` and one weight blob into an output directory. From the
-repository root, in a Python environment with `flatbuffers`, NumPy, and the
-generated `litert.python.schema_py_generated` module available:
+extracts weights from `model.tflite` and writes a separate weight blob into an
+output directory. In a Python environment with `flatbuffers`, NumPy, and the
+generated `litert.python.schema_py_generated` module:
 
 ```bash
 python3 -m litert.tools.externalize_tflite_flatbuffer \
@@ -151,10 +221,7 @@ python3 -m litert.tools.externalize_tflite_flatbuffer \
   --num_elements_threshold=256
 ```
 
-The generated module must include the external-buffer schema fields. It is not
-checked in at that import path, and this tool's Python Bazel targets are currently
-commented out in [the OSS BUILD file](../../litert/tools/BUILD). With `flatc`
-available, generate the module from the current schema before running the command:
+Generate the Python schema bindings with `flatc` before running:
 
 ```bash
 flatc --python --gen-onefile --gen-object-api \
@@ -162,58 +229,109 @@ flatc --python --gen-onefile --gen-object-api \
   tflite/converter/schema/schema.fbs
 ```
 
-The tool is scoped to weights that the LiteRT-LM external-weight path can consume:
+**Scope and Behavior of the Tool:**
 
-- It selects tensors used at input 1 of `FULLY_CONNECTED`, `CONV_2D`,
-  `DEPTHWISE_CONV_2D`, or `EMBEDDING_LOOKUP`, with **more than** the threshold
-  number of elements. The threshold counts elements, not bytes.
-- It skips subgraph inputs, bias tensors, variables, and tensors already using
-  external buffers. Other constants remain embedded.
-- It deduplicates identical newly externalized payloads and aligns their offsets
-  to 64 bytes. It clears old buffers only when remaining tensors no longer
-  reference them.
-- It reads appended `Buffer.offset/size` payloads before processing. Unselected
-  payloads, such as biases, are repacked inline in the output model.
+-   Selects constant tensors at input 1 of `FULLY_CONNECTED`, `CONV_2D`,
+    `DEPTHWISE_CONV_2D`, or `EMBEDDING_LOOKUP` exceeding the element count
+    threshold.
+-   Skips subgraph inputs, bias tensors, variables, and tensors already using
+    external buffers.
+-   Deduplicates identical externalized payloads and aligns slice offsets to 64
+    bytes.
+-   Resolves appended `Buffer.offset/size` payloads prior to processing;
+    unselected payloads (such as biases) are repacked inline.
+-   Does not stream arbitrarily large files (reads input into memory) and does
+    not relocate `Operator.large_custom_options_*`.
 
-This is not a general streaming conversion for arbitrarily large files: it reads
-the input into memory, and the remaining inline model must fit in a FlatBuffer.
-It does not relocate appended `Operator.large_custom_options_*` payloads. Models
-using those fields need a tool that handles them. Existing external weight files
-must also be preserved; the Python `externalize(..., existing_weights=...)`
-argument can copy an existing blob before appending, but the CLI does not expose
-that argument.
+The remaining inline model must fit in a FlatBuffer. Preserve any existing
+external weight files separately: the Python `externalize(...,
+existing_weights=...)` argument can copy an existing blob, but the CLI does not
+expose that argument.
 
-## Runtime compatibility and behavior
+--------------------------------------------------------------------------------
 
-### Core TFLite interpreter
+## Web Deployment & Streamed Loading (litert.js & WebGPU)
 
-The [interpreter builder](../../tflite/core/interpreter_builder.cc) records
-`Tensor.external_buffer` IDs, but does not resolve the external groups into files
-or restore their data. A plain `Interpreter(model_path=...)` therefore does not
-automatically load separate weights. Use LiteRT's compiled-model path, or supply
-an integration that resolves external constants before kernels and delegates
-prepare them.
+Start with the same complete `.tflite` file used on desktop and mobile. The
+normal `loadAndCompile` path accepts that file's bytes; it does not require a
+web-specific graph or external weights. This applies to inline models and to
+files with appended payloads, subject to backend support and available memory.
+For example, a compatible ResNet-50 file can be served by URL on web and loaded
+from a filesystem path on native targets without changing its contents.
 
-### LiteRT compiled-model runtime
+The two JavaScript loading APIs have different memory behavior:
 
-The current [compiled-model runtime](../../litert/runtime/compiled_model.cc)
-creates a [weight loader](../../weight_loader/external_weight_loader_litert.cc)
-automatically unless the client supplies one. The loader is a direct dependency
-in [Bazel](../../litert/runtime/BUILD) and is included in the
-[CMake runtime sources](../../litert/runtime/CMakeLists.txt). There is no
-`LITERT_WITH_EXTERNAL_WEIGHT_LOADER` guard in the current tree.
+-   [`loadAndCompile(model, options)`](../../litert/js/packages/core/src/litert_web.ts)
+    collects the complete model and copies it into Wasm memory, including any
+    appended payloads. Passing a `ReadableStreamDefaultReader` does not enable
+    separate-weight streaming. That input path's
+    [collection helper](../../litert/js/packages/core/src/load_utils.ts)
+    currently caps the model at 2,000,000,000 bytes.
+-   [`loadModelAndWeights(modelData, weightsStream, options)`](../../litert/js/packages/core/src/streamed_loading.ts)
+    loads the FlatBuffer into Wasm memory and supplies external weights through
+    a separate `ReadableStream<Uint8Array>`. It requires a WebGPU device; select
+    `accelerator: 'webgpu'` and a runtime/browser configuration that supports
+    the delegate's streaming callback.
 
-When CPU is requested, the runtime prepares host access and restores external
-tensor pointers as immutable `kTfLiteMmapRo` data **before applying delegates**, so
-CPU kernels and XNNPACK can use them. The loader is also passed to accelerator
-options. GPU-only loading depends on the delegate's weight-loader integration;
-the presence of schema fields alone does not guarantee support on every backend.
-On Web, CPU pointer restoration runs only when CPU is requested without GPU/NPU,
-to support GPU weight streaming.
+Choose separate-weight streaming when the application already uses external
+weights or when measurements show that loading the shared complete file exceeds
+the target's limits. When this representation is needed, prefer sharing the same
+`.tflite` graph and weight files across platforms as well: native applications
+can open the weight file, while web applications supply its bytes as a stream.
 
-For a model and its weight files in the same directory, no external-weight option
-is needed. For example, inside a function returning `litert::Expected<...>`, with
-an existing `litert::Environment env`:
+The current streamed-loading API accepts **one weight stream**, with
+external-buffer offsets interpreted within that stream. It does not expose the
+native loader's group-to-file or group-to-section maps, or fetch URLs from group
+names. The application must supply the stream and arrange compatible offsets.
+Applications using container bundles must extract the FlatBuffer and weight
+stream themselves; this API does not take a `.litertlm` container as its model
+argument.
+
+External weights avoid storage in the Wasm heap on this WebGPU path, but loading
+still uses JavaScript memory. The current callback accumulates enough bytes for
+each requested tensor before calling `GPUQueue.writeBuffer`, then discards
+processed data. Account for this staging memory and GPU allocations when
+choosing tensor sizes and testing large models.
+
+When using separate-weight streaming, keeping the FlatBuffer and remaining
+inline constants small reduces Wasm memory usage. There is no 50 MiB graph-size
+threshold in these APIs, and a particular graph size does not guarantee browser
+or GPU compatibility. Compilation consumes the weight stream; the public
+streamed-loading helper does not provide a weight-free dry-run mode. Validate
+the intended browser, runtime build, model, and GPU together with a known-good
+inference.
+
+--------------------------------------------------------------------------------
+
+## Runtime Execution & Weight Resolution
+
+### Core TFLite Interpreter
+
+The [interpreter builder](../../tflite/core/interpreter_builder.cc) parses and
+stores `Tensor.external_buffer` IDs, but does not resolve external buffer groups
+into filesystem files or load their bytes. Therefore, the Python
+`Interpreter(model_path=...)` does not automatically load separate weight files.
+Use LiteRT's compiled-model runtime or supply custom logic to map external
+weights into tensor memory before `Prepare`/`AllocateTensors`.
+
+### LiteRT Compiled-Model Runtime
+
+The [LiteRT compiled-model runtime](../../litert/runtime/compiled_model.cc)
+automatically instantiates a
+[weight loader](../../weight_loader/external_weight_loader_litert.cc) unless the
+client supplies one explicitly.
+
+-   **CPU Execution**: The runtime maps host access and restores external tensor
+    pointers as immutable `kTfLiteMmapRo` data **before applying delegates**,
+    enabling CPU kernels and XNNPACK to execute directly over external weights.
+-   **Hardware Accelerators**: The loader is passed to accelerator options.
+    GPU-only loading depends on backend delegate integration. On Web, CPU
+    pointer restoration runs only when CPU is requested without GPU/NPU to
+    facilitate streaming weights directly into WebGPU accelerator buffers
+    without intermediate CPU heap allocation.
+
+For a model and its weight file in the same directory, loading is automatic. For
+example, in C++:
 
 ```cpp
 LITERT_ASSIGN_OR_RETURN(auto options, litert::Options::Create());
@@ -224,78 +342,192 @@ LITERT_ASSIGN_OR_RETURN(
     litert::CompiledModel::Create(env, "/models/model.tflite", options));
 ```
 
-If the model's group name is `weights.bin`, this loads `/models/weights.bin`.
-Keep the environment alive for the compiled model and its executions.
+If the model references group name `weights.bin`, this automatically loads
+`/models/weights.bin`.
 
-### How group names resolve
+### Public API Support: Loading, Inspection, and Serialization
 
-The built-in loader checks these sources in order for each group:
+The following describes the current native C APIs and their C++ wrappers.
+`CreateFromFile`, `CreateFromBuffer`, and `CreateFromFd` refer to the
+corresponding `Model` factories and `LiteRtCreateModelFrom*` functions. Loading
+retains the original FlatBuffer; the compiled-model runtime resolves separate
+weights later.
 
-| Priority | Source | Meaning of `ExternalBuffer.offset` |
-| --- | --- | --- |
-| 1 | Matching entry in `Options::SetWeightInMemoryMap(...)` | Offset into the group's host-memory span |
-| 2 | Matching section in `Options::SetExternalWeightScopedFile(...)` | Offset within the section; file position is `section.offset + buffer.offset` |
-| 3 | `ExternalBufferGroup.name` as a filesystem path | Offset from the start of that file |
+| API or Operation                     | Appended Tensor        | Separate Weights           |
+:                                      : Buffers                : (`Tensor.external_buffer`) :
+:                                      : (`Buffer.offset/size`) :                            :
+| :----------------------------------- | :--------------------- | :------------------------- |
+| `CreateFromFile`                     | Reads the complete     | Retains references;        |
+:                                      : file allocation        : records the model          :
+:                                      :                        : directory for later weight :
+:                                      :                        : resolution                 :
+| `CreateFromBuffer` / `CreateFromFd`  | Requires the complete  | Retains references; no     |
+:                                      : model buffer or file   : model directory, so use    :
+:                                      : region, including      : explicit storage mappings  :
+:                                      : appended bytes         : or filesystem paths valid  :
+:                                      :                        : from the working directory :
+| `CompiledModel::Create` using the    | Supplies the full      | Uses the weight loader;    |
+: original FlatBuffer                  : allocation to the      : execution support depends  :
+:                                      : TFLite interpreter     : on the requested backend   :
+| `LiteRtGetTensorWeights` followed by | Returns the appended   | Returns empty weights for  |
+: `LiteRtGetWeightsBytes`              : tensor bytes           : external constants with    :
+:                                      :                        : `Tensor.buffer = 0`; does  :
+:                                      :                        : not resolve external       :
+:                                      :                        : sources                    :
+| `LiteRtSerializeModel` /             | Re-emits appended      | Does not preserve          |
+: `LiteRtSerializeModelWithSignatures` : tensor data and        : external-buffer IDs,       :
+:                                      : recalculates offsets;  : groups, or slices          :
+:                                      : validate output        :                            :
+:                                      : alignment              :                            :
 
-For the filesystem fallback, absolute paths are used unchanged. Relative paths
-are resolved against the model's source directory when available. Models loaded
-from memory or a file descriptor have no source directory, so relative names are
-passed to the filesystem as-is (relative to the process working directory).
-Provide explicit storage mappings when that is unsuitable. The native filesystem
-fallback does not fetch URLs, even though the schema describes groups as file/URI
-references.
+These differences follow from the
+[model importer](../../litert/core/model/model_load.cc),
+[public getters](../../litert/c/litert_model.cc), and
+[serializer](../../litert/core/model/model_serialize.cc). Restoring weights into
+the compiled interpreter does not populate the original `LiteRtModel`'s weight
+objects. A model can therefore execute successfully while its inspection APIs
+report empty weights.
 
-### Packed weight files and client-owned storage
+**Appended custom-op options have a separate limitation.** The importer logs
+that `large_custom_options_*` is unsupported in `litert::Model` and reads only
+inline `custom_options`. `LiteRtGetCustomOptions` does not expose the appended
+payload, and the serializer does not preserve it. Direct execution can still use
+the original FlatBuffer allocation through TFLite's interpreter parser, provided
+the custom op itself is supported.
 
-`Options::SetExternalWeightScopedFile(...)` maps group names to sections in one
-open file. Before the `CompiledModel::Create` call above, add, for example:
+**Do not use successful loading as evidence of a safe serialization round
+trip.** For separate weights or appended custom-op options, use tooling that
+explicitly preserves that representation, or materialize the data in a supported
+format before rewriting. Compiler-plugin paths that
+[reserialize the model](../../litert/runtime/compiled_model.cc) inherit these
+limitations. Also, the public serialization API returns
+`kLiteRtStatusErrorUnsupported` in builds with `LITERT_DISABLE_NPU`.
 
-```cpp
-LITERT_ASSIGN_OR_RETURN(auto weight_file,
-                       litert::ScopedFile::Open("/models/weights.pack"));
-litert::Options::ScopedWeightSectionMap sections;
-sections.emplace("weights.bin", litert::ScopedWeightSection{4096, 8192});
-LITERT_RETURN_IF_ERROR(
-    options.SetExternalWeightScopedFile(weight_file, std::move(sections)));
-```
+### How Group Names Resolve
 
-This example maps `weights.bin` to an 8192-byte section starting at byte 4096.
-An external buffer at offset 64 then starts at file byte 4160. Add one map entry
-per group backed by the packed file. Each section must have positive length and
-fit inside the file, and every buffer slice must fit inside its section.
+The built-in weight loader resolves each group in the following order of
+precedence:
 
-Although the setter takes `ScopedFile&`, it **moves the file handle** into the
-options; `weight_file` is no longer usable after a successful call. Include
-`litert/cc/internal/scoped_file.h` and
-`litert/cc/internal/scoped_weight_source.h` for these types. The public
-[Options header](../../litert/cc/litert_options.h) defines the setters.
+Priority | Resolution Source                                               | Meaning of `ExternalBuffer.offset`
+:------- | :-------------------------------------------------------------- | :---------------------------------
+**1**    | Matching entry in `Options::SetWeightInMemoryMap(...)`          | Byte offset into the group's host-memory span
+**2**    | Matching section in `Options::SetExternalWeightScopedFile(...)` | Offset within section (`section.offset + buffer.offset` in file)
+**3**    | `ExternalBufferGroup.name` as a filesystem path                 | Offset from the start of that file
 
-For application-owned weights, `SetWeightInMemoryMap(...)` borrows the group map
-and its backing memory; both must remain valid for the compiled model's lifetime.
-This setter is unavailable when `LITERT_NO_ABSL` is defined. `SetWeightLoader(...)`
-instead supplies a client-owned loader, which must also outlive its consumers.
+-   **Filesystem fallback**: Absolute paths are loaded directly. Relative paths
+    resolve against the model file's directory when loaded from a path. When
+    loaded from memory or a file descriptor, relative paths resolve against the
+    current process working directory. This fallback does not fetch URLs or open
+    Android assets by group name.
+-   **Scoped packed files (`SetExternalWeightScopedFile`)**: Multiple groups can
+    be packed into a single container file:
 
-The [`run_model` tool](../../litert/tools/run_model.cc) exposes a single section
-mapping through `--scoped_weight_file`, `--scoped_weight_group`,
-`--scoped_weight_offset` (default 0), and `--scoped_weight_length` (default -1,
-meaning the rest of the file). Multiple sections require the C++ map API.
+    ```cpp
+    LITERT_ASSIGN_OR_RETURN(auto weight_file,
+                           litert::ScopedFile::Open("/models/weights.pack"));
+    litert::Options::ScopedWeightSectionMap sections;
+    sections.emplace("weights.bin", litert::ScopedWeightSection{4096, 8192});
+    LITERT_RETURN_IF_ERROR(
+        options.SetExternalWeightScopedFile(weight_file, std::move(sections)));
+    ```
 
-## Validation checklist for converter authors
+    Call the setter before `CompiledModel::Create`. It moves ownership of
+    `weight_file`; the handle is invalid after a successful call. Sections must
+    have positive lengths and fit in the packed file; each tensor slice must fit
+    in its section. See the [Options header](../../litert/cc/litert_options.h).
+-   **Application memory (`SetWeightInMemoryMap`)**: Borrows client memory for
+    group data; both the map and its backing memory must remain valid for the
+    lifetime of the compiled model.
+-   **CLI Runner**: The [`run_model` tool](../../litert/tools/run_model.cc)
+    exposes section mapping via `--scoped_weight_file`, `--scoped_weight_group`,
+    `--scoped_weight_offset`, and `--scoped_weight_length`.
 
-- Keep the graph, metadata, and all remaining inline data below the FlatBuffer
-  size limit. Use generated bindings that include every field being emitted.
-- For appended payloads, check `buffer_location`, offset values greater than 1,
-  alignment, and the full allocation length. Preserve or recompute offsets for
-  both constant buffers and custom-op options after every rewrite.
-- For external constants, check the empty buffer sentinel, nonzero and unique
-  external-buffer IDs, valid group indices, immutable tensor metadata, and
-  representation/length matching the tensor type and shape.
-- Validate slice bounds without integer overflow: require `offset <= size` and
-  `length <= size - offset`. For packed files, validate both section and tensor
-  ranges, and check the final host address alignment.
-- Ship all referenced weights or provide matching storage mappings. Replacing a
-  weight asset requires compatible shapes, types, quantization parameters,
-  offsets, and packing metadata in the model.
-- Run a known-good inference on the intended runtime and accelerator combination,
-  including CPU fallback if needed. FlatBuffer schema verification alone cannot
-  verify the contents of separate weight files or backend compatibility.
+### API Availability Across Languages
+
+-   **Native C++** exposes `SetExternalWeightScopedFile`,
+    `SetWeightInMemoryMap`, and `SetWeightLoader`. `SetWeightInMemoryMap` is
+    unavailable when `LITERT_NO_ABSL` is defined. A client-supplied
+    `WeightLoader` is borrowed and must outlive the compiled model. See
+    [C++ options](../../litert/cc/litert_options.h).
+-   **Native C** supports automatic filesystem weight resolution during
+    compilation, but its public options API has no equivalent setters for a
+    group-memory map, scoped weight file, or custom weight loader. See
+    [C options](../../litert/c/litert_options.h).
+-   **Python `CompiledModel`** uses the native file or buffer loading paths, but
+    its
+    [options](../../litert/python/litert_wrapper/compiled_model_wrapper/options.py)
+    do not expose those three C++ weight-source setters. A filename preserves
+    the model directory; an in-memory model does not. See
+    [the Python wrapper](../../litert/python/litert_wrapper/compiled_model_wrapper/compiled_model_wrapper.cc).
+-   **Kotlin/Android** also does not expose those setters. File loading retains
+    the model path. Asset loading copies the complete asset into memory and
+    performs one `AAsset_read` with an `int` result, so that path cannot
+    complete a read larger than `INT_MAX` bytes. It does not automatically load
+    weight groups from neighboring APK assets. Use extracted filesystem files
+    and the file-loading API for that deployment. See
+    [the JNI loaders](../../litert/kotlin/src/main/jni/litert_compiled_model_jni.cc).
+-   **JavaScript** loads a complete `.tflite` file with `loadAndCompile`,
+    including inline or appended weights within memory and backend limits. It
+    also has a separate API for one weight stream and WebGPU execution; see
+    [Web Deployment & Streamed Loading](#web-deployment--streamed-loading-litertjs--webgpu).
+
+### External Input Bindings Are a Different Mechanism
+
+`Options::AddExternalTensorBinding` and `LiteRtAddExternalTensorBinding` bind
+caller-owned memory to a **named signature input** through
+[`SetCustomAllocationForInputTensor`](../../litert/runtime/tfl_utils.cc). They
+do not resolve arbitrary `Tensor.external_buffer` IDs or replace the
+weight-source setters above. The input's size and alignment requirements still
+apply.
+
+The current C API and
+[C++ runtime proxy](../../litert/cc/internal/litert_runtime_proxy.h) use `int`
+for the binding size, although the C++ options setter accepts `size_t`. This is
+not a supported path for binding a tensor larger than `INT_MAX` bytes.
+
+--------------------------------------------------------------------------------
+
+## Checklist for Model Authors, Converters, and Tooling
+
+When generating, rewriting, or validating models with large weight storage:
+
+-   [ ] **Shared Deployment Artifact**: Try the same model file on all intended
+    targets first. Introduce different packaging only for an identified storage,
+    backend, or memory limitation; validate each required variant.
+-   [ ] **FlatBuffer Bounds**: Ensure graph structure, tensor metadata, and
+    remaining inline buffers stay below the ~2 GiB FlatBuffer limit.
+-   [ ] **Appended Payloads (`buffer_offset`)**:
+    -   Ensure `buffer_location` metadata is set to `"outside flatbuffers"`.
+    -   Validate that `Buffer.offset > 1` (offsets `0` and `1` are invalid
+        sentinels).
+    -   Ensure 16-byte alignment and verify that offsets do not exceed total
+        file length.
+    -   Recompute and preserve offsets for both constant buffers and custom-op
+        options after any graph transformation.
+-   [ ] **External Buffers (When Used)**:
+    -   Ensure `Tensor.buffer == 0` (empty sentinel) and `Model.buffers[0]` is
+        empty.
+    -   Verify each `Tensor.external_buffer` is nonzero and resolves to an
+        `ExternalBuffer` entry. IDs must be unique across those entries.
+    -   Ensure referenced `group` indices exist in
+        `Model.external_buffer_groups`.
+    -   Verify tensor address alignment meets
+        `LITERT_HOST_MEMORY_BUFFER_ALIGNMENT` (64 bytes).
+    -   If separate-weight streaming is needed on web, use `loadModelAndWeights`
+        and ensure every slice resolves within the supplied weight stream.
+    -   Measure Wasm, JavaScript staging, and GPU memory use on the target
+        device; a compact graph alone does not establish compatibility.
+-   [ ] **API and Rewrite Compatibility**:
+    -   Check that the chosen language API exposes the required weight source.
+    -   Before using getters or serialization, check the
+        [API support table](#public-api-support-loading-inspection-and-serialization).
+    -   After rewriting, compare the output's weight references and payloads,
+        including custom-op options, against the input. Do not rely solely on
+        FlatBuffer verification or a successful return status.
+-   [ ] **Slice Bounds & Overflow Protection**:
+    -   Prevent integer overflow when computing byte bounds: require `offset <=
+        total_size` and `length <= total_size - offset`.
+-   [ ] **Runtime Verification**:
+    -   Always run end-to-end inference verification on target hardware.
+        FlatBuffer schema validation alone verifies structure, not weight file
+        presence or mathematical integrity.
