@@ -309,6 +309,7 @@ package_group(
         "//litert/rust/...",
         "//litert/swift/...",
         "//litert/vendors/...",
+        "//tensor/...",
     ],
 )
 
@@ -336,7 +337,7 @@ package_group(
 )
 
 exports_files(
-    glob(["*.gwsq"]),
+    glob(["*.gwsq"]) + ["METADATA"],
     visibility = ["//visibility:public"],
 )
 
