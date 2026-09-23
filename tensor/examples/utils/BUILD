@@ -88,6 +88,7 @@ cc_library(
         "//tensor:datatypes",
         "//tensor/utils:macros",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -103,6 +104,9 @@ cc_test(
     deps = [
         ":safetensor_loader",
         ":safetensors",
+        "//tensor",
+        "//tensor:buffer",
+        "//tensor:datatypes",
         "//tensor/utils:matchers",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
