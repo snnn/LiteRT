@@ -21,7 +21,8 @@ the reasoning behind native Gemma4 prefill, dynamic shapes, tiled attention,
 and a proposal for bringing comparable execution to the Tensor API's LiteRT
 runner and LiteRT-LM. Current behavior refers to the inspected local checkouts,
 including local changes. Proposed interfaces below are not implemented APIs
-or claims of upstream support. No new benchmarks were run for this document.
+or claims of upstream support. Performance comparisons below use saved
+benchmarks. The linked September 23 allocation audit adds new memory diagnostics.
 
 Comparable performance is feasible, but introducing an operator name is only
 one part of the work. The graph must expose the necessary semantics, the
@@ -40,6 +41,7 @@ Related evidence and implementation references:
 - [Native mobile decode attribution](native_mobile_decode_analysis.md).
 - [YNNPACK SDPA graph experiment](ynnpack_sdpa_graph_performance.md).
 - [Local INT8-KV SDPA extension](ynnpack_int8_sdpa.md).
+- [Native versus LiteRT-LM allocation audit](gemma4_memory_allocation_audit.md).
 - [Native Gemma4 runner](../examples/gemma4/native/README.md).
 - [Existing nonstandard operator contracts](../../docs/nonstandard_ops.md).
 
@@ -618,21 +620,29 @@ individual toggles also produced large RSS reductions in that experiment. See
 the [archived memory-change review](../experiments/history/2026-09-15-native-runner-improvements.md#staged-execution-and-memory-reductions)
 and [phase observations](/data/bt/tmp/gemma4-memory-20260913/analysis/results/MEMORY.md).
 
-For Pixel 8 in that older phase audit, with both runners still owning KV:
+The following table is the **September 13 XNNPACK comparison** on Pixel 8.
+Both runners used **cache capacity 2,048 and two CPU threads**. These are
+**current RSS snapshots after the last decode of the second session**, with
+both runners still owning KV. This is a different configuration and memory
+metric from the later YNN-SDPA peak comparison below.
 
-| Prompt | Earlier native current RSS | Compact/shared native current RSS | LiteRT-LM CPU current RSS |
+| Prompt tokens | Earlier native current RSS | Compact/shared native current RSS | LiteRT-LM XNNPACK current RSS |
 | --- | ---: | ---: | ---: |
 | 128 | 2,637.5 MiB | 1,897.8 MiB | 1,516.9 MiB |
 | 1,024 | 2,785.3 MiB | 1,988.8 MiB | 2,004.7 MiB |
 
 Thus the 1,024-token native before/after reduction was 796.5 MiB, while its
 advantage over that LiteRT-LM configuration was only 15.9 MiB of current RSS.
-At 128 tokens, the optimized native runner used 380.9 MiB more. Comparing a
-native post-session snapshot after KV release with an LM snapshot retaining
-KV would introduce another ownership mismatch.
+At 128 tokens, LiteRT-LM used **380.9 MiB less** than the optimized native
+runner. Thus this experiment shows lower LM memory for the shorter prompt
+and near-equal memory for the longer prompt; it does not establish that
+either runner always uses less memory. Comparing a native post-session
+snapshot after KV release with an LM snapshot retaining KV would introduce
+another ownership mismatch.
 
 A later, separate Pixel 8 native-versus-YNN-SDPA comparison at prompt 1,024 and
-capacity 8,448 reported median **process-lifetime peak RSS** of 2,054.9 MiB
+capacity 8,448, with four CPU threads, reported median
+**process-lifetime peak RSS** of 2,054.9 MiB
 for native and 2,891.4 MiB for LM-YNN-SDPA, a real 836.5 MiB difference in that
 metric. The [summary](/data/bt/tmp/gemma4-ynn-sdpa-export-20260916/perf/pixel8/native-comparison/summary.json)
 reports peaks rather than a matched allocation breakdown. It does not isolate
@@ -644,6 +654,40 @@ The memory proposal therefore needs separate accounting for source/packed
 weights, persistent KV, live temporary tensors, retained workspace, and runtime
 allocations, with identical phase boundaries. Equal chunk sizes are one
 control in that experiment; they are not sufficient to equalize memory use.
+
+### September 23 allocation audit
+
+The [completed audit](gemma4_memory_allocation_audit.md) traces the saved YNN
+executable's actual allocation owners. During inference it has three compiled
+models: one YNN-delegated transformer model and two XNN-delegated embedding
+models. YNN inference heap scratch is released after invocation. Shared static
+buffers occupy about 754 MiB after deduplicating aliases; the 1,654 YNN runtime
+objects do not each retain a private arena or a full weight copy.
+
+The large retained allocation is the **687.25 MiB TFLite prefill arena**.
+The saved SDPA rewrite changed decode only; prefill still materializes scores
+and expanded masks at the full 8,448-position capacity. Selecting the existing
+128-row prefill signature reduces that arena to **85.91 MiB**, external
+buffers by **43.10 MiB**, and peak YNN inference heap scratch from **68.00 to
+8.49 MiB**. KV and prepared constants remain unchanged. The retained-capacity
+reduction of 644.443 MiB agrees with the observed anonymous-RSS reduction of
+644.441 MiB. A separate unmodified-binary control pair lowers process peak RSS
+by **706.05 MiB**, with all 65 recorded LM argmax IDs matching.
+
+In the new audit, after matching both runners to 128-row prefill chunks,
+**native still has lower total current RSS** at the last decode: 2,049.434 MiB
+native versus 2,329.664 MiB LM-YNN. LM has 229.125 MiB less anonymous memory,
+but 509.355 MiB more non-anonymous memory, primarily file-backed, leaving
+its total 280.230 MiB higher. Lower anonymous memory alone does not mean
+lower total memory. These are 1,024-token prompts with cache capacity 8,448;
+they do not replace the older 128-token, capacity-2,048 XNNPACK result above.
+
+These new measurements establish prefill selection, exposed capacity-shaped
+intermediates, and allocation lifetime as concrete targets. They do not assign
+an exact decomposition to the historical 836.5 MiB peak difference. File-page
+residency varies between processes, and matching chunk sizes leaves a residual
+native-versus-LM difference documented in the audit. Ordinary arena reuse and
+a new scratch-sharing opcode are not the missing mechanism.
 
 ## 9. Implementation order and validation
 

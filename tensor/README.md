@@ -246,6 +246,10 @@ explains chunking, Gemma4 KV sharing, dynamic shapes, and online tiled attention
 then maps the required operator, delegate, and runner changes to LiteRT and
 LiteRT-LM with an implementation and validation plan.
 
+The [Gemma4 allocation audit](docs/gemma4_memory_allocation_audit.md) identifies
+actual delegate and buffer owners and measures how prefill selection and
+capacity-shaped attention tensors affect native versus LiteRT-LM memory.
+
 See [standalone build and testing instructions](standalone/README.md) for Linux
 unit tests, Android builds using `ANDROID_HOME`, phone unit tests, and full-model
 correctness/performance comparisons against a frozen runner. The
