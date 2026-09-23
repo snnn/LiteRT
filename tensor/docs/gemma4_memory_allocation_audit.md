@@ -38,6 +38,10 @@ This audit revisits the [saved Pixel 8 native/SDPA comparison][historical],
 whose historical median peaks were 2,054.9 MiB native and 2,891.4 MiB LM-YNN-SDPA.
 That 836.5 MiB historical difference is kept separate from the new runs.
 
+The later [Linux XNNPACK comparison](gemma4_linux_xnnpack_memory.md) measures
+the original bundle at the same prompt length and capacity on the desktop.
+Its backend and platform differ from the YNN phone measurements in this audit.
+
 New captures use Pixel 8 `3A111FDJH005A0`, four CPU threads, affinity `1e0`,
 capacity 8,448, the same 1,024-token prompt and 64 forced continuations, one
 warmup session and one measured session per process. Six processes completed:

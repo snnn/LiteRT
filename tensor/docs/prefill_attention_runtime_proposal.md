@@ -24,6 +24,11 @@ including local changes. Proposed interfaces below are not implemented APIs
 or claims of upstream support. Performance comparisons below use saved
 benchmarks. The linked September 23 allocation audit adds new memory diagnostics.
 
+The subsequent [native runner improvement experiments](gemma4_native_runner_improvements.md)
+test packing-source lifetimes and unchanged-shape reuse, including full-logit/KV
+validation and separate memory and latency measurements. The successful memory
+probe requires an ownership change rather than a new mathematical operator.
+
 Comparable performance is feasible, but introducing an operator name is only
 one part of the work. The graph must expose the necessary semantics, the
 delegate must execute only useful work with efficient kernels, and the runner
@@ -688,6 +693,22 @@ an exact decomposition to the historical 836.5 MiB peak difference. File-page
 residency varies between processes, and matching chunk sizes leaves a residual
 native-versus-LM difference documented in the audit. Ordinary arena reuse and
 a new scratch-sharing opcode are not the missing mechanism.
+
+### Linux XNNPACK at capacity 8,448
+
+The [Linux desktop comparison](gemma4_linux_xnnpack_memory.md) uses the original
+published bundle with XNNPACK, a 1,024-token prompt, capacity 8,448, and four
+CPU threads. Normal LM prefill selection gives **5.59 GiB peak RSS**, versus
+**2.00 GiB for optimized native**. Native with shared workspace and compact
+INT2 both left at their disabled flag defaults uses **2.79 GiB**. These are
+new Linux measurements, separate from both phone comparisons above.
+
+Selecting LM's existing 128-row prefill signature lowers its peak to
+**4.04 GiB**, so prefill selection explains part of this desktop difference.
+The process reduction includes changes in resident model-source pages and
+anonymous memory; it is not a measured arena-only reduction. All 65 recorded
+predictions match across the four Linux configurations. See the report for
+exact settings, matched phase snapshots, and the limits of this comparison.
 
 ## 9. Implementation order and validation
 
