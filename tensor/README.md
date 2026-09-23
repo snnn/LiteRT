@@ -227,3 +227,29 @@ int main() {
   return 0;
 }
 ```
+
+## Local native Gemma4 development and tests
+
+The native XNNPACK development work is consolidated in
+[`examples/gemma4/native`](examples/gemma4/native/README.md), including active
+INT8 KV storage, bounded attention, reusable prefill stages, compact INT2
+weights and shared scratch. The standard Gemma4 example and shared mobile
+checkpoint loader remain in their existing packages.
+
+The [KV cache layout design reference](docs/kv_cache_layout.md) consolidates
+the native runner, converter, and direct-XNNPACK experiments: storage and
+runtime interfaces, active-length views, quantization, prefill strategies,
+and the mobile evidence behind their tradeoffs.
+
+The [prefill and attention proposal](docs/prefill_attention_runtime_proposal.md)
+explains chunking, Gemma4 KV sharing, dynamic shapes, and online tiled attention,
+then maps the required operator, delegate, and runner changes to LiteRT and
+LiteRT-LM with an implementation and validation plan.
+
+See [standalone build and testing instructions](standalone/README.md) for Linux
+unit tests, Android builds using `ANDROID_HOME`, phone unit tests, and full-model
+correctness/performance comparisons against a frozen runner. The
+[consolidation report](NATIVE_DEVELOPMENT_MIGRATION.md) records which local
+changes were missing from upstream, where they now live, and the validation
+results. Historical reports and original source snapshots are retained under
+[`experiments/history`](experiments/history/).

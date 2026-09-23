@@ -752,6 +752,16 @@ Expected<PartitionResult> PartitionModel(
 
   ABSL_DCHECK_EQ(dispatch_ops.size(), model.NumSubgraphs() - input_num_sgs);
 
+  // Several composite calls can share one decomposition. Count each removed
+  // subgraph once; counting calls can underflow input_num_sgs and lose the
+  // outlined partitions that need compilation.
+  std::sort(selected_composite_subgraph_indexes.begin(),
+            selected_composite_subgraph_indexes.end());
+  selected_composite_subgraph_indexes.erase(
+      std::unique(selected_composite_subgraph_indexes.begin(),
+                  selected_composite_subgraph_indexes.end()),
+      selected_composite_subgraph_indexes.end());
+
   // Update input_num_sgs to account for removed decomposition subgraphs.
   input_num_sgs -= selected_composite_subgraph_indexes.size();
   // Remove all decomposition subgraphs from the model.

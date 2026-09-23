@@ -14,11 +14,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -40,6 +42,7 @@
 #include "litert/cc/litert_macros.h"
 #include "litert/cc/litert_options.h"
 #include "litert/cc/litert_tensor_buffer.h"
+#include "litert/cc/options/litert_cpu_options.h"
 #include "litert/cc/options/litert_gpu_options.h"
 #include "litert/cc/options/litert_intel_openvino_options.h"
 
@@ -53,6 +56,12 @@ struct Config {
   std::string manifest;
   std::string image_root;
   std::string out;
+  std::string scores_out;
+  std::string inputs_out;
+  int num_threads = 0;
+  int xnnpack_only = 0;
+  int warmup_runs = 0;
+  int start_sample = 0;
   std::string accelerator = "cpu";
   std::string dispatch_library_dir;
   std::string openvino_device;
@@ -79,6 +88,12 @@ void PrintUsage(const char* argv0) {
             << " --model=MODEL --manifest=MANIFEST --image_root=DIR [options]\n"
             << "Options:\n"
             << "  --out=PATH              Output JSONL path\n"
+            << "  --scores_out=PATH       Raw float32 scores, in manifest order\n"
+            << "  --inputs_out=PATH       Raw preprocessed float32 inputs\n"
+            << "  --num_threads=0         CPU thread budget; 0 keeps default\n"
+            << "  --xnnpack_only=0|1      Disable YNNPACK; enable signed INT8 XNNPACK\n"
+            << "  --warmup_runs=0         Untimed runs on the first selected input\n"
+            << "  --start_sample=0        Skip this many manifest rows\n"
             << "  --accelerator=cpu       Comma-delimited cpu,gpu,npu\n"
             << "  --dispatch_library_dir=DIR\n"
             << "  --openvino_device=cpu|gpu|npu|auto\n"
@@ -99,6 +114,8 @@ Config ParseArgs(int argc, char** argv) {
       {"manifest", &cfg.manifest},
       {"image_root", &cfg.image_root},
       {"out", &cfg.out},
+      {"scores_out", &cfg.scores_out},
+      {"inputs_out", &cfg.inputs_out},
       {"accelerator", &cfg.accelerator},
       {"dispatch_library_dir", &cfg.dispatch_library_dir},
       {"openvino_device", &cfg.openvino_device},
@@ -114,6 +131,10 @@ Config ParseArgs(int argc, char** argv) {
       {"antialias", &cfg.antialias},
       {"gpu_benchmark_mode", &cfg.gpu_benchmark_mode},
       {"max_samples", &cfg.max_samples},
+      {"num_threads", &cfg.num_threads},
+      {"xnnpack_only", &cfg.xnnpack_only},
+      {"warmup_runs", &cfg.warmup_runs},
+      {"start_sample", &cfg.start_sample},
   };
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -143,6 +164,11 @@ Config ParseArgs(int argc, char** argv) {
   }
   if (cfg.model.empty() || cfg.manifest.empty() || cfg.image_root.empty()) {
     PrintUsage(argv[0]);
+    std::exit(EXIT_FAILURE);
+  }
+  if (cfg.num_threads < 0 || cfg.warmup_runs < 0 || cfg.start_sample < 0 ||
+      cfg.max_samples < 0) {
+    std::cerr << "Thread, warmup, and sample limits must be nonnegative\n";
     std::exit(EXIT_FAILURE);
   }
   return cfg;
@@ -378,7 +404,9 @@ std::vector<int> TopK(const std::vector<float>& scores, int k) {
   std::iota(indices.begin(), indices.end(), 0);
   std::partial_sort(
       indices.begin(), indices.begin() + std::min(k, (int)indices.size()),
-      indices.end(), [&](int a, int b) { return scores[a] > scores[b]; });
+      indices.end(), [&](int a, int b) {
+        return scores[a] > scores[b] || (scores[a] == scores[b] && a < b);
+      });
   indices.resize(std::min(k, static_cast<int>(indices.size())));
   return indices;
 }
@@ -515,6 +543,18 @@ litert::Expected<void> Run(const Config& cfg) {
       litert::Environment::Create(litert::EnvironmentOptions(env_options)));
   LITERT_ASSIGN_OR_RETURN(auto options, litert::Options::Create());
   options.SetHardwareAccelerators(GetAccelerators(cfg));
+  if (cfg.num_threads > 0 || cfg.xnnpack_only) {
+    LITERT_ASSIGN_OR_RETURN(auto& cpu_options, options.GetCpuOptions());
+    if (cfg.num_threads > 0) {
+      LITERT_RETURN_IF_ERROR(cpu_options.SetNumThreads(cfg.num_threads));
+    }
+    if (cfg.xnnpack_only) {
+      LITERT_RETURN_IF_ERROR(cpu_options.SetEnableYNNPack(false));
+      LITERT_RETURN_IF_ERROR(
+          cpu_options.SetKernelMode(kLiteRtCpuKernelModeDelegate));
+      LITERT_RETURN_IF_ERROR(cpu_options.SetXNNPackFlags(0x00000001));
+    }
+  }
   LITERT_RETURN_IF_ERROR(SetOpenVinoDevice(options, cfg.openvino_device));
   if (RequestsGpu(cfg)) {
     LITERT_ASSIGN_OR_RETURN(auto& gpu_options, options.GetGpuOptions());
@@ -572,6 +612,11 @@ litert::Expected<void> Run(const Config& cfg) {
   int crop_w = cfg.crop_w > 0 ? cfg.crop_w : input_w;
 
   std::vector<Row> rows = ReadManifest(cfg.manifest);
+  if (static_cast<size_t>(cfg.start_sample) > rows.size()) {
+    return litert::Error(kLiteRtStatusErrorInvalidArgument,
+                         "start_sample exceeds manifest size");
+  }
+  rows.erase(rows.begin(), rows.begin() + cfg.start_sample);
   int max_samples = cfg.max_samples;
   if (max_samples > 0 && max_samples < static_cast<int>(rows.size())) {
     rows.resize(max_samples);
@@ -579,8 +624,21 @@ litert::Expected<void> Run(const Config& cfg) {
   std::ofstream out_file;
   if (!cfg.out.empty()) {
     out_file.open(cfg.out);
+    if (!out_file) {
+      return litert::Error(kLiteRtStatusErrorInvalidArgument,
+                           "Cannot open JSONL output");
+    }
   }
   std::ostream& out = out_file.is_open() ? out_file : std::cout;
+  out << std::setprecision(9);
+  std::ofstream scores_file, inputs_file;
+  if (!cfg.scores_out.empty()) scores_file.open(cfg.scores_out, std::ios::binary);
+  if (!cfg.inputs_out.empty()) inputs_file.open(cfg.inputs_out, std::ios::binary);
+  if ((!cfg.scores_out.empty() && !scores_file) ||
+      (!cfg.inputs_out.empty() && !inputs_file)) {
+    return litert::Error(kLiteRtStatusErrorInvalidArgument,
+                         "Cannot open binary output");
+  }
   std::vector<float> mean = ParseTriple(cfg.mean);
   std::vector<float> stddev = ParseTriple(cfg.stddev);
   const auto output_dims = output_type.Layout().Dimensions();
@@ -589,19 +647,53 @@ litert::Expected<void> Run(const Config& cfg) {
 
   int top1_correct = 0;
   int top5_correct = 0;
+  bool first_input = true;
+  double total_inference_ms = 0.0;
   for (const Row& row : rows) {
     std::string image_path = cfg.image_root + "/" + row.path;
     std::vector<float> input =
         DecodePreprocess(image_path, cfg.resize, crop_h, crop_w, mean, stddev,
                          nchw, cfg.antialias != 0);
+    // A deterministic fingerprint checks that on/off runs receive identical
+    // preprocessed values. Scores and optional inputs retain all float bits.
+    uint64_t input_fingerprint = UINT64_C(14695981039346656037);
+    const auto* input_bytes = reinterpret_cast<const uint8_t*>(input.data());
+    for (size_t i = 0; i < input.size() * sizeof(float); ++i) {
+      input_fingerprint = (input_fingerprint ^ input_bytes[i]) *
+                          UINT64_C(1099511628211);
+    }
+    if (inputs_file.is_open()) {
+      inputs_file.write(reinterpret_cast<const char*>(input.data()),
+                        input.size() * sizeof(float));
+    }
     LITERT_RETURN_IF_ERROR(
         WriteInputTensor(input_buffers[0], input, input_type, input_tensor));
+    if (first_input) {
+      for (int i = 0; i < cfg.warmup_runs; ++i) {
+        LITERT_RETURN_IF_ERROR(model.Run(static_cast<size_t>(0), input_buffers,
+                                         output_buffers));
+      }
+      first_input = false;
+    }
+    const auto inference_start = std::chrono::steady_clock::now();
     LITERT_RETURN_IF_ERROR(
         model.Run(static_cast<size_t>(0), input_buffers, output_buffers));
+    const double inference_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - inference_start).count();
+    total_inference_ms += inference_ms;
     LITERT_ASSIGN_OR_RETURN(
         std::vector<float> scores,
         ReadOutputTensor(output_buffers[0], output_type, output_tensor,
                          output_size));
+    if (!std::all_of(scores.begin(), scores.end(),
+                     [](float value) { return std::isfinite(value); })) {
+      return litert::Error(kLiteRtStatusErrorRuntimeFailure,
+                           "Nonfinite output score");
+    }
+    if (scores_file.is_open()) {
+      scores_file.write(reinterpret_cast<const char*>(scores.data()),
+                        scores.size() * sizeof(float));
+    }
     std::vector<int> top5 = TopK(scores, 5);
     int pred = top5.empty() ? -1 : top5[0];
     top1_correct += pred == row.label;
@@ -613,12 +705,23 @@ litert::Expected<void> Run(const Config& cfg) {
       if (i) out << ",";
       out << top5[i];
     }
-    out << "]}\n";
+    out << "],\"input_fingerprint\":\"" << input_fingerprint
+        << "\",\"inference_ms\":" << inference_ms
+        << ",\"output_size\":" << scores.size() << "}\n";
+  }
+  out.flush();
+  if (scores_file.is_open()) scores_file.flush();
+  if (inputs_file.is_open()) inputs_file.flush();
+  if (!out || (scores_file.is_open() && !scores_file) ||
+      (inputs_file.is_open() && !inputs_file)) {
+    return litert::Error(kLiteRtStatusErrorRuntimeFailure,
+                         "Failed to write evaluation output");
   }
   std::cerr << "samples=" << rows.size() << " top1="
             << (rows.empty() ? 0.0 : (double)top1_correct / rows.size())
             << " top5="
             << (rows.empty() ? 0.0 : (double)top5_correct / rows.size())
+            << " inference_ms=" << total_inference_ms
             << "\n";
   return {};
 }

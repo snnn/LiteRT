@@ -11,6 +11,18 @@ workspace(name = "litert")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
+# Keep the local Bazel dependency aligned with upstream LiteRT's CMake pin.
+# Declare it before TensorFlow's workspace macros, which still use an older pin.
+http_archive(
+    name = "pthreadpool",
+    sha256 = "9b9fb1179b71021c0c048504eab636424c58e9c8374404754ece6d7cd90f26d4",
+    strip_prefix = "pthreadpool-15a6644ba1c45f1acc16ac1e883efc3e56c6bed2",
+    urls = [
+        "https://storage.googleapis.com/mirror.tensorflow.org/github.com/google/pthreadpool/archive/15a6644ba1c45f1acc16ac1e883efc3e56c6bed2.zip",
+        "https://github.com/google/pthreadpool/archive/15a6644ba1c45f1acc16ac1e883efc3e56c6bed2.zip",
+    ],
+)
+
 # Darts Clone. Declare this before TensorFlow's workspace macros so they do not
 # install their own incompatible BUILD overlay.
 http_archive(

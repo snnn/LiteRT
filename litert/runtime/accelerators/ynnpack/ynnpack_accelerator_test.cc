@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 #include "flatbuffers/flatbuffer_builder.h"  // from @flatbuffers
 #include "litert/c/litert_common.h"
+#include "litert/c/litert_compiled_model.h"
 #include "litert/c/litert_environment.h"
 #include "litert/c/litert_model.h"
 #include "litert/c/litert_opaque_options.h"
@@ -210,6 +211,59 @@ TEST(YnnpackAcceleratorTest, DelegatesSupportedNodesBeforeXnnpack) {
   EXPECT_THAT(delegate_names, ElementsAre("TfLiteXNNPackDelegate"));
 #endif
 
+  LiteRtDestroyModel(model);
+  LiteRtDestroyEnvironment(environment);
+}
+
+TEST(YnnpackAcceleratorTest, ReportsOriginalOperatorOwnershipBeforeInvocation) {
+  LiteRtEnvironment environment = nullptr;
+  LITERT_ASSERT_OK(LiteRtCreateEnvironment(0, nullptr, &environment));
+  const auto bytes = CreateAddThenResizeBilinearModel();
+  LiteRtModel model = nullptr;
+  LITERT_ASSERT_OK(LiteRtCreateModelFromBuffer(
+      environment, bytes.data(), bytes.size(), &model));
+  LiteRtOptions options = nullptr;
+  LITERT_ASSERT_OK(LiteRtCreateOptions(&options));
+  LITERT_ASSERT_OK(LiteRtSetOptionsHardwareAccelerators(
+      options, kLiteRtHwAcceleratorCpu));
+  LITERT_ASSERT_OK_AND_ASSIGN(auto cpu, CpuOptions::Create());
+  LITERT_ASSERT_OK(cpu.SetEnableYNNPack(true));
+  LITERT_ASSERT_OK(cpu.SetKernelMode(kLiteRtCpuKernelModeDelegate));
+  const char* identifier = nullptr;
+  void* payload = nullptr;
+  void (*deleter)(void*) = nullptr;
+  LITERT_ASSERT_OK(cpu.GetOpaqueOptionsData(&identifier, &payload, &deleter));
+  LiteRtOpaqueOptions opaque = nullptr;
+  LITERT_ASSERT_OK(LiteRtCreateOpaqueOptions(identifier, payload, deleter, &opaque));
+  LITERT_ASSERT_OK(LiteRtAddOpaqueOptions(options, opaque));
+  LiteRtCompiledModel compiled = nullptr;
+  LITERT_ASSERT_OK(LiteRtCreateCompiledModel(environment, model, options, &compiled));
+  std::vector<std::string> records;
+  auto collect = [](void* data, LiteRtParamIndex graph, LiteRtParamIndex node,
+                    const char* op, const char* delegate) -> LiteRtStatus {
+    static_cast<std::vector<std::string>*>(data)->push_back(
+        std::to_string(graph) + ":" + std::to_string(node) + ":" + op + ":" + delegate);
+    return kLiteRtStatusOk;
+  };
+  LITERT_ASSERT_OK(LiteRtGetCompiledModelOperatorDelegations(compiled, collect, &records));
+#if defined(LITERT_TEST_EXPECT_YNNPACK)
+  EXPECT_THAT(records, ElementsAre("0:0:ADD:YNNPackDelegate",
+                                  "0:1:RESIZE_BILINEAR:TfLiteXNNPackDelegate"));
+#else
+  EXPECT_THAT(records, ElementsAre("0:0:ADD:TfLiteXNNPackDelegate",
+                                  "0:1:RESIZE_BILINEAR:TfLiteXNNPackDelegate"));
+#endif
+  EXPECT_EQ(LiteRtGetCompiledModelOperatorDelegations(nullptr, collect, &records),
+            kLiteRtStatusErrorInvalidArgument);
+  EXPECT_EQ(LiteRtGetCompiledModelOperatorDelegations(compiled, nullptr, nullptr),
+            kLiteRtStatusErrorInvalidArgument);
+  auto stop = [](void*, LiteRtParamIndex, LiteRtParamIndex, const char*, const char*) {
+    return kLiteRtStatusErrorRuntimeFailure;
+  };
+  EXPECT_EQ(LiteRtGetCompiledModelOperatorDelegations(compiled, stop, nullptr),
+            kLiteRtStatusErrorRuntimeFailure);
+  LiteRtDestroyCompiledModel(compiled);
+  LiteRtDestroyOptions(options);
   LiteRtDestroyModel(model);
   LiteRtDestroyEnvironment(environment);
 }

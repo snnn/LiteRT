@@ -85,6 +85,10 @@ class CompiledModelWrapper:
         """Returns whether the compiled model is fully accelerated."""
         ...
 
+    def GetOperatorDelegations(self) -> List[Dict[str, Any]]:
+        """Returns original node identities and their active delegate owners."""
+        ...
+
     def CreateInputBufferByName(self, sig_key: str, in_name: str) -> object:
         """Creates an input buffer for the specified signature and input name.
 
@@ -208,6 +212,9 @@ def CreateCompiledModelFromFile(
         intel_openvino_performance_mode: int = ...,
         intel_openvino_configs_map: Dict[str, str] = ...,
         intel_openvino_enable_weight_sharing: int = ...,
+        gpu_hint_fully_delegated_to_single_delegate: bool = ...,
+        gpu_external_tensor_patterns: List[str] = ...,
+        gpu_buffer_storage_tensor_patterns: List[str] = ...,
 ) -> CompiledModelWrapper:
     """Creates a compiled model from a model file.
 
@@ -261,6 +268,9 @@ def CreateCompiledModelFromBuffer(
         intel_openvino_performance_mode: int = ...,
         intel_openvino_configs_map: Dict[str, str] = ...,
         intel_openvino_enable_weight_sharing: int = ...,
+        gpu_hint_fully_delegated_to_single_delegate: bool = ...,
+        gpu_external_tensor_patterns: List[str] = ...,
+        gpu_buffer_storage_tensor_patterns: List[str] = ...,
 ) -> CompiledModelWrapper:
     """Creates a compiled model from a model buffer.
 

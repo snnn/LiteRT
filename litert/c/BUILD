@@ -609,6 +609,11 @@ litert_c_api_library(
         "//litert/cc:litert_common",
         "//litert/core/util:perfetto_profiling",
         "//litert/runtime:compiled_model",
+        "//tflite:builtin_ops",
+        "//tflite/c:c_api_opaque",
+        "//tflite/core:framework",
+        "//tflite/core/c:private_common",
+        "//tflite/schema:schema_fbs",
     ],
     deps = [
         ":litert_common",

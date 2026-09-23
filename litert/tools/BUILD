@@ -963,6 +963,7 @@ litert_bin(
         "//litert/cc:litert_macros",
         "//litert/cc:litert_options",
         "//litert/cc:litert_tensor_buffer",
+        "//litert/cc/options:litert_cpu_options",
         "//litert/cc/options:litert_gpu_options",
         "//litert/cc/options:litert_intel_openvino_options",
         "@com_google_absl//absl/log:absl_log",
@@ -982,6 +983,7 @@ litert_bin(
     ungrte = True,
     deps = [
         "//litert/cc:litert_api_with_dynamic_runtime",
+        "//litert/cc/options:litert_cpu_options",
         "//litert/cc/options:litert_intel_openvino_options",
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/strings",

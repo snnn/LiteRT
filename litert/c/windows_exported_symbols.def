@@ -153,6 +153,7 @@ EXPORTS
   LiteRtGetCompiledModelEnvironment
   LiteRtGetCompiledModelInputBufferRequirements
   LiteRtGetCompiledModelInputTensorLayout
+  LiteRtGetCompiledModelOperatorDelegations
   LiteRtGetCompiledModelOutputBufferRequirements
   LiteRtGetCompiledModelOutputTensorLayouts
   LiteRtGetConcatenationAxisOption

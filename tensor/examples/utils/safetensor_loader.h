@@ -146,9 +146,8 @@ struct QuantizationConfig {
   }
 };
 
-// SafeTensor file loader using safetensors-cpp library.
-// Supports loading tensors from HuggingFace safetensor format, including
-// weights compressed with the `compressed-tensors` library.
+// SafeTensor loader with optional compressed-tensors configuration in a sibling
+// config.json. File mappings are retained by tensors that borrow their storage.
 class SafetensorLoader {
  public:
   // Loads a safetensor file or a directory of safetensor files.
@@ -170,6 +169,11 @@ class SafetensorLoader {
   }
 
   // Loads a tensor.
+  //
+  // Unquantized BF16/FP16 tensors are converted to FP32, except the per-layer
+  // embedding table, whose CPU row lookup can convert only the requested rows.
+  // Compressed-tensors .weight names resolve to .weight_packed when applicable.
+  // Two-bit weights are widened to signed packed I4 without dequantizing.
   absl::StatusOr<TensorHandle> LoadTensor(absl::string_view name) const;
 
   // Loads all tensors into a map.
@@ -183,10 +187,22 @@ class SafetensorLoader {
       const absl::flat_hash_map<std::string, std::string>& name_mapping) const;
 
  private:
+  struct TargetedQuantizationConfig {
+    QuantizationConfig::Scheme weights;
+    std::vector<std::string> targets;
+    bool input_activations = false;
+    bool output_activations = false;
+  };
+
   SafetensorLoader() = default;
 
   // Loads a single safetensor file and appends its tensors.
   absl::Status AddSafetensorFile(const std::string& path);
+  absl::StatusOr<const TargetedQuantizationConfig*> FindWeightConfig(
+      absl::string_view module) const;
+  absl::StatusOr<TensorHandle> LoadCompressedWeight(
+      absl::string_view name, absl::string_view module,
+      const TargetedQuantizationConfig& config) const;
 
   // Reads `quantization_config` from a HuggingFace `config.json`. Returns
   // `absl::NotFoundError` if the file does not exist.
@@ -200,6 +216,7 @@ class SafetensorLoader {
 
   // Quantization config from the header metadata or from `config.json`.
   std::optional<QuantizationConfig> quant_config_;
+  std::vector<TargetedQuantizationConfig> targeted_configs_;
 };
 
 }  // namespace litert::tensor::examples

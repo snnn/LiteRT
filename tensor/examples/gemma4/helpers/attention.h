@@ -21,12 +21,13 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
-#include "absl/strings/str_cat.h"  // from @com_google_absl
-#include "absl/strings/string_view.h"  // from @com_google_absl
-#include "absl/types/span.h"  // from @com_google_absl
+#include "absl/strings/str_cat.h"          // from @com_google_absl
+#include "absl/strings/string_view.h"      // from @com_google_absl
+#include "absl/types/span.h"               // from @com_google_absl
 #include "tensor/arithmetic.h"
 #include "tensor/datatypes.h"
 #include "tensor/examples/gemma4/gemma4_config.h"
+#include "tensor/examples/gemma4/helpers/mobile_fully_connected.h"
 #include "tensor/examples/ops/transformer/transformer_ops.h"
 #include "tensor/tensor.h"
 
@@ -81,7 +82,7 @@ AttentionOutput<Mixins...> Attention(
   Tensor k_norm_scale = GetWeight(weights, absl::StrCat(name, ".k_norm.weight"),
                                   Type::kFP32, {head_dim});
 
-  Tensor q = FullyConnected(input, q_proj);
+  Tensor q = MobileFullyConnected(input, q_proj, &weights);
 
   const Shape& input_shape = input.GetShape();
   int batch_size = input_shape[0];
@@ -115,8 +116,8 @@ AttentionOutput<Mixins...> Attention(
     updated_key_cache = shared_key;
     updated_value_cache = shared_value;
   } else {
-    Tensor k = FullyConnected(input, k_proj);
-    Tensor v = FullyConnected(input, v_proj);
+    Tensor k = MobileFullyConnected(input, k_proj, &weights);
+    Tensor v = MobileFullyConnected(input, v_proj, &weights);
 
     k = Reshape(k, {batch_size, seq_len, config.num_kv_heads, head_dim});
     k = Transpose(k, {0, 2, 1, 3});
@@ -140,13 +141,18 @@ AttentionOutput<Mixins...> Attention(
     updated_value_cache = v;
   }
 
-  // GQA Tiling
+  // Keep the original KV heads for cache updates and cross-layer sharing.
   Tensor<Mixins...> k_for_attn_untiled = k_for_attn;
   Tensor<Mixins...> v_for_attn_untiled = v_for_attn;
 
   int num_groups = config.num_heads / config.num_kv_heads;
-  k_for_attn = RepeatKVHeads(k_for_attn, num_groups);
-  v_for_attn = RepeatKVHeads(v_for_attn, num_groups);
+  // BatchMatMul broadcasts a single KV head to all query heads. Avoid an
+  // explicit Tile, which can leave an unsupported broadcast when XNNPACK's
+  // consistent arithmetic mode prevents its optimizer rewrite.
+  if (config.num_kv_heads > 1) {
+    k_for_attn = RepeatKVHeads(k_for_attn, num_groups);
+    v_for_attn = RepeatKVHeads(v_for_attn, num_groups);
+  }
 
   Tensor scores = BatchMatMul(q, k_for_attn, /*adj_x=*/false, /*adj_y=*/true);
 
@@ -171,7 +177,7 @@ AttentionOutput<Mixins...> Attention(
   context = Transpose(context, {0, 2, 1, 3});
   context = Reshape(context, {batch_size, seq_len, q_out_dim});
 
-  Tensor output = FullyConnected(context, o_proj);
+  Tensor output = MobileFullyConnected(context, o_proj, &weights);
   return {output, updated_key_cache, updated_value_cache, k_for_attn_untiled,
           v_for_attn_untiled};
 }

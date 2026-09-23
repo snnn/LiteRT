@@ -42,6 +42,7 @@ cc_library(
     ],
     deps = [
         "//litert/c:litert_common",
+        "//litert/c:litert_compiled_model",
         "//litert/c:litert_model_types",
         "//litert/c:litert_tensor_buffer",
         "//litert/c/options:litert_cpu_options",
