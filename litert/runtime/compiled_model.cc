@@ -290,7 +290,7 @@ bool ShapeIsCompatibleWithSignature(const TfLiteIntArray* signature_shape,
   for (size_t i = 0; i < requested_shape.size(); ++i) {
     const int signature_dim = signature_shape->data[i];
     const int requested_dim = requested_shape[i];
-    if (requested_dim <= 0) {
+    if (requested_dim < 0) {
       return false;
     }
     if (signature_dim != -1 && signature_dim != requested_dim) {
@@ -2718,9 +2718,9 @@ Expected<bool> LiteRtCompiledModelT::InputTensorNeedsResize(
                                   " (current: ", signature_shape[i],
                                   ", new: ", new_shape[i], ")")));
     } else {
-      // Dynamic dim ⇒ new value must be positive.
+      // A dynamic dimension may be zero for an empty tensor.
       LITERT_RETURN_IF_ERROR(
-          new_shape[i] > 0,
+          new_shape[i] >= 0,
           Unexpected(kLiteRtStatusErrorInvalidArgument,
                      absl::StrCat("Cannot auto-resize tensor ",
                                   tensor->name ? tensor->name : "<unnamed>",
@@ -2781,9 +2781,9 @@ Expected<void> LiteRtCompiledModelT::ResizeInputTensorImpl(
                       "New shape must not be empty.");
   }
   for (int dim : dims) {
-    if (dim <= 0) {
+    if (dim < 0) {
       return Unexpected(kLiteRtStatusErrorInvalidArgument,
-                        "Dimensions must be positive.");
+                        "Dimensions must be nonnegative.");
     }
   }
 

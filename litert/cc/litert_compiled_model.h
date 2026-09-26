@@ -311,6 +311,24 @@ inline std::vector<std::unique_ptr<SimpleTensor>> FetchSignatureOutputTensors(
   return output_tensors;
 }
 
+inline Expected<RankedTensorType> FetchSignatureInputTensorTypeByIndex(
+    const internal::EnvironmentHolder& env, LiteRtSignature signature,
+    LiteRtParamIndex input_index) {
+  LiteRtTensor tensor;
+  LITERT_RETURN_IF_ERROR(env.runtime->GetSignatureInputTensorByIndex(
+      signature, input_index, &tensor));
+  LiteRtTensorTypeId type_id;
+  LITERT_RETURN_IF_ERROR(env.runtime->GetTensorTypeId(tensor, &type_id));
+  if (type_id != kLiteRtRankedTensorType) {
+    return Error(Status::kErrorInvalidArgument,
+                 "Expected a ranked input tensor");
+  }
+  LiteRtRankedTensorType tensor_type;
+  LITERT_RETURN_IF_ERROR(
+      env.runtime->GetRankedTensorType(tensor, &tensor_type));
+  return RankedTensorType(tensor_type);
+}
+
 inline Expected<RankedTensorType> FetchSignatureOutputTensorTypeByIndex(
     const internal::EnvironmentHolder& env, LiteRtSignature signature,
     LiteRtParamIndex output_index) {
@@ -1456,13 +1474,14 @@ class CompiledModel : public internal::BaseHandle<LiteRtCompiledModel> {
     LiteRtSignature lite_rt_signature;
     LITERT_RETURN_IF_ERROR(env_.runtime->GetModelSignature(
         model_.Get(), signature_index, &lite_rt_signature));
-    auto input_tensors =
-        internal::compiled_model_detail::FetchSignatureInputTensors(
-            env_, lite_rt_signature);
-    if (input_index >= input_tensors.size()) {
+    LiteRtParamIndex num_inputs;
+    LITERT_RETURN_IF_ERROR(
+        env_.runtime->GetNumSignatureInputs(lite_rt_signature, &num_inputs));
+    if (input_index >= static_cast<size_t>(num_inputs)) {
       return Error(Status::kErrorInvalidArgument, "Input index out of bounds");
     }
-    return input_tensors[input_index]->RankedTensorType();
+    return internal::compiled_model_detail::FetchSignatureInputTensorTypeByIndex(
+        env_, lite_rt_signature, static_cast<LiteRtParamIndex>(input_index));
   }
 
   /// @brief Returns the tensor type for a given input tensor name.

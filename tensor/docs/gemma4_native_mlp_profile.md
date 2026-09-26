@@ -23,6 +23,10 @@ This completes the profiling follow-up in
 These are diagnostic measurements, not an implemented speedup. Production
 runner sources and defaults remain unchanged.
 
+The separate [TECNO LJ9 and Pixel 8 follow-up](gemma4_native_phone_optimizations.md)
+adds ARM FC kernels, attention packing, head timings, memory controls, and
+thread sweeps. Its results differ from this desktop profile; MTP is out of scope.
+
 ## Configuration and measurement
 
 - Gemma4 E2B matched bundle; prompt 1,024, 64 forced decode inputs, capacity

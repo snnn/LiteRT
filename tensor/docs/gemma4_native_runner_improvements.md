@@ -36,6 +36,11 @@ matched assets and baseline configuration. The broader
 and [allocation-owner audit](gemma4_memory_allocation_audit.md) explain the
 earlier comparisons, including the separate LM-YNN phone measurements.
 
+The subsequent [TECNO LJ9 / Pixel 8 experiments](gemma4_native_phone_optimizations.md)
+confirm the packing-source saving on both phones, measure device-specific
+thread settings, and identify ARM INT2 kernels and repeated KV packing as
+further speed targets. MTP is excluded from this work.
+
 ## Plan and the experiments performed
 
 The optimized runner already retains just 8.75 MiB of shared XNNPACK scratch on
@@ -233,10 +238,14 @@ attention for longer-context workloads.
 These are small-sample observations on one desktop. They are not confidence
 intervals, Android results, or predictions of universal speedups.
 
-## Further improvements, in order
+## Further optimization opportunities
 
 These are priorities for subsequent implementation/measurement, not additional
 measured gains from the experiments above.
+
+MTP and speculative multi-token verification are out of scope for the current
+work. The experiments retain the existing checkpoint and single-token decode
+path, including on the connected phones.
 
 1. **Make packing-only ownership explicit.** Turn the successful release probe
    into a supported lifetime contract. Then audit other already-packed FC
@@ -317,20 +326,6 @@ measured gains from the experiments above.
    dynamic-activation path. This is a CPU-cycle share, not an 11.55% latency
    saving. Fusing selection with the head would not eliminate the need to
    compute all vocabulary scores for exact general inference.
-
-10. **Explore small-batch speculative verification for weight reuse.**
-    A draft sequence lets the target process several candidate positions in
-    one batch, potentially amortizing FC weight reads over accepted tokens.
-    The correct speculative sampling algorithm can preserve the target
-    distribution; draft cost and acceptance rate determine whether it helps
-    ([Leviathan et al., 2023](https://proceedings.mlr.press/v202/leviathan23a.html)).
-    This runner would need a full verification graph for every candidate's
-    logits, plus KV rollback/partial commit. Its existing cache-only prefill
-    stops at the last KV producer and cannot serve as that verification graph
-    unchanged. Batched numerical behavior also needs validation. This is a
-    larger, unmeasured architectural experiment, not a demonstrated speedup.
-    Batching independent sessions is another way to reuse weights, but its
-    goal is aggregate throughput rather than one session's next-token latency.
 
 Enabling existing `share_workspace` and `preserve_static_int2` settings by
 default is also valuable for users of this runner, but its benefit was already
@@ -459,7 +454,9 @@ audit. These probes reuse those immutable assets and record their manifest
 identity. Both rebuilt executables link the same preserved XNNPACK/Tensor API
 archives; no kernel or global build-option comparison is hidden in the result.
 This is an isolated source-level experiment, not a claim that current Bazel
-targets were rebuilt or that Android has been validated.
+targets were rebuilt. Android validation is recorded separately in the
+[phone follow-up](gemma4_native_phone_optimizations.md), with its narrower
+1,024-token correctness workload and its own kernels and measurements.
 
 The one-way release patch uses E2B-specific knowledge and is not ready as a
 generic API. The unchanged-shape cache is valid for these stages' input-shape

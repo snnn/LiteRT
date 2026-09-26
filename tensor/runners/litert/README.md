@@ -39,10 +39,11 @@ corresponding libraries and tests.
 | [lambda_model_runner_test.cc](lambda_model_runner_test.cc) | CPU tests for lambda/static graph construction, loading from memory, binary inputs, feedback buffer identity, and reset. |
 | [litert_buffer_test.cc](litert_buffer_test.cc) | Host-buffer read/write locking, packed byte size, and buffer type conversion tests. |
 
-`LitertDynamicRunner` loads models dynamically; it does not expose input
-resizing or automatic buffer reallocation for new shapes. Its buffers are
-created from the compiled signatures during initialization. Graph authoring
-and TFLite operator conversion live in
+`LitertDynamicRunner` supports input resizing and refreshes managed output
+buffers when their layouts change. It caches signature name indices during
+initialization. See [resizable signature inputs](#resizable-signature-inputs)
+below for binding and lifetime requirements. Graph authoring and TFLite
+operator conversion live in
 [`backends/tflite`](../../backends/tflite/), outside this package.
 
 ## Construction and execution
@@ -90,10 +91,11 @@ reported as `Type::kUnknown`; copying bytes does not extend this mapping.
 | Binding API | Current behavior |
 | --- | --- |
 | `SetInput(name, TensorHandle)` | Shares storage when the source is a `LitertBuffer`; otherwise locks the source and copies its bytes into the current input buffer. Both runner implementations support this. |
-| `SetOutput(name, TensorHandle)` | Replaces the output binding with shared `LitertBuffer` storage. Available on the compiled/lambda runner; it requires a `LitertBuffer` source. |
+| `SetOutput(name, TensorHandle)` | Replaces the output binding with shared `LitertBuffer` storage. Available on both runner implementations; it requires a `LitertBuffer` source. |
 | Compiled/lambda `SetInput(name, Span<const std::byte>)` | Temporarily wraps sufficiently aligned host memory when supported, otherwise copies the input. |
 | Compiled/lambda `SetOutput(name, Span<std::byte>)` | Attempts temporary host-memory wrapping, otherwise schedules a copy into the span after execution. The current host-support helper queries **input** buffer requirements by name, including for outputs, so output wrapping is not guaranteed. |
 | Dynamic `SetInput(..., Span<const uint8_t>)` | Copies bytes into the selected input buffer. |
+| Dynamic `SetInputBuffer(signature, name/index, TensorBuffer)` | Retains the supplied buffer without copying, after checking its type and current shape. |
 
 Shared `TensorHandle` bindings persist until replaced or swapped by feedback.
 For one temporary byte-span binding per slot outside feedback, a **successful**
@@ -181,3 +183,65 @@ feedback usually need corresponding updates in both runner implementations
 and regression coverage in `lambda_model_runner_test.cc`. Add storage/locking
 behavior in `LitertBuffer` and its tests; add operator lowering in the TFLite
 backend rather than in these execution wrappers.
+
+## Resizable signature inputs
+
+Use `ResizeInput(signature, input, dimensions)` to change dimensions declared
+as dynamic by a model's shape signature. Pass `strict = false` for a graph
+whose input shapes are concrete prototypes, including models authored by
+`ModelFactory`. This follows `CompiledModel::ResizeInputTensorNonStrict` and
+does not insert padding to a maximum shape.
+
+Resize all affected inputs, bind their buffers, and then call `Run(signature)`.
+The runner refreshes output layouts once after the batch of resizes. It
+reallocates managed outputs only when their layouts change. `GetOutput()`
+reports the resulting buffer's current shape. A resized input must be rebound
+or obtained through `GetInput()` before the next invocation; `Run()` rejects a
+stale input binding. Negative dimensions remain invalid. Empty inputs with a
+zero dimension are supported on CPU, including transitions from empty to
+nonempty and back.
+
+```cpp
+LITERT_ASSIGN_OR_RETURN(auto runner,
+    LitertDynamicRunner::Create(env, model_path, options));
+LITERT_RETURN_IF_ERROR(runner.ResizeInput(
+    "prefill", "past", {1, 1, active_rows, head_dim}, /*strict=*/false));
+LITERT_ASSIGN_OR_RETURN(auto history_buffer,
+    TensorBuffer::CreateFromHostMemory(
+        env,
+        RankedTensorType(ElementType::Int8,
+                         Layout(Dimensions{1, 1, active_rows, head_dim})),
+        history_pointer, accessible_bytes));
+LITERT_RETURN_IF_ERROR(runner.SetInputBuffer(
+    "prefill", "past", std::move(history_buffer)));
+// Bind the other inputs before invoking the signature.
+LITERT_RETURN_IF_ERROR(runner.Run("prefill"));
+```
+
+`SetInputBuffer()` retains the supplied `TensorBuffer` without copying its
+contents and validates its element type and current layout. For a buffer that
+wraps borrowed host memory, the caller must keep the allocation alive until
+its final invocation. The address must meet LiteRT's host alignment and the
+backend's padding requirements. A logical empty input still needs a valid
+accessible allocation. Release buffer locks before `Run()`; invocation locks
+its input and output buffers itself.
+
+`SetInput(..., bytes)` remains a copying API. After a resize, it creates an
+input buffer with the new layout. Existing fixed-shape feedback loops retain
+their buffer-swapping behavior; resizing a signature with a registered
+feedback loop is rejected. If a caller supplied an output buffer and resizing
+changes that output's layout, the caller must replace that buffer before the
+next successful invocation.
+
+## Chunked LLM example
+
+[Gemma4 E2B](../../examples/gemma4/litert/README.md) exports prefill and decode
+as two signatures in one model and runs both through `LitertDynamicRunner`.
+The host owns the persistent KV bank and supplies active history views.
+Prefill invokes one connected graph per chunk, and decode invokes one graph
+per token. No per-layer runner or new attention operator is required.
+
+The Tensor API TFLite exporter preserves quantization when casting between
+quantized tensors and FP32. It serializes these operations as `QUANTIZE` and
+`DEQUANTIZE`, and expands a shared per-channel zero point in the serialized
+metadata without changing the authoring graph.

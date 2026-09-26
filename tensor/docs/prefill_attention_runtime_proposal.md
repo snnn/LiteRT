@@ -29,8 +29,24 @@ test packing-source lifetimes and unchanged-shape reuse, including full-logit/KV
 validation and separate memory and latency measurements. The successful memory
 probe requires an ownership change rather than a new mathematical operator.
 
-Comparable performance is feasible, but introducing an operator name is only
-one part of the work. The graph must expose the necessary semantics, the
+The [joined decode mapping experiment](gemma4_litert_joined_decode.md) now
+demonstrates one LiteRT Interpreter/XNNPACK partition with the native graph's
+kernel-family inventory and bit-identical full logits/KV. It measures 25.894
+versus 25.610 ms/token on the desktop (1.11% slower), using existing primitive
+ops and no delegate changes. This covers decode through the Interpreter;
+prefill remains native and higher-level runner integration is separate. A
+follow-up removes blanket empty-dimension restrictions in `CompiledModel` and
+tensor-buffer size/validation, with public-API transition tests.
+
+The [chunked prefill follow-up](gemma4_litert_chunked_prefill.md) extends the
+mapping to the KV-producing prefix, with one runtime invocation per chunk and
+two signatures sharing one LiteRT delegate workspace. It retains Gemma4's
+cache-only prefix optimization and uses existing primitive operators.
+
+Comparable performance is feasible. **An explicit SDPA operator is neither
+necessary nor sufficient for native-like performance.** It is one proposed
+way to preserve an attention region's semantics and implementation freedom.
+The graph must expose the necessary semantics, the
 delegate must execute only useful work with efficient kernels, and the runner
 must preserve state and reuse resources across invocations.
 
@@ -52,6 +68,156 @@ Related evidence and implementation references:
 
 Links into `../../../LiteRT-LM` assume a sibling checkout under the same
 `src` directory. They are source references, not Tensor API dependencies.
+
+## Architectural clarification: no special SDPA boundary at XNNPACK
+
+The native experiment establishes that an efficiently authored primitive
+graph plus an attention-aware runner can perform well without an SDPA opcode.
+It does not establish that LiteRT needs that opcode. In the native path,
+model-specific C++ has already chosen chunks, shared KV owners, active local
+and global ranges, quantization, and resource lifetimes before invoking
+XNNPACK. The work normally split between conversion, lowering, and execution
+planning has partly been implemented in this C++ runner.
+
+The native [attention construction and execution](../examples/gemma4/native/driver.cc)
+use ordinary BMM, mask addition, softmax, and BMM. Before execution, the
+driver reshapes and binds K/V and the mask to the active aligned range.
+XNNPACK receives a graph whose shapes already describe the intended work;
+it does not have to discover valid cache history from a capacity-sized mask.
+
+For example, capacity 8,448 and live length 1,024 are distinct properties.
+A primitive graph whose score/softmax width is 8,448 still has capacity-sized
+work unless an optimizer proves it can remove that work. A primitive graph
+using views of K/V and masks with logical width 1,024 can propagate that width
+through attention while retaining an 8,448-row backing allocation. That second
+description needs shape/view/binding support and correct mask semantics,
+not a new mathematical operator. The aligned local range is another instance
+of this distinction.
+
+The locally inspected XNNPACK delegate itself provides a concrete example:
+[`VisitScaledDotAttentionCompositeNode`](../../tflite/delegates/xnnpack/xnnpack_delegate.cc)
+lowers the SDPA composite through `VisitDotAttentionNode` into scaling,
+reshapes/transposes, BMM or FC, mask addition, softmax, and BMM or FC. Thus one
+serialized SDPA operation is not necessarily one fused attention kernel.
+That particular lowering's supported types and shapes also do not supply
+all the native runner's INT8-KV and active-range behavior.
+
+There are three viable places to make the required choices:
+
+1. A converter or graph author can emit efficient bounded primitives directly.
+2. A semantic composite can retain the whole attention region until a delegate
+   chooses the bounded or tiled implementation.
+3. A delegate/backend optimizer can recognize a primitive attention pattern
+   and recover the facts needed to transform it safely.
+
+These approaches can coexist. None requires every component above XNNPACK to
+expose an SDPA op. The relevant boundary is where an implementation commits
+to work extents, observable tensor values, layouts, and allocations. That
+boundary can be in the converter, LiteRT compiler/delegate, or backend. A
+semantically rich representation is useful until the component making those
+decisions has enough information; it can then lower to simpler operations.
+
+| Component | Responsibility relevant to this performance gap |
+| --- | --- |
+| Converter / graph author | Preserve or explicitly realize useful bounds, head mapping, masking, shared cache dependencies, and required outputs. |
+| Quantizer | Specify scales, axes, rounding, and precision boundaries; preserve supported low-bit weights and INT8 KV. An SDPA name does not resolve quantization semantics. |
+| LiteRT-LM or Tensor API runner | Schedule chunks, maintain valid positions and cache ownership, bind/resize views, and reuse state and resources. |
+| LiteRT and delegate | Propagate shapes and bounds, admit the intended types, preserve useful regions across partitioning, and lower/bind them without avoidable copies or capacity-sized intermediates. |
+| XNNPACK / YNNPACK | Execute or optimize the resulting region with kernels, packing, threading, and temporary-memory planning; optionally implement a fused/tiled attention algorithm. |
+
+LiteRT graph intermediates are **not inherently required to be materialized**.
+A delegate owning their producers and consumers may keep them internal and
+optimize them. An intermediate that crosses an execution boundary, is exposed
+as an output, or retains a required quantization/rounding step constrains the
+available transformations. The inspected YNN `runtime_bmm`/`SELECT_V2` path's
+capacity-shaped boundaries are a property of that export and lowering, not
+a universal LiteRT rule. The SDPA rewrite removes some of those constraints;
+an equivalent supported primitive rewrite could address them too.
+
+Accordingly, the proposed SDPA contract is an engineering choice for robust
+semantic transport, backend selection, and future attention algorithms. It
+must be compared with a primitive path using equivalent bounds, types,
+resource ownership, and scheduling. Until that comparison exists, the local
+results cannot assign a speedup to the presence of an SDPA opcode itself.
+The current native path also does not implement online tiled softmax, so its
+performance is not evidence that the corresponding algorithmic transformation
+has already happened automatically in XNNPACK.
+
+A subsequent [single-graph decode experiment](gemma4_single_graph_decode.md)
+now tests the graph-size question directly. It replaces 107 staged decode
+invocations with one XNNPACK primitive graph, deferring persistent KV commit
+until that graph completes. All 163 tested full-logit vectors and 4,890 KV
+files are bit-identical; 1,024-token desktop decode is 25.52 versus 25.12 ms.
+Thus host intervention between decode layers is not required for comparable
+performance in that test. It retains staged prefill and adds active-history
+concatenations; a corresponding LiteRT mapping is still untested.
+
+### YNNPACK cache API audit (2026-09-23)
+
+YNNPACK already supplies dynamic extents and an internal prefix view that
+does not copy data. The inspected public API does **not** supply a general
+dynamic-offset cache update with an explicit in-place storage/ordering
+contract. Thus it addresses the read side of the cache problem more directly
+than the write side. This is a source audit, not a new Gemma4 benchmark.
+
+The native dependency is based on XNNPACK
+`bf3ee43b63070284f85a4a882f298b6ca5273f01`. Its YNNPACK public header,
+`slice_like.cc`, and `concatenate.cc` are byte-identical to the corresponding
+files in this checkout's Bazel external dependency. The public upstream header
+was also inspected; it likewise exposes no update-slice/scatter/cache-append
+operation or external-buffer donation/alias declaration.
+
+| Need | Inspected YNNPACK capability | Limit |
+| --- | --- | --- |
+| Change query/history extents between invocations | `ynn_define_tensor` with dynamic dimensions, `ynn_set_external_value_shape`, and `ynn_reshape_runtime` | Shapes must be authored as dynamic; this does not express cache mutation. |
+| Bind caller-owned persistent storage | `ynn_set_external_value_data` | Binding pointers does not declare dependencies between overlapping input/output values. |
+| Read only the valid prefix | `ynn_define_slice_like(..., flags=0)` | Crops from zero to a template tensor's extent; it does not directly accept a runtime starting offset. |
+| Avoid materializing that prefix view | Internal `slice_like` assigns `output.buffer = input.buffer` | `KEEP_SHAPE` or an external output instead constructs a copy/padded-copy function; later optimization may affect its cost. |
+| Append new rows inside the graph | No dedicated update API found | Concatenation remains an available functional construction, but no history-copy-free cache append is established. |
+| Optimize copies across operators | YNNPACK lowers concatenation to Slinky's `make_concat`; Slinky runs copy-alias and in-place-alias passes | These are compiler optimizations, not a public guarantee that external persistent KV can be mutated safely or that this particular concatenate is eliminated. |
+
+Implementation evidence:
+
+- [YNNPACK public API](https://github.com/google/XNNPACK/blob/bf3ee43b63070284f85a4a882f298b6ca5273f01/ynnpack/include/ynnpack.h).
+- [Prefix-view implementation](https://github.com/google/XNNPACK/blob/bf3ee43b63070284f85a4a882f298b6ca5273f01/ynnpack/subgraph/slice_like.cc).
+- [Concatenation lowering](https://github.com/google/XNNPACK/blob/bf3ee43b63070284f85a4a882f298b6ca5273f01/ynnpack/subgraph/concatenate.cc).
+- [Slinky alias passes](../../.bazel-output/external/slinky/slinky/builder/optimizations.cc)
+  and [pipeline construction](../../.bazel-output/external/slinky/slinky/builder/pipeline.cc)
+  in the inspected local dependency. The copy aliaser treats external inputs
+  as caller-owned and does not simply redirect their allocations into outputs.
+
+The local [YNNPACK SDPA lowering](../../tflite/delegates/ynnpack/attention.cc)
+already uses `slice_like` to propagate live KV length. The
+[delegate](../../tflite/delegates/ynnpack/ynnpack_delegate.cc) obtains that length
+from a parameter tensor and updates a shape-only external input before
+invocation. Ordinary `SLICE`/`STRIDED_SLICE` lowering in
+[copy.cc](../../tflite/delegates/ynnpack/copy.cc) requires constant bounds under
+its shape policy, so dynamic slice support should not be inferred from that
+operator name alone. A direct runner can also rebind an external input to a
+contiguous local-history subrange before invocation; this alone still does
+not order a new cache write within the graph.
+
+LiteRT already has
+[`DYNAMIC_UPDATE_SLICE`](../../tflite/kernels/dynamic_update_slice.cc).
+Its CPU registration permits sharing input 0, and the kernel skips the
+whole-input copy when input and output pointers match, writing only the update.
+Whether buffers actually alias depends on allocation and binding. The inspected
+YNNPACK delegate has no support/lowering branch for this operation, so it
+remains outside the delegated region and can introduce execution boundaries.
+That boundary does not by itself imply a full-cache copy.
+
+A concrete direction is therefore to preserve LiteRT's existing update
+semantics, add a suitable YNNPACK lowering/backend mechanism for bounded
+writes and safe storage reuse, and connect its updated value to the existing
+live-view attention path. Any design must preserve old values that still have
+consumers and order the write before attention reads the new rows. An SDPA
+opcode is not required to define those cache semantics.
+
+The same distinction applies to decode and later prefill chunks: cache-update
+work should scale with the new rows. Prefill starting from an empty cache can
+pass newly produced K/V directly to attention and expose them for later calls.
+Chunking remains useful for temporary-memory bounds independently of whether
+cache mutation happens in C++, a LiteRT kernel, or the backend graph.
 
 ## 1. Separate the optimizations
 
@@ -716,10 +882,10 @@ Deliver the work in independently reviewable stages:
 
 | Stage | Deliverable | Evidence required |
 | --- | --- | --- |
-| 1. Contract and authoring | Typed SDPA/cache helpers, versioned semantics, faithful decomposition, correct prefix roots. | Serialized models and independent semantic tests. |
+| 1. Contract and authoring | Attention/cache semantics through a composite or equivalent bounded primitives; faithful numerics and correct prefix roots. | Serialized models and independent semantic tests. |
 | 2. Runner and state | Dynamic query rows, resize/rebinding, shared persistent KV, reusable weights/resources. | Correct results across changing shapes, chunks, and sessions without unintended state copies. |
 | 3. Bounded attention | Live prefix and local interval lowering with ordinary attention kernels. | Work extents follow useful bounds; isolated prefill/decode comparisons. |
-| 4. Online attention | Backend tiling and running normalization behind the same SDPA interface. | Tile-bounded intermediates, qualified numerics, and target-device measurements. |
+| 4. Online attention | Backend tiling and running normalization for the attention region. | Tile-bounded intermediates, qualified numerics, and target-device measurements. |
 | 5. Policy tuning | Choose whole-prefix or chunked execution and suitable chunk sizes per workload. | End-to-end latency and memory tradeoffs with the other stages held constant. |
 
 The first performance milestone is to reproduce native's useful work through
