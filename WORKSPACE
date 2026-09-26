@@ -135,8 +135,6 @@ load("//:tensorflow_source_rules.bzl", "tensorflow_source_repo")
 
 tensorflow_source_repo(
     name = "org_tensorflow",
-    patches = ["//:PATCH.flatbuffers_windows_no_bash"],
-    protobuf_patches = ["//:PATCH.protobuf_port_msvc_compat"],
     sha256 = "7bf06cfd5ff9b462b1b25ca4dc3613fa5e3847fd8e291ff0a8de2ca5a812590a",
     strip_prefix = "tensorflow-5c0b7a5946f0f485e3a532b2a00e03f42a6e14c1",
     urls = ["https://github.com/tensorflow/tensorflow/archive/5c0b7a5946f0f485e3a532b2a00e03f42a6e14c1.tar.gz"],
@@ -373,6 +371,15 @@ http_archive(
     sha256 = "8517f65938a4faae9ccf8ebb36631a38c1cadfb5efa85d9a72e15b9e97d25155",
     strip_prefix = "tomlplusplus-3.4.0",
     url = "https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz",
+)
+
+# SafeInt
+http_archive(
+    name = "SafeInt",
+    build_file = "@//:BUILD.SafeInt",
+    sha256 = "4bd737e5885112e796742b7b6ba7181ff346855dc22d29ed2b258de567a1de8d",
+    strip_prefix = "SafeInt-72f0745e26091af6d1186fd91426377f16688ba7",
+    url = "https://github.com/dcleblanc/SafeInt/archive/72f0745e26091af6d1186fd91426377f16688ba7.tar.gz",
 )
 
 # RE2

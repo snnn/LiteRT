@@ -235,7 +235,8 @@ TEST_P(Gemma4OutputHeadTest, ProjectsWithCheckpointWeights) {
     }
   }
 
-  auto outputs = BuildGemma4Graph(inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto outputs,
+                                BuildGemma4Graph(inputs, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(XnnpackRunner runner,
                                   XnnpackRunner::Create({outputs.logits}));
   const std::array<float, 4> input_data = {1.0f, -1.0f, -1.0f, 1.0f};
@@ -283,8 +284,8 @@ TEST(Gemma4GraphTest, ModelTest) {
       {.name = "rope_local_sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   inputs.weights = CreateGemma4GraphTestWeights(2);
 
-  Gemma4Outputs<XnnpackMixinTag> model_outputs =
-      BuildGemma4Graph(inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
+                                  BuildGemma4Graph(inputs, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -352,8 +353,8 @@ TEST(Gemma4GraphTest, GlobalLayerGraphTest) {
       {.name = "rope_global_sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   inputs.weights = CreateGemma4GraphTestWeights(2);
 
-  Gemma4Outputs<XnnpackMixinTag> model_outputs =
-      BuildGemma4Graph(inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
+                                  BuildGemma4Graph(inputs, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -428,8 +429,8 @@ TEST(Gemma4GraphTest, KVCacheGraphTest) {
       {.name = "value_cache", .type = Type::kFP32, .shape = {1, 1, 2, 4}})};
   inputs.weights = CreateGemma4GraphTestWeights(1);
 
-  Gemma4Outputs<XnnpackMixinTag> model_outputs =
-      BuildGemma4Graph(inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
+                                  BuildGemma4Graph(inputs, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner,
@@ -511,8 +512,8 @@ TEST(Gemma4GraphTest, SharedKVCacheGraphTest) {
       {.name = "rope_local_sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   inputs.weights = CreateGemma4GraphTestWeights(3);
 
-  Gemma4Outputs<XnnpackMixinTag> model_outputs =
-      BuildGemma4Graph(inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
+                                  BuildGemma4Graph(inputs, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner,
@@ -630,8 +631,8 @@ TEST(Gemma4GraphTest, PerLayerInputsGraphTest) {
                     .buffer = std::vector<float>{1.0f, 1.0f, 1.0f, 1.0f}})});
   }
 
-  Gemma4Outputs<XnnpackMixinTag> model_outputs =
-      BuildGemma4Graph(inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
+                                  BuildGemma4Graph(inputs, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -699,8 +700,8 @@ TEST(Gemma4GraphTest, NoLogitSoftcappingGraphTest) {
 
   inputs.weights = CreateGemma4GraphTestWeights(2);
 
-  Gemma4Outputs<XnnpackMixinTag> model_outputs =
-      BuildGemma4Graph(inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
+                                  BuildGemma4Graph(inputs, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -829,8 +830,8 @@ TEST(Gemma4GraphTest, PerLayerInputsWithProjectionGraphTest) {
   inputs.rope_local_sin = rope_local_sin;
   inputs.weights = weights;
 
-  Gemma4Outputs<XnnpackMixinTag> model_outputs =
-      BuildGemma4Graph(inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
+                                  BuildGemma4Graph(inputs, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
   ASSERT_THAT(runner.SetInput(embedded_input, embedded_input_data), IsOk());
@@ -922,7 +923,8 @@ TEST(Gemma4GraphTest, PrefillMatchesMultiStepCachedDecode) {
       1.48396671f, 1.76111605f, 2.03550113f, 2.30672551f, 2.57441229f};
 
   auto full_inputs = make_inputs(/*seq_len=*/4, /*cache_len=*/0);
-  auto full_outputs = BuildGemma4Graph(full_inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto full_outputs,
+                                BuildGemma4Graph(full_inputs, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       auto full_runner, XnnpackRunner::Create(full_outputs.GetAllHandles()));
   ASSERT_THAT(full_runner.SetInput(full_inputs.embedded_input, embeddings),
@@ -937,7 +939,8 @@ TEST(Gemma4GraphTest, PrefillMatchesMultiStepCachedDecode) {
               IsOkAndHolds(Pointwise(FloatNear(1e-4f), expected)));
 
   auto prefill_inputs = make_inputs(/*seq_len=*/2, /*cache_len=*/0);
-  auto prefill_outputs = BuildGemma4Graph(prefill_inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto prefill_outputs,
+                                BuildGemma4Graph(prefill_inputs, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       auto prefill_runner,
       XnnpackRunner::Create(prefill_outputs.GetAllHandles()));
@@ -976,7 +979,8 @@ TEST(Gemma4GraphTest, PrefillMatchesMultiStepCachedDecode) {
   }
 
   auto decode_inputs = make_inputs(/*seq_len=*/1, /*cache_len=*/2);
-  auto decode_outputs = BuildGemma4Graph(decode_inputs, config);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto decode_outputs,
+                                BuildGemma4Graph(decode_inputs, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       auto decode_runner,
       XnnpackRunner::Create(decode_outputs.GetAllHandles()));
@@ -1094,8 +1098,9 @@ TEST(Gemma4GraphTest, NativeWeightCacheTest) {
     inputs.rope_local_sin = rope_local_sin;
     inputs.weights = weights;
 
-    Gemma4Outputs<XnnpackMixinTag> model_outputs =
-        BuildGemma4Graph(inputs, config);
+    LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
+        Gemma4Outputs<XnnpackMixinTag> model_outputs,
+        BuildGemma4Graph(inputs, config));
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -1142,8 +1147,9 @@ TEST(Gemma4GraphTest, NativeWeightCacheTest) {
     inputs.rope_local_sin = rope_local_sin;
     inputs.weights = weights;
 
-    Gemma4Outputs<XnnpackMixinTag> model_outputs =
-        BuildGemma4Graph(inputs, config);
+    LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
+        Gemma4Outputs<XnnpackMixinTag> model_outputs,
+        BuildGemma4Graph(inputs, config));
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -1232,8 +1238,9 @@ TEST(Gemma4GraphTest, WeightCacheTest) {
     inputs.rope_local_sin = rope_local_sin;
     inputs.weights = weights;
 
-    Gemma4Outputs<XnnpackMixinTag> model_outputs =
-        BuildGemma4Graph(inputs, config);
+    LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
+        Gemma4Outputs<XnnpackMixinTag> model_outputs,
+        BuildGemma4Graph(inputs, config));
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -1282,8 +1289,9 @@ TEST(Gemma4GraphTest, WeightCacheTest) {
     inputs.rope_local_sin = rope_local_sin;
     inputs.weights = weights;
 
-    Gemma4Outputs<XnnpackMixinTag> model_outputs =
-        BuildGemma4Graph(inputs, config);
+    LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
+        Gemma4Outputs<XnnpackMixinTag> model_outputs,
+        BuildGemma4Graph(inputs, config));
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));

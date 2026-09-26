@@ -119,6 +119,23 @@ GemmaEmbeddingTable::LookupPerLayer(int32_t token_id, int num_layers,
 
 namespace {
 
+// Extracts the `bit`-wide value at offset `col` from `raw_bytes`
+//
+// Note: Sub-byte data is assumed to be stored signed and in little-endian
+// order.
+constexpr int8_t ExtractPackedField(const uint8_t* const row_data,
+                                    const int col, const int bits,
+                                    const int fields_per_byte) {
+  const int byte_index = col / fields_per_byte;
+  const int sub_byte_index = col % fields_per_byte;
+  const int shift = sub_byte_index * bits;
+  const unsigned int bits_mask = (1 << bits) - 1;
+  const unsigned int bits_msb = 1 << (bits - 1);
+  const uint8_t field = (row_data[byte_index] >> shift) & bits_mask;
+  return (field & bits_msb) ? static_cast<int8_t>(field - (1 << bits))
+                            : static_cast<int8_t>(field);
+}
+
 // Lookup for FP32 stored embeddings.
 class Fp32GemmaEmbeddingTable : public GemmaEmbeddingTable {
  public:
@@ -207,31 +224,26 @@ class QuantizedGemmaEmbeddingTable : public GemmaEmbeddingTable {
                  float* dst) const override {
     const uint8_t* raw_bytes = locked_span_.data();
 
-    if (type_ == Type::kI4) {
-      // 4-bit packed: 2 elements per byte.
-      // Even column index -> low nibble (bits 0..3)
-      // Odd column index  -> high nibble (bits 4..7)
-      const size_t row_byte_offset = static_cast<size_t>(row) * (emb_dim_ / 2);
+    if (type_ == Type::kI2 || type_ == Type::kI4) {
+      const int bits = BitSize(type_);
+      const int fields_per_byte = NumElements(type_);
+      const size_t row_byte_offset =
+          static_cast<size_t>(row) * (emb_dim_ / fields_per_byte);
 
       if (blockwise_quant_ != nullptr) {
         const int block_size = blockwise_quant_->block_size;
         const int num_blocks_per_row = emb_dim_ / block_size;
-        const float* row_scales = blockwise_quant_->scales.data() +
-                                  static_cast<size_t>(row) * num_blocks_per_row;
-        const size_t num_zp = blockwise_quant_->zero_points.size();
-        const int64_t* zp_data = blockwise_quant_->zero_points.data();
         const size_t row_block_offset =
             static_cast<size_t>(row) * num_blocks_per_row;
+        const float* row_scales =
+            blockwise_quant_->scales.data() + row_block_offset;
+        const size_t num_zp = blockwise_quant_->zero_points.size();
+        const int64_t* zp_data = blockwise_quant_->zero_points.data();
 
         for (int c = 0; c < num_cols; ++c) {
           const int col = col_start + c;
-          const size_t byte_idx = row_byte_offset + (col / 2);
-          const uint8_t byte_val = raw_bytes[byte_idx];
-          const uint8_t nibble =
-              (col % 2 == 0) ? (byte_val & 0x0F) : ((byte_val >> 4) & 0x0F);
-          // Sign extend 4-bit signed [-8, 7]
-          const int8_t val = (nibble & 0x08) ? static_cast<int8_t>(nibble - 16)
-                                             : static_cast<int8_t>(nibble);
+          const int8_t val = ExtractPackedField(raw_bytes + row_byte_offset,
+                                                col, bits, fields_per_byte);
           const size_t block_in_row = col / block_size;
           const size_t block_idx = row_block_offset + block_in_row;
           int64_t zp = 0;
@@ -253,13 +265,9 @@ class QuantizedGemmaEmbeddingTable : public GemmaEmbeddingTable {
           zp = per_channel_quant_->zero_points[row];
         }
         for (int c = 0; c < num_cols; ++c) {
-          const int col = col_start + c;
-          const size_t byte_idx = row_byte_offset + (col / 2);
-          const uint8_t byte_val = raw_bytes[byte_idx];
-          const uint8_t nibble =
-              (col % 2 == 0) ? (byte_val & 0x0F) : ((byte_val >> 4) & 0x0F);
-          const int8_t val = (nibble & 0x08) ? static_cast<int8_t>(nibble - 16)
-                                             : static_cast<int8_t>(nibble);
+          const int8_t val =
+              ExtractPackedField(raw_bytes + row_byte_offset, col_start + c,
+                                 bits, fields_per_byte);
           dst[c] = static_cast<float>(val - zp) * scale;
         }
       }
@@ -335,9 +343,9 @@ GemmaEmbeddingTable::Create(TensorHandle tensor, int expected_emb_dim) {
   std::shared_ptr<BlockwiseQuantization> blockwise_quant;
 
   if (quant != nullptr) {
-    if (type != Type::kI4 && type != Type::kI8) {
+    if (type != Type::kI2 && type != Type::kI4 && type != Type::kI8) {
       return absl::InvalidArgumentError(
-          "Quantized embedding tables must use INT4 or INT8 storage");
+          "Quantized embedding tables must use INT2, INT4, or INT8 storage");
     }
     if (auto pc = quant->As<const PerChannelAffineQuantization>(); pc.ok()) {
       per_channel_quant = std::make_shared<PerChannelAffineQuantization>(*pc);
@@ -422,6 +430,10 @@ GemmaEmbeddingTable::Create(TensorHandle tensor, int expected_emb_dim) {
   if (type == Type::kI4 && logical_dim % 2 != 0) {
     return absl::InvalidArgumentError(
         "Packed INT4 embedding rows must contain an even number of elements");
+  }
+  if (type == Type::kI2 && logical_dim % 4 != 0) {
+    return absl::InvalidArgumentError(
+        "Packed INT2 embedding rows must contain a multiple of four elements");
   }
   const size_t row_bytes = BufferSize(type, logical_dim);
   if (static_cast<size_t>(vocab_size) >

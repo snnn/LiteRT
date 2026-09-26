@@ -68,6 +68,10 @@ limitations under the License.
 #include "tflite/delegates/xnnpack/weight_cache.h"
 #include "xnnpack.h"  // from @XNNPACK
 
+namespace {
+constexpr absl::string_view kAutoWeightCacheFlag = ":auto";
+}
+
 ABSL_FLAG(std::string, weights, "",
           "Path to safetensor weights file or directory.");
 ABSL_FLAG(std::string, tokenizer, "",
@@ -80,9 +84,13 @@ ABSL_FLAG(bool, verbose, false, "Verbose logging.");
 ABSL_FLAG(litert::tensor::examples::TokenPrinter::Kind, print,
           litert::tensor::examples::TokenPrinter::Kind::kTokens,
           "Output mode (tokens or progress).");
-ABSL_FLAG(std::string, weight_cache, "", "Path to XNNPack weight cache file.");
+ABSL_FLAG(std::string, weight_cache, std::string(kAutoWeightCacheFlag),
+          "Path to XNNPack weight cache file.");
 ABSL_FLAG(std::string, perfetto_output, "",
           "Path to output Perfetto trace file.");
+ABSL_FLAG(bool, instruction_tuned, true,
+          "Wraps the prompt with turn instruction markers. This is only useful "
+          "for instruction tuned models.");
 
 ABSL_FLAG(bool, consistent_arithmetic, false,
           "Use XNNPACK's slower consistent-arithmetic paths for single-KV-head "
@@ -104,7 +112,6 @@ constexpr int32_t kStartOfTurnToken = 105;
 constexpr int32_t kEndOfTurnToken = 106;
 // Google's mobile checkpoints also stop before a tool response.
 constexpr int32_t kToolResponseToken = 50;
-constexpr absl::string_view kAutoWeightCacheFlag = ":auto";
 
 using ::litert::tensor::PerfettoSession;
 using ::litert::tensor::examples::DecodeTiming;
@@ -488,6 +495,7 @@ absl::StatusOr<LoadedTensors> LoadWeightsAndPrepareTensors(
       GemmaEmbeddingTable::Create(
           weights_handle["model.embed_tokens_per_layer.weight"],
           config.num_layers * config.per_layer_input_dim));
+
   return LoadedTensors{std::move(weights_handle), std::move(token_embedding),
                        std::move(emb_per_layer_table)};
 }
@@ -603,15 +611,15 @@ absl::StatusOr<BuiltGraphs> BuildModelGraphs(
       Gemma4Inputs<XnnpackMixinTag> prefill_inputs,
       CreateGemma4Inputs(config, /*input_seq_len=*/seq_len, /*kv_cache_len=*/0,
                          weights_handle, verbose));
-  Gemma4Outputs<XnnpackMixinTag> prefill_outputs =
-      BuildGemma4Graph(prefill_inputs, config);
+  LRT_TENSOR_ASSIGN_OR_RETURN(Gemma4Outputs<XnnpackMixinTag> prefill_outputs,
+                              BuildGemma4Graph(prefill_inputs, config));
 
   LRT_TENSOR_ASSIGN_OR_RETURN(
       Gemma4Inputs<XnnpackMixinTag> decode_inputs,
       CreateGemma4Inputs(config, /*input_seq_len=*/1, /*kv_cache_len=*/seq_len,
                          weights_handle, /*verbose=*/false));
-  Gemma4Outputs<XnnpackMixinTag> decode_outputs =
-      BuildGemma4Graph(decode_inputs, config);
+  LRT_TENSOR_ASSIGN_OR_RETURN(Gemma4Outputs<XnnpackMixinTag> decode_outputs,
+                              BuildGemma4Graph(decode_inputs, config));
 
   return BuiltGraphs{std::move(prefill_inputs), std::move(prefill_outputs),
                      std::move(decode_inputs), std::move(decode_outputs)};
@@ -1012,7 +1020,7 @@ absl::Status Run(const std::string& weights_path,
   const Config config = Config::From(model_variant);
 
   std::string prompt = raw_prompt;
-  if (tokenizer.has_value() && model_variant == ModelVariant::kE4B) {
+  if (tokenizer.has_value() && absl::GetFlag(FLAGS_instruction_tuned)) {
     const std::string start_of_turn = tokenizer->DecodeToken(kStartOfTurnToken);
     if (!absl::StrContains(raw_prompt, start_of_turn)) {
       prompt = absl::StrCat(start_of_turn, "user\n", raw_prompt,

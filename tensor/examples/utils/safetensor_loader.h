@@ -160,7 +160,7 @@ class SafetensorLoader {
   std::vector<std::string> GetTensorNames() const;
 
   // Gets tensor info by name.
-  absl::StatusOr<SafetensorTensorInfo> GetTensorInfo(
+  absl::StatusOr<const SafetensorTensorInfo&> GetTensorInfo(
       absl::string_view name) const;
 
   // Gets the quantization config, if the checkpoint declares one.
@@ -171,9 +171,10 @@ class SafetensorLoader {
   // Loads a tensor.
   //
   // Unquantized BF16/FP16 tensors are converted to FP32, except the per-layer
-  // embedding table, whose CPU row lookup can convert only the requested rows.
-  // Compressed-tensors .weight names resolve to .weight_packed when applicable.
-  // Two-bit weights are widened to signed packed I4 without dequantizing.
+  // embedding table, whose CPU row lookup converts only the requested rows.
+  // compressed-tensors .weight names resolve to the packed/scale/shape tuple.
+  // Header-declared packed weights keep their declared bit width. Sidecar
+  // mobile configs retain the existing INT2-to-INT4 compatibility conversion.
   absl::StatusOr<TensorHandle> LoadTensor(absl::string_view name) const;
 
   // Loads all tensors into a map.
@@ -207,6 +208,16 @@ class SafetensorLoader {
   // Reads `quantization_config` from a HuggingFace `config.json`. Returns
   // `absl::NotFoundError` if the file does not exist.
   absl::Status AddQuantizationConfigFromJsonFile(const std::string& path);
+
+  // Loads weights stored as a `compressed-tensors` packed tuple:
+  // `<module>.weight_{packed,scale,zero_point,shape}`.
+  absl::StatusOr<TensorHandle> LoadPackedTensor(absl::string_view module,
+                                                absl::string_view name) const;
+
+  // Reads the `<module>.weight_{scale,zero_point}` and builds the matching
+  // quantization parameters for `scheme`.
+  absl::StatusOr<std::shared_ptr<Quantization>> LoadQuantizationParams(
+      const QuantizationConfig::Scheme& scheme, absl::string_view module) const;
 
   // Convert safetensor dtype enum to Type enum.
   static absl::StatusOr<Type> DtypeToType(safetensors::dtype dtype);

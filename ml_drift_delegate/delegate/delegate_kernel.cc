@@ -730,7 +730,9 @@ bool DelegateKernel::ReadFromSerializedData() {
 }
 
 std::string DelegateKernel::ComputeOptionsFingerprint() const {
-  // Generate fingerprints for the relevant delegate data options.
+// Generate fingerprints for the relevant delegate data options.
+// Pack the struct to prevent hashing uninitialized alignment padding bytes.
+#pragma pack(push, 1)
   struct {
     MlDriftDelegatePrecision precision;
     bool convert_weights_on_gpu;
@@ -757,6 +759,7 @@ std::string DelegateKernel::ComputeOptionsFingerprint() const {
     bool use_metal_argument_buffers;
 #endif  // __APPLE__
   } options_to_fingerprint = {};
+#pragma pack(pop)
   options_to_fingerprint.precision = delegate_data_->options->precision;
   options_to_fingerprint.convert_weights_on_gpu =
       delegate_data_->options->convert_weights_on_gpu;
@@ -1156,12 +1159,12 @@ absl::Status DelegateKernel::InitializeIrModel(
     auto consumers = ir_model->FindConsumers(tensor_id);
     if (producer == nullptr && consumers.empty()) continue;
     const auto* t = ir_model->tensor(tensor_id);
-    if (t != nullptr && t->buffer_source.tflite_tensor_id >= 0) {
+    if (t != nullptr && t->buffer_source.tensor_id >= 0) {
       const TfLiteTensor* tensor =
-          context->tensors + t->buffer_source.tflite_tensor_id;
+          context->tensors + t->buffer_source.tensor_id;
       if (!tflite::IsConstantTensor(tensor)) {
         input_ids_.push_back(tensor_id);
-        input_indices_.push_back(t->buffer_source.tflite_tensor_id);
+        input_indices_.push_back(t->buffer_source.tensor_id);
       }
     }
   }
@@ -1172,9 +1175,9 @@ absl::Status DelegateKernel::InitializeIrModel(
     auto consumers = ir_model->FindConsumers(tensor_id);
     if (producer == nullptr && consumers.empty()) continue;
     const auto* t = ir_model->tensor(tensor_id);
-    if (t != nullptr && t->buffer_source.tflite_tensor_id >= 0) {
+    if (t != nullptr && t->buffer_source.tensor_id >= 0) {
       output_ids_.push_back(tensor_id);
-      output_indices_.push_back(t->buffer_source.tflite_tensor_id);
+      output_indices_.push_back(t->buffer_source.tensor_id);
     }
   }
 
