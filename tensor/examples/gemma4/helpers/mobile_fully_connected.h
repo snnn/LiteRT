@@ -29,6 +29,7 @@ limitations under the License.
 #include "tensor/arithmetic.h"
 #include "tensor/buffer.h"
 #include "tensor/examples/gemma4/helpers/float_activation_fully_connected.h"
+#include "tensor/examples/utils/tensor_mapping.h"
 #include "tensor/tensor.h"
 
 namespace litert::tensor::examples::gemma4 {
@@ -116,6 +117,34 @@ Tensor<Mixins...> MobileFullyConnected(
       std::make_shared<PerChannelAffineQuantization>(
           std::vector<float>{*output_scale}, std::vector<int64_t>{0}));
   return Cast(quantized_output, Type::kFP32);
+}
+
+// Load only this projection's optional activation scales from the mapping.
+// A malformed scale must propagate an error rather than silently changing the
+// graph to floating-point activations.
+template <class... Mixins>
+Tensor<Mixins...> MobileFullyConnected(Tensor<Mixins...> input,
+                                      Tensor<Mixins...> weight,
+                                      TensorMapping* weights) {
+  if (weights == nullptr) return FullyConnected(input, weight);
+  std::string module(weight.GetName());
+  constexpr size_t suffix_size = sizeof(".weight") - 1;
+  if (module.size() < suffix_size ||
+      module.compare(module.size() - suffix_size, suffix_size, ".weight") != 0) {
+    return FullyConnected(input, weight);
+  }
+  module.resize(module.size() - suffix_size);
+  absl::flat_hash_map<std::string, Tensor<Mixins...>> scales;
+  for (const char* suffix : {".input_scale", ".output_scale"}) {
+    const std::string name = absl::StrCat(module, suffix);
+    auto scale = weights->Get(name);
+    if (scale.ok()) {
+      scales.emplace(name, Tensor<Mixins...>(*scale));
+    } else if (!absl::IsNotFound(scale.status())) {
+      return Tensor<Mixins...>(graph::ErrorTensor(scale.status()));
+    }
+  }
+  return MobileFullyConnected(input, weight, &scales);
 }
 
 }  // namespace litert::tensor::examples::gemma4

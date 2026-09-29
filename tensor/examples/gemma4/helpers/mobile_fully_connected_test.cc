@@ -68,7 +68,13 @@ TEST_P(MobileFullyConnectedTest, StaticScalesRoundingAndSaturation) {
       "linear.output_scale",
       XnnTensor({.type = Type::kFP32, .shape = {}, .buffer = 0.5f}));
   auto output = MobileFullyConnected(input, weight, &weights);
-  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto runner, XnnpackRunner::Create({output}));
+  LazyTensorMapping lazy_weights;
+  for (const auto& [name, tensor] : weights) {
+    ASSERT_THAT(lazy_weights.Set(name, tensor), IsOk());
+  }
+  auto lazy_output = MobileFullyConnected(input, weight, &lazy_weights);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
+      auto runner, XnnpackRunner::Create({output, lazy_output}));
   std::vector<float> values(3 * channels);
   for (int i = 0; i < channels; ++i) {
     values[i] = (i % 13 - 6) * 0.31f;
@@ -79,7 +85,10 @@ TEST_P(MobileFullyConnectedTest, StaticScalesRoundingAndSaturation) {
   ASSERT_THAT(runner.Run(), IsOk());
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto actual,
                                   runner.ReadOutputAs<float>(output));
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto lazy_actual,
+                                  runner.ReadOutputAs<float>(lazy_output));
   ASSERT_EQ(actual.size(), 6);
+  ASSERT_EQ(lazy_actual.size(), 6);
   for (int row = 0; row < 3; ++row) {
     for (int col = 0; col < 2; ++col) {
       int32_t accumulator = 0;
@@ -93,6 +102,7 @@ TEST_P(MobileFullyConnectedTest, StaticScalesRoundingAndSaturation) {
           std::nearbyint(accumulator * 0.25f * weight_scales[col] / 0.5f),
           -128.0f, 127.0f);
       EXPECT_FLOAT_EQ(actual.data()[row * 2 + col], quantized * 0.5f);
+      EXPECT_FLOAT_EQ(lazy_actual.data()[row * 2 + col], quantized * 0.5f);
     }
   }
 }
@@ -193,6 +203,28 @@ TEST(MobileFullyConnectedValidationTest, RejectsPartialScaleMetadata) {
       "linear.input_scale",
       XnnTensor({.type = Type::kFP32, .shape = {}, .buffer = 1.0f}));
   EXPECT_FALSE(MobileFullyConnected(input, weight, &weights).GetStatus().ok());
+  LazyTensorMapping lazy_weights;
+  ASSERT_THAT(lazy_weights.Set("linear.input_scale",
+                               weights.at("linear.input_scale")), IsOk());
+  EXPECT_FALSE(
+      MobileFullyConnected(input, weight, &lazy_weights).GetStatus().ok());
+}
+
+TEST(MobileFullyConnectedValidationTest, PropagatesLazyScaleLoadingErrors) {
+  class InvalidScaleHooks : public TensorMappingHooks {
+   public:
+    absl::StatusOr<TensorHandle> OnNotFound(
+        TensorMapping&, absl::string_view) override {
+      return absl::InvalidArgumentError("Malformed activation scale");
+    }
+  };
+  LazyTensorMapping weights;
+  weights.Register<InvalidScaleHooks>();
+  XnnTensor input({.type = Type::kFP32, .shape = {1, 2}});
+  XnnTensor weight(
+      {.name = "linear.weight", .type = Type::kFP32, .shape = {2, 2}});
+  EXPECT_EQ(MobileFullyConnected(input, weight, &weights).GetStatus().code(),
+            absl::StatusCode::kInvalidArgument);
 }
 
 }  // namespace

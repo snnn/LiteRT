@@ -42,6 +42,7 @@ limitations under the License.
 #include "tensor/datatypes.h"
 #include "tensor/examples/gemma4/gemma4_config.h"
 #include "tensor/examples/ops/transformer/transformer_ops_xnnpack.h"  // IWYU pragma: keep
+#include "tensor/examples/utils/tensor_mapping.h"
 #include "tensor/runners/xnnpack/runner.h"
 #include "tensor/tensor.h"
 #include "tensor/utils/matchers.h"
@@ -79,9 +80,9 @@ std::vector<float> GenerateWeights(size_t m, size_t n, float scale = 0.01f,
   return matrix;
 }
 
-absl::flat_hash_map<std::string, XnnTensor> CreateDefaultWeights(
+absl::flat_hash_map<std::string, TensorHandle> CreateDefaultWeights(
     absl::string_view prefix = "attn") {
-  absl::flat_hash_map<std::string, XnnTensor> weights;
+  absl::flat_hash_map<std::string, TensorHandle> weights;
 
   weights.insert({absl::StrCat(prefix, ".q_proj.weight"),
                   XnnTensor({.name = "q_proj",
@@ -122,9 +123,9 @@ absl::flat_hash_map<std::string, XnnTensor> CreateDefaultWeights(
   return weights;
 }
 
-absl::flat_hash_map<std::string, XnnTensor> CreateGqaWeights(
+absl::flat_hash_map<std::string, TensorHandle> CreateGqaWeights(
     absl::string_view prefix = "attn") {
-  absl::flat_hash_map<std::string, XnnTensor> weights;
+  absl::flat_hash_map<std::string, TensorHandle> weights;
 
   weights.insert(
       {absl::StrCat(prefix, ".q_proj.weight"),
@@ -167,9 +168,9 @@ absl::flat_hash_map<std::string, XnnTensor> CreateGqaWeights(
   return weights;
 }
 
-absl::flat_hash_map<std::string, XnnTensor> CreateMhaWeights(
+absl::flat_hash_map<std::string, TensorHandle> CreateMhaWeights(
     absl::string_view prefix = "attn") {
-  absl::flat_hash_map<std::string, XnnTensor> weights;
+  absl::flat_hash_map<std::string, TensorHandle> weights;
 
   weights.insert({absl::StrCat(prefix, ".q_proj.weight"),
                   XnnTensor({.name = "q_proj",
@@ -223,7 +224,7 @@ TEST(Gemma4GraphTest, SingleKVHeadAttentionTest) {
   XnnTensor cos({.name = "cos", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   XnnTensor sin({.name = "sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateDefaultWeights();
+  LazyTensorMapping weights(CreateDefaultWeights());
 
   XnnTensor key_cache = XnnTensor::Invalid();
   XnnTensor value_cache = XnnTensor::Invalid();
@@ -305,7 +306,7 @@ TEST(Gemma4GraphTest, SingleKvHeadSupportsConsistentArithmetic) {
   config.num_kv_heads = 1;
   config.head_dim = 4;
   config.embed_dim = 4;
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateDefaultWeights();
+  LazyTensorMapping weights(CreateDefaultWeights());
 
   // Cover one-token and multi-token prefill, then decode with cached history.
   for (const auto& [seq_len, cache_len] :
@@ -368,7 +369,7 @@ TEST(Gemma4GraphTest, MultiKvHeadsGqaAttentionTest) {
   XnnTensor cos({.name = "cos", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   XnnTensor sin({.name = "sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateGqaWeights();
+  LazyTensorMapping weights(CreateGqaWeights());
 
   XnnTensor key_cache = XnnTensor::Invalid();
   XnnTensor value_cache = XnnTensor::Invalid();
@@ -470,7 +471,7 @@ TEST(Gemma4GraphTest, MultiHeadAttentionTest) {
   XnnTensor cos({.name = "cos", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   XnnTensor sin({.name = "sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateMhaWeights();
+  LazyTensorMapping weights(CreateMhaWeights());
 
   XnnTensor key_cache = XnnTensor::Invalid();
   XnnTensor value_cache = XnnTensor::Invalid();
@@ -568,7 +569,7 @@ TEST(Gemma4GraphTest, SoftCappingAttentionTest) {
   XnnTensor cos({.name = "cos", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   XnnTensor sin({.name = "sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateDefaultWeights();
+  LazyTensorMapping weights(CreateDefaultWeights());
 
   XnnTensor key_cache = XnnTensor::Invalid();
   XnnTensor value_cache = XnnTensor::Invalid();
@@ -661,7 +662,7 @@ TEST(Gemma4GraphTest, GlobalLayerAttentionTest) {
   XnnTensor cos({.name = "cos", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   XnnTensor sin({.name = "sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateDefaultWeights();
+  LazyTensorMapping weights(CreateDefaultWeights());
 
   XnnTensor key_cache = XnnTensor::Invalid();
   XnnTensor value_cache = XnnTensor::Invalid();
@@ -757,7 +758,7 @@ TEST(Gemma4GraphTest, KVCacheAttentionTest) {
   XnnTensor value_cache(
       {.name = "value_cache", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateDefaultWeights();
+  LazyTensorMapping weights(CreateDefaultWeights());
 
   XnnTensor shared_key = XnnTensor::Invalid();
   XnnTensor shared_value = XnnTensor::Invalid();
@@ -861,7 +862,7 @@ TEST(Gemma4GraphTest, EmptyKVCacheAttentionTest) {
   XnnTensor value_cache(
       {.name = "value_cache", .type = Type::kFP32, .shape = {1, 1, 0, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateDefaultWeights();
+  LazyTensorMapping weights(CreateDefaultWeights());
 
   XnnTensor shared_key = XnnTensor::Invalid();
   XnnTensor shared_value = XnnTensor::Invalid();
@@ -960,7 +961,7 @@ TEST(Gemma4GraphTest, MultiKvHeadsGqaDynamicKVCacheAttentionTest) {
   XnnTensor value_cache(
       {.name = "value_cache", .type = Type::kFP32, .shape = {1, 2, 3, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateGqaWeights();
+  LazyTensorMapping weights(CreateGqaWeights());
 
   XnnTensor shared_key = XnnTensor::Invalid();
   XnnTensor shared_value = XnnTensor::Invalid();
@@ -1043,7 +1044,7 @@ TEST(Gemma4GraphTest, SharedKVAttentionTest) {
   XnnTensor shared_value(
       {.name = "shared_value", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateDefaultWeights();
+  LazyTensorMapping weights(CreateDefaultWeights());
 
   XnnTensor key_cache = XnnTensor::Invalid();
   XnnTensor value_cache = XnnTensor::Invalid();
@@ -1140,7 +1141,7 @@ TEST(Gemma4GraphTest, MismatchedSharedKVAttentionTest) {
   XnnTensor shared_value(
       {.name = "shared_value", .type = Type::kFP32, .shape = {1, 1, 3, 4}});
 
-  absl::flat_hash_map<std::string, XnnTensor> weights = CreateDefaultWeights();
+  LazyTensorMapping weights(CreateDefaultWeights());
 
   XnnTensor key_cache = XnnTensor::Invalid();
   XnnTensor value_cache = XnnTensor::Invalid();
@@ -1227,7 +1228,7 @@ absl::StatusOr<AttentionOutput<XnnpackMixinTag>> BuildSingleKvBroadcastAttention
   config.embed_dim = 4;
   const std::vector<float> identity = {1, 0, 0, 0, 0, 1, 0, 0,
                                        0, 0, 1, 0, 0, 0, 0, 1};
-  absl::flat_hash_map<std::string, XnnTensor> weights;
+  absl::flat_hash_map<std::string, TensorHandle> weights;
   for (const char* projection : {"q_proj", "o_proj"}) {
     weights.emplace(
         absl::StrCat("attn.", projection, ".weight"),
@@ -1258,8 +1259,9 @@ absl::StatusOr<AttentionOutput<XnnpackMixinTag>> BuildSingleKvBroadcastAttention
   XnnTensor eps(
       {.type = Type::kFP32, .shape = {1}, .buffer = config.rms_norm_eps});
   const XnnTensor no_shared_kv(TensorHandle::Invalid());
+  LazyTensorMapping weight_mapping(std::move(weights));
   return Attention(input, mask, cos, sin, key_cache, value_cache, no_shared_kv,
-                   no_shared_kv, config, weights, "attn",
+                   no_shared_kv, config, weight_mapping, "attn",
                    Config::LayerType::kLocalSliding, eps);
 }
 

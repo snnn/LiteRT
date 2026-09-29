@@ -150,6 +150,9 @@ struct QuantizationConfig {
 // config.json. File mappings are retained by tensors that borrow their storage.
 class SafetensorLoader {
  public:
+  // Creates a loader that doesn't hold any tensor.
+  SafetensorLoader() = default;
+
   // Loads a safetensor file or a directory of safetensor files.
   //
   // The quantization config is read from the safetensors header metadata when
@@ -177,12 +180,10 @@ class SafetensorLoader {
   // mobile configs retain the existing INT2-to-INT4 compatibility conversion.
   absl::StatusOr<TensorHandle> LoadTensor(absl::string_view name) const;
 
-  // Loads all tensors into a map.
+  // Compatibility helpers for callers that materialize the complete mapping.
+  // New graph builders can load weights on demand through LazyTensorMapping.
   absl::StatusOr<absl::flat_hash_map<std::string, TensorHandle>>
   LoadAllTensors() const;
-
-  // Loads weights with name mapping.
-  // Converts HuggingFace weight names to model weight names.
   absl::StatusOr<absl::flat_hash_map<std::string, TensorHandle>>
   LoadWeightsWithMapping(
       const absl::flat_hash_map<std::string, std::string>& name_mapping) const;
@@ -194,8 +195,6 @@ class SafetensorLoader {
     bool input_activations = false;
     bool output_activations = false;
   };
-
-  SafetensorLoader() = default;
 
   // Loads a single safetensor file and appends its tensors.
   absl::Status AddSafetensorFile(const std::string& path);

@@ -51,6 +51,17 @@ Tensor<Mixins...> FeedForwardNetwork(
   return MobileFullyConnected(mul_out, down_proj, weights);
 }
 
+template <class... Mixins>
+Tensor<Mixins...> FeedForwardNetwork(
+    const Tensor<Mixins...>& input, const Tensor<Mixins...>& gate_proj,
+    const Tensor<Mixins...>& up_proj, const Tensor<Mixins...>& down_proj,
+    TensorMapping* weights) {
+  Tensor up = MobileFullyConnected(input, up_proj, weights);
+  Tensor gate_proj_tensor = MobileFullyConnected(input, gate_proj, weights);
+  Tensor gate = Gelu(gate_proj_tensor, /*approximate=*/true);
+  return MobileFullyConnected(Mul(up, gate), down_proj, weights);
+}
+
 }  // namespace litert::tensor::examples::gemma4
 
 #endif  // THIRD_PARTY_ODML_LITERT_TENSOR_EXAMPLES_GEMMA4_HELPERS_FEED_FORWARD_NETWORK_H_

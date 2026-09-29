@@ -37,6 +37,7 @@ limitations under the License.
 #include "tensor/examples/gemma4/gemma4_weights.h"
 #include "tensor/examples/gemma4/helpers/rope.h"
 #include "tensor/examples/ops/transformer/transformer_ops_xnnpack.h"  // IWYU pragma: keep
+#include "tensor/examples/utils/tensor_mapping.h"
 #include "tensor/runners/xnnpack/runner.h"
 #include "tensor/tensor.h"
 #include "tensor/utils/matchers.h"
@@ -52,9 +53,9 @@ using ::testing::FloatNear;
 using ::testing::Pointwise;
 using XnnTensor = Tensor<XnnpackMixinTag>;
 
-absl::flat_hash_map<std::string, XnnTensor> CreateGemma4GraphTestWeights(
+absl::flat_hash_map<std::string, TensorHandle> CreateGemma4GraphTestWeights(
     int num_layers = 2) {
-  absl::flat_hash_map<std::string, XnnTensor> weights;
+  absl::flat_hash_map<std::string, TensorHandle> weights;
 
   for (int l = 0; l < num_layers; ++l) {
     std::string prefix = absl::StrCat("model.layers.", l);
@@ -194,6 +195,15 @@ absl::flat_hash_map<std::string, XnnTensor> CreateGemma4GraphTestWeights(
 
 class Gemma4OutputHeadTest : public ::testing::TestWithParam<bool> {};
 
+TEST(Gemma4GraphTest, LazyWeightMappingIncludesMobileActivationScales) {
+  const auto mapping = GetGemma4WeightMapping(1);
+  EXPECT_EQ(mapping.at("model.language_model.layers.0.mlp.gate_proj.input_scale"),
+            "model.layers.0.mlp.gate_proj.input_scale");
+  EXPECT_EQ(mapping.at("model.language_model.layers.0.mlp.gate_proj.output_scale"),
+            "model.layers.0.mlp.gate_proj.output_scale");
+  EXPECT_EQ(mapping.at("lm_head.input_scale"), "lm_head.input_scale");
+}
+
 TEST_P(Gemma4OutputHeadTest, ProjectsWithCheckpointWeights) {
   Config config = Config::E4B();
   // Isolate the final normalization and output projection from transformer
@@ -227,16 +237,18 @@ TEST_P(Gemma4OutputHeadTest, ProjectsWithCheckpointWeights) {
                                                  1.0f}})});
   }
 
+  LazyTensorMapping weights;
+  weights.Register<Gemma4WeightHooks>();
   // Apply the same mapping used to load checkpoint tensors in the example.
   for (const auto& [source_name, target_name] : GetGemma4WeightMapping(0)) {
     auto it = checkpoint_weights.find(source_name);
     if (it != checkpoint_weights.end()) {
-      inputs.weights.insert({target_name, it->second});
+      ASSERT_THAT(weights.Set(target_name, it->second), IsOk());
     }
   }
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto outputs,
-                                BuildGemma4Graph(inputs, config));
+                                BuildGemma4Graph(inputs, weights, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(XnnpackRunner runner,
                                   XnnpackRunner::Create({outputs.logits}));
   const std::array<float, 4> input_data = {1.0f, -1.0f, -1.0f, 1.0f};
@@ -282,10 +294,11 @@ TEST(Gemma4GraphTest, ModelTest) {
       {.name = "rope_local_cos", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   inputs.rope_local_sin.Set(
       {.name = "rope_local_sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
-  inputs.weights = CreateGemma4GraphTestWeights(2);
+  LazyTensorMapping weights = LazyTensorMapping(CreateGemma4GraphTestWeights(2))
+                                  .Register<Gemma4WeightHooks>();
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
-                                  BuildGemma4Graph(inputs, config));
+                                  BuildGemma4Graph(inputs, weights, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -351,10 +364,11 @@ TEST(Gemma4GraphTest, GlobalLayerGraphTest) {
       {.name = "rope_global_cos", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   inputs.rope_global_sin.Set(
       {.name = "rope_global_sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
-  inputs.weights = CreateGemma4GraphTestWeights(2);
+  LazyTensorMapping weights = LazyTensorMapping(CreateGemma4GraphTestWeights(2))
+                                  .Register<Gemma4WeightHooks>();
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
-                                  BuildGemma4Graph(inputs, config));
+                                  BuildGemma4Graph(inputs, weights, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -427,10 +441,11 @@ TEST(Gemma4GraphTest, KVCacheGraphTest) {
       {.name = "key_cache", .type = Type::kFP32, .shape = {1, 1, 2, 4}})};
   inputs.value_caches = {XnnTensor(
       {.name = "value_cache", .type = Type::kFP32, .shape = {1, 1, 2, 4}})};
-  inputs.weights = CreateGemma4GraphTestWeights(1);
+  LazyTensorMapping weights = LazyTensorMapping(CreateGemma4GraphTestWeights(1))
+                                  .Register<Gemma4WeightHooks>();
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
-                                  BuildGemma4Graph(inputs, config));
+                                  BuildGemma4Graph(inputs, weights, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner,
@@ -510,10 +525,11 @@ TEST(Gemma4GraphTest, SharedKVCacheGraphTest) {
       {.name = "rope_local_cos", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
   inputs.rope_local_sin.Set(
       {.name = "rope_local_sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
-  inputs.weights = CreateGemma4GraphTestWeights(3);
+  LazyTensorMapping weights = LazyTensorMapping(CreateGemma4GraphTestWeights(3))
+                                  .Register<Gemma4WeightHooks>();
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
-                                  BuildGemma4Graph(inputs, config));
+                                  BuildGemma4Graph(inputs, weights, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner,
@@ -584,55 +600,57 @@ TEST(Gemma4GraphTest, PerLayerInputsGraphTest) {
       XnnTensor({.name = "per_layer_token_embedding_1",
                  .type = Type::kFP32,
                  .shape = {1, 2, 2}})};
-  inputs.weights = CreateGemma4GraphTestWeights(2);
+  absl::flat_hash_map<std::string, TensorHandle> weight_map =
+      CreateGemma4GraphTestWeights(2);
 
-  inputs.weights.insert(
+  weight_map.insert(
       {"model.layers.0.per_layer_model_projection.weight",
        XnnTensor({.name = "per_layer_model_projection_0",
                   .type = Type::kFP32,
                   .shape = {2, 4},
                   .buffer = std::vector<float>{0.1f, 0.2f, 0.3f, 0.4f, 0.1f,
                                                0.2f, 0.3f, 0.4f}})});
-  inputs.weights.insert(
+  weight_map.insert(
       {"model.layers.1.per_layer_model_projection.weight",
        XnnTensor({.name = "per_layer_model_projection_1",
                   .type = Type::kFP32,
                   .shape = {2, 4},
                   .buffer = std::vector<float>{0.1f, 0.2f, 0.3f, 0.4f, 0.1f,
                                                0.2f, 0.3f, 0.4f}})});
-  inputs.weights.insert(
-      {"model.per_layer_projection_norm.weight",
-       XnnTensor({.name = "per_layer_projection_norm",
-                  .type = Type::kFP32,
-                  .shape = {2},
-                  .buffer = std::vector<float>{1.0f, 1.0f}})});
+  weight_map.insert({"model.per_layer_projection_norm.weight",
+                     XnnTensor({.name = "per_layer_projection_norm",
+                                .type = Type::kFP32,
+                                .shape = {2},
+                                .buffer = std::vector<float>{1.0f, 1.0f}})});
 
   for (int l = 0; l < 2; ++l) {
     std::string prefix = absl::StrCat("model.layers.", l);
-    inputs.weights.insert(
+    weight_map.insert(
         {absl::StrCat(prefix, ".per_layer_input_gate.weight"),
          XnnTensor({.name = "per_layer_input_gate",
                     .type = Type::kFP32,
                     .shape = {2, 4},
                     .buffer = std::vector<float>{0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
                                                  0.5f, 0.0f, 0.0f}})});
-    inputs.weights.insert(
+    weight_map.insert(
         {absl::StrCat(prefix, ".per_layer_projection.weight"),
          XnnTensor({.name = "per_layer_projection",
                     .type = Type::kFP32,
                     .shape = {4, 2},
                     .buffer = std::vector<float>{1.0f, 0.0f, 0.0f, 1.0f, 0.5f,
                                                  0.0f, 0.0f, 0.5f}})});
-    inputs.weights.insert(
+    weight_map.insert(
         {absl::StrCat(prefix, ".post_per_layer_input_norm.weight"),
          XnnTensor({.name = "post_per_layer_norm",
                     .type = Type::kFP32,
                     .shape = {4},
                     .buffer = std::vector<float>{1.0f, 1.0f, 1.0f, 1.0f}})});
   }
+  LazyTensorMapping weights =
+      LazyTensorMapping(std::move(weight_map)).Register<Gemma4WeightHooks>();
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
-                                  BuildGemma4Graph(inputs, config));
+                                  BuildGemma4Graph(inputs, weights, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -698,10 +716,11 @@ TEST(Gemma4GraphTest, NoLogitSoftcappingGraphTest) {
   inputs.rope_local_sin.Set(
       {.name = "rope_local_sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
 
-  inputs.weights = CreateGemma4GraphTestWeights(2);
+  LazyTensorMapping weights = LazyTensorMapping(CreateGemma4GraphTestWeights(2))
+                                  .Register<Gemma4WeightHooks>();
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
-                                  BuildGemma4Graph(inputs, config));
+                                  BuildGemma4Graph(inputs, weights, config));
 
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -777,7 +796,7 @@ TEST(Gemma4GraphTest, PerLayerInputsWithProjectionGraphTest) {
   std::vector<float> emb_per_layer_data(80, 0.1f);
   for (int i = 0; i < 80; ++i) emb_per_layer_data[i] = i * 0.01f;
 
-  absl::flat_hash_map<std::string, XnnTensor> weights =
+  absl::flat_hash_map<std::string, TensorHandle> weights =
       CreateGemma4GraphTestWeights(2);
   weights.insert({"model.layers.0.per_layer_model_projection.weight",
                   XnnTensor({.name = "per_layer_model_projection_0",
@@ -828,10 +847,12 @@ TEST(Gemma4GraphTest, PerLayerInputsWithProjectionGraphTest) {
   inputs.sliding_attention_mask = sliding_attention_mask;
   inputs.rope_local_cos = rope_local_cos;
   inputs.rope_local_sin = rope_local_sin;
-  inputs.weights = weights;
+  LazyTensorMapping weight_mapping =
+      LazyTensorMapping(weights).Register<Gemma4WeightHooks>();
 
-  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Gemma4Outputs<XnnpackMixinTag> model_outputs,
-                                  BuildGemma4Graph(inputs, config));
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
+      Gemma4Outputs<XnnpackMixinTag> model_outputs,
+      BuildGemma4Graph(inputs, weight_mapping, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
   ASSERT_THAT(runner.SetInput(embedded_input, embedded_input_data), IsOk());
@@ -880,7 +901,9 @@ TEST(Gemma4GraphTest, PrefillMatchesMultiStepCachedDecode) {
   config.per_layer_input_dim = 0;
   config.frac_shared_layers = 0;
   config.final_logit_softcap = 10.0f;
-  const auto weights = CreateGemma4GraphTestWeights(config.num_layers);
+  LazyTensorMapping weights =
+      LazyTensorMapping(CreateGemma4GraphTestWeights(config.num_layers))
+          .Register<Gemma4WeightHooks>();
   auto make_inputs = [&](int seq_len, int cache_len) {
     Gemma4Inputs<XnnpackMixinTag> inputs;
     inputs.embedded_input.Set({.type = Type::kFP32, .shape = {1, seq_len, 4}});
@@ -898,7 +921,6 @@ TEST(Gemma4GraphTest, PrefillMatchesMultiStepCachedDecode) {
             TensorInit{.type = Type::kFP32, .shape = {1, 1, cache_len, 4}});
       }
     }
-    inputs.weights = weights;
     return inputs;
   };
 
@@ -924,7 +946,7 @@ TEST(Gemma4GraphTest, PrefillMatchesMultiStepCachedDecode) {
 
   auto full_inputs = make_inputs(/*seq_len=*/4, /*cache_len=*/0);
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto full_outputs,
-                                BuildGemma4Graph(full_inputs, config));
+                                BuildGemma4Graph(full_inputs, weights, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       auto full_runner, XnnpackRunner::Create(full_outputs.GetAllHandles()));
   ASSERT_THAT(full_runner.SetInput(full_inputs.embedded_input, embeddings),
@@ -940,7 +962,7 @@ TEST(Gemma4GraphTest, PrefillMatchesMultiStepCachedDecode) {
 
   auto prefill_inputs = make_inputs(/*seq_len=*/2, /*cache_len=*/0);
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto prefill_outputs,
-                                BuildGemma4Graph(prefill_inputs, config));
+                                BuildGemma4Graph(prefill_inputs, weights, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       auto prefill_runner,
       XnnpackRunner::Create(prefill_outputs.GetAllHandles()));
@@ -980,7 +1002,7 @@ TEST(Gemma4GraphTest, PrefillMatchesMultiStepCachedDecode) {
 
   auto decode_inputs = make_inputs(/*seq_len=*/1, /*cache_len=*/2);
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(auto decode_outputs,
-                                BuildGemma4Graph(decode_inputs, config));
+                                BuildGemma4Graph(decode_inputs, weights, config));
   LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
       auto decode_runner,
       XnnpackRunner::Create(decode_outputs.GetAllHandles()));
@@ -1077,7 +1099,8 @@ TEST(Gemma4GraphTest, NativeWeightCacheTest) {
   XnnTensor rope_local_sin(
       {.name = "rope_local_sin", .type = Type::kFP32, .shape = {1, 1, 2, 4}});
 
-  auto weights = CreateGemma4GraphTestWeights(2);
+  LazyTensorMapping weights = LazyTensorMapping(CreateGemma4GraphTestWeights(2))
+                                  .Register<Gemma4WeightHooks>();
 
   const std::array<float, 8> input_data = {1.0f, 2.0f, 3.0f, 4.0f,
                                            5.0f, 6.0f, 7.0f, 8.0f};
@@ -1096,11 +1119,10 @@ TEST(Gemma4GraphTest, NativeWeightCacheTest) {
     inputs.sliding_attention_mask = sliding_attention_mask;
     inputs.rope_local_cos = rope_local_cos;
     inputs.rope_local_sin = rope_local_sin;
-    inputs.weights = weights;
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         Gemma4Outputs<XnnpackMixinTag> model_outputs,
-        BuildGemma4Graph(inputs, config));
+        BuildGemma4Graph(inputs, weights, config));
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -1145,11 +1167,10 @@ TEST(Gemma4GraphTest, NativeWeightCacheTest) {
     inputs.sliding_attention_mask = sliding_attention_mask;
     inputs.rope_local_cos = rope_local_cos;
     inputs.rope_local_sin = rope_local_sin;
-    inputs.weights = weights;
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         Gemma4Outputs<XnnpackMixinTag> model_outputs,
-        BuildGemma4Graph(inputs, config));
+        BuildGemma4Graph(inputs, weights, config));
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -1174,7 +1195,7 @@ TEST(Gemma4GraphTest, NativeWeightCacheTest) {
 #ifndef LITERT_TENSOR_STANDALONE
 void MapWeightIdentifiers(
     tflite::xnnpack::MMapWeightCacheProvider& cache_provider,
-    const absl::flat_hash_map<std::string, XnnTensor>& weights) {
+    const absl::flat_hash_map<std::string, TensorHandle>& weights) {
   for (const auto& [name, tensor] : weights) {
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Buffer & buffer, tensor.GetBuffer());
     LockedBufferSpan<const std::byte> locked = buffer.Lock();
@@ -1236,11 +1257,12 @@ TEST(Gemma4GraphTest, WeightCacheTest) {
     inputs.sliding_attention_mask = sliding_attention_mask;
     inputs.rope_local_cos = rope_local_cos;
     inputs.rope_local_sin = rope_local_sin;
-    inputs.weights = weights;
+    LazyTensorMapping weight_mapping =
+        LazyTensorMapping(weights).Register<Gemma4WeightHooks>();
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         Gemma4Outputs<XnnpackMixinTag> model_outputs,
-        BuildGemma4Graph(inputs, config));
+        BuildGemma4Graph(inputs, weight_mapping, config));
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));
@@ -1287,11 +1309,12 @@ TEST(Gemma4GraphTest, WeightCacheTest) {
     inputs.sliding_attention_mask = sliding_attention_mask;
     inputs.rope_local_cos = rope_local_cos;
     inputs.rope_local_sin = rope_local_sin;
-    inputs.weights = weights;
+    LazyTensorMapping weight_mapping =
+        LazyTensorMapping(weights).Register<Gemma4WeightHooks>();
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         Gemma4Outputs<XnnpackMixinTag> model_outputs,
-        BuildGemma4Graph(inputs, config));
+        BuildGemma4Graph(inputs, weight_mapping, config));
 
     LRT_TENSOR_ASSERT_OK_AND_ASSIGN(
         XnnpackRunner runner, XnnpackRunner::Create({model_outputs.logits}));

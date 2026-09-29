@@ -18,7 +18,12 @@ limitations under the License.
 #include <string>
 
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
-#include "absl/strings/str_cat.h"          // from @com_google_absl
+#include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/str_cat.h"  // from @com_google_absl
+#include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/strings/strip.h"  // from @com_google_absl
+#include "tensor/examples/utils/tensor_mapping.h"
+#include "tensor/tensor.h"
 
 namespace litert::tensor::examples::gemma4 {
 
@@ -30,8 +35,8 @@ absl::flat_hash_map<std::string, std::string> GetGemma4WeightMapping(
   mapping["model.language_model.embed_tokens.weight"] =
       "model.embed_tokens.weight";
 
-  // Optional separate output projection. Missing tensors are skipped by the
-  // loader, allowing the graph to fall back to the token embeddings.
+  // Optional separate output projection. Gemma4WeightHooks supplies the tied
+  // embeddings when the checkpoint has no separate head.
   mapping["lm_head.weight"] = "lm_head.weight";
 
   // Final norm
@@ -97,7 +102,32 @@ absl::flat_hash_map<std::string, std::string> GetGemma4WeightMapping(
         absl::StrCat(model_prefix, ".layer_scalar");
   }
 
+  // Mobile QAT checkpoints store static activation scales beside each weight.
+  // Keep them addressable when graph builders switch from eager loading to the
+  // lazy mapping, or those builders would silently use floating activations.
+  absl::flat_hash_map<std::string, std::string> activation_mapping;
+  for (const auto& [checkpoint_name, model_name] : mapping) {
+    absl::string_view checkpoint_module = checkpoint_name;
+    absl::string_view model_module = model_name;
+    if (!absl::ConsumeSuffix(&checkpoint_module, ".weight") ||
+        !absl::ConsumeSuffix(&model_module, ".weight")) {
+      continue;
+    }
+    for (const char* suffix : {".input_scale", ".output_scale"}) {
+      activation_mapping.emplace(absl::StrCat(checkpoint_module, suffix),
+                                 absl::StrCat(model_module, suffix));
+    }
+  }
+  mapping.insert(activation_mapping.begin(), activation_mapping.end());
   return mapping;
+}
+
+absl::StatusOr<TensorHandle> Gemma4WeightHooks::OnNotFound(
+    TensorMapping& mapping, absl::string_view model_name) {
+  if (model_name == "lm_head.weight") {
+    return mapping.Get("model.embed_tokens.weight");
+  }
+  return TensorMappingHooks::OnNotFound(mapping, model_name);
 }
 
 }  // namespace litert::tensor::examples::gemma4
