@@ -131,7 +131,8 @@ std::vector<uint8_t> CreateAddThenResizeBilinearModel() {
 
 Expected<void> CompileWithYnnpackEnabled(
     LiteRtEnvironment environment, LiteRtModel model,
-    std::vector<std::string>* delegate_names) {
+    std::vector<std::string>* delegate_names,
+    bool hint_fully_delegated = false) {
   LITERT_RETURN_IF_ERROR(environment != nullptr,
                          ErrorStatusBuilder::InvalidArgument());
   LITERT_RETURN_IF_ERROR(model != nullptr,
@@ -146,6 +147,8 @@ Expected<void> CompileWithYnnpackEnabled(
 
   LITERT_ASSIGN_OR_RETURN(auto cpu_options, CpuOptions::Create());
   LITERT_RETURN_IF_ERROR(cpu_options.SetEnableYNNPack(true));
+  LITERT_RETURN_IF_ERROR(
+      cpu_options.SetHintFullyDelegatedToSingleDelegate(hint_fully_delegated));
   const char* identifier = nullptr;
   void* payload = nullptr;
   void (*payload_deleter)(void*) = nullptr;
@@ -254,7 +257,16 @@ TEST(YnnpackAcceleratorTest, ReportsOriginalOperatorOwnershipBeforeInvocation) {
   LITERT_ASSERT_OK(LiteRtCreateOpaqueOptions(identifier, payload, deleter, &opaque));
   LITERT_ASSERT_OK(LiteRtAddOpaqueOptions(options, opaque));
   LiteRtCompiledModel compiled = nullptr;
+#if !defined(LITERT_TEST_EXPECT_YNNPACK)
+  EXPECT_EQ(LiteRtCreateCompiledModel(environment, model, options, &compiled),
+            kLiteRtStatusErrorUnsupported);
+  LiteRtDestroyOptions(options);
+  LiteRtDestroyModel(model);
+  LiteRtDestroyEnvironment(environment);
+  return;
+#else
   LITERT_ASSERT_OK(LiteRtCreateCompiledModel(environment, model, options, &compiled));
+#endif
   std::vector<std::string> records;
   auto collect = [](void* data, LiteRtParamIndex graph, LiteRtParamIndex node,
                     const char* op, const char* delegate) -> LiteRtStatus {
@@ -263,13 +275,8 @@ TEST(YnnpackAcceleratorTest, ReportsOriginalOperatorOwnershipBeforeInvocation) {
     return kLiteRtStatusOk;
   };
   LITERT_ASSERT_OK(LiteRtGetCompiledModelOperatorDelegations(compiled, collect, &records));
-#if defined(LITERT_TEST_EXPECT_YNNPACK)
   EXPECT_THAT(records, ElementsAre("0:0:ADD:YNNPackDelegate",
                                   "0:1:RESIZE_BILINEAR:TfLiteXNNPackDelegate"));
-#else
-  EXPECT_THAT(records, ElementsAre("0:0:ADD:TfLiteXNNPackDelegate",
-                                  "0:1:RESIZE_BILINEAR:TfLiteXNNPackDelegate"));
-#endif
   EXPECT_EQ(LiteRtGetCompiledModelOperatorDelegations(nullptr, collect, &records),
             kLiteRtStatusErrorInvalidArgument);
   EXPECT_EQ(LiteRtGetCompiledModelOperatorDelegations(compiled, nullptr, nullptr),
@@ -281,6 +288,32 @@ TEST(YnnpackAcceleratorTest, ReportsOriginalOperatorOwnershipBeforeInvocation) {
             kLiteRtStatusErrorRuntimeFailure);
   LiteRtDestroyCompiledModel(compiled);
   LiteRtDestroyOptions(options);
+  LiteRtDestroyModel(model);
+  LiteRtDestroyEnvironment(environment);
+}
+
+TEST(YnnpackAcceleratorTest,
+     FailsWhenSingleDelegateHintIsSetAndGraphIsPartiallyDelegated) {
+  LiteRtEnvironment environment = nullptr;
+  LITERT_ASSERT_OK(LiteRtCreateEnvironment(0, nullptr, &environment));
+
+  const std::vector<uint8_t> model_buffer = CreateAddThenResizeBilinearModel();
+  LiteRtModel model = nullptr;
+  LITERT_ASSERT_OK(LiteRtCreateModelFromBuffer(environment, model_buffer.data(),
+                                               model_buffer.size(), &model));
+
+  std::vector<std::string> delegate_names;
+  auto result = CompileWithYnnpackEnabled(environment, model, &delegate_names,
+                                          /*hint_fully_delegated=*/true);
+
+#if defined(LITERT_TEST_EXPECT_YNNPACK)
+  EXPECT_FALSE(result.HasValue());
+  EXPECT_EQ(result.Error().Status(), kLiteRtStatusErrorRuntimeFailure);
+#else
+  EXPECT_FALSE(result.HasValue());
+  EXPECT_EQ(result.Error().Status(), kLiteRtStatusErrorUnsupported);
+#endif
+
   LiteRtDestroyModel(model);
   LiteRtDestroyEnvironment(environment);
 }

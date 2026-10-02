@@ -41,6 +41,10 @@ let package = Package(
       targets: ["LiteRtMetalAccelerator"]
     ),
     .library(
+      name: "CLiteRT_static",
+      targets: ["CLiteRT_static"]
+    ),
+    .library(
       name: "TensorFlowLite",
       targets: ["TensorFlowLite"]
     ),
@@ -55,6 +59,11 @@ let package = Package(
       name: "CLiteRT_mac",
       path: "prebuilt/CLiteRT_mac.xcframework.zip"
     ),
+    // Static build of the C API for C and Objective-C consumers (iOS only).
+    .binaryTarget(
+      name: "CLiteRT_static",
+      path: "prebuilt/CLiteRT_static.xcframework.zip"
+    ),
     // Optional GPU Accelerator Plugin Target
     .binaryTarget(
       name: "LiteRtMetalAccelerator",
@@ -67,14 +76,7 @@ let package = Package(
         .target(name: "CLiteRT", condition: .when(platforms: [.iOS])),
         .target(name: "CLiteRT_mac", condition: .when(platforms: [.macOS])),
       ],
-      path: "litert/swift/Sources/LiteRT",
-      exclude: [
-        "BUILD",
-        "Info.plist",
-      ],
-      linkerSettings: [
-        .unsafeFlags(["-Xlinker", "-all_load"])
-      ]
+      path: "litert/swift/Sources/LiteRT"
     ),
     // The Test Target
     .testTarget(
@@ -103,11 +105,7 @@ let package = Package(
         .target(name: "TensorFlowLiteCCoreML", condition: .when(platforms: [.iOS])),
         .target(name: "TensorFlowLiteCMetal", condition: .when(platforms: [.iOS])),
       ],
-      path: "litert/swift/Sources/TensorFlowLite",
-      linkerSettings: [
-        .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "CoreML"]),
-        .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "Metal"]),
-      ]
+      path: "litert/swift/Sources/TensorFlowLite"
     ),
     // The TensorFlow Lite Test Target
     .testTarget(

@@ -120,8 +120,8 @@ TEST_F(ConvertSdpaTransposedTest, BasicFp32) {
   const auto* attr =
       std::any_cast<::litert::ml_drift::SdpaTransposedAttributes>(&op->attr);
   ASSERT_NE(attr, nullptr);
-  EXPECT_EQ(attr->bmm1_weights.desc.type, ::ml_drift::DataType::FLOAT32);
-  EXPECT_EQ(attr->bmm2_weights.desc.type, ::ml_drift::DataType::FLOAT32);
+  EXPECT_EQ(attr->bmm1_weights.desc.type, ::ml_drift::DataType::kFloat32);
+  EXPECT_EQ(attr->bmm2_weights.desc.type, ::ml_drift::DataType::kFloat32);
   EXPECT_FALSE(attr->from_cache_update);
 }
 
@@ -150,8 +150,8 @@ TEST_F(ConvertSdpaTransposedTest, BasicFp16) {
   const auto* attr =
       std::any_cast<::litert::ml_drift::SdpaTransposedAttributes>(&op->attr);
   ASSERT_NE(attr, nullptr);
-  EXPECT_EQ(attr->bmm1_weights.desc.type, ::ml_drift::DataType::FLOAT16);
-  EXPECT_EQ(attr->bmm2_weights.desc.type, ::ml_drift::DataType::FLOAT16);
+  EXPECT_EQ(attr->bmm1_weights.desc.type, ::ml_drift::DataType::kFloat16);
+  EXPECT_EQ(attr->bmm2_weights.desc.type, ::ml_drift::DataType::kFloat16);
 }
 
 TEST_F(ConvertSdpaTransposedTest, ThreeInputs) {
@@ -301,6 +301,51 @@ TEST_F(ConvertSdpaTransposedTest, BoolMaskPrunedWhenIsCausalTrueOnApple) {
       std::any_cast<::litert::ml_drift::SdpaTransposedAttributes>(&op->attr);
   ASSERT_NE(attr, nullptr);
   EXPECT_TRUE(attr->is_causal);
+}
+
+// Expects the single `sdpa_transposed` IR op built for a decode (`q_w = 1`)
+// BOOL-masked causal SDPA with `head_dim` to have `expected_inputs` inputs.
+void ExpectDecodeSdpaInputs(TfLiteDelegate* delegate, int head_dim,
+                            int expected_inputs) {
+  SingleOpInterpreterBuilder builder(kTfLiteBuiltinStablehloComposite);
+  builder.AddInput(kTfLiteFloat32, {1, 8, 1, head_dim});       // q (decode)
+  builder.AddInput(kTfLiteFloat32, {1, 2, 128, head_dim});     // k
+  builder.AddInput(kTfLiteFloat32, {1, 2, head_dim, 128});     // v
+  builder.AddInput(kTfLiteBool, {1, 1, 1, 128});               // bool mask
+  builder.AddInput(kTfLiteInt32, {1, 1, 1, 7});                // param tensor
+  builder.AddOutput(kTfLiteFloat32, {1, 1, 1, 8 * head_dim});  // result
+
+  TfLiteStablehloCompositeParams* params = CreateSdpaTransposedParams(
+      /*softcap=*/std::nullopt, /*is_causal=*/true,
+      /*from_cache_update=*/true);
+  builder.SetParameters(params);
+
+  auto interpreter = builder.Build();
+  ASSERT_NE(interpreter, nullptr);
+  ASSERT_EQ(interpreter->ModifyGraphWithDelegate(delegate), kTfLiteOk);
+
+  const ::ml_drift::ir::IrModel* ir_model = GetIrModel(delegate);
+  ASSERT_TRUE(ir_model);
+
+  ASSERT_THAT(ir_model->ops(), SizeIs(1));
+  const auto& op = ir_model->ops()[0];
+  EXPECT_THAT(op->name, Eq("sdpa_transposed"));
+  EXPECT_THAT(op->inputs, SizeIs(expected_inputs)) << "head_dim=" << head_dim;
+}
+
+// Flash-Decode supports every head_dim whose head_dim / 4 channel slices
+// divide 256, so the BOOL causal mask is pruned (q, k, v, params remain).
+TEST_F(ConvertSdpaTransposedTest, BoolMaskPrunedForDecodeHeadDimsOnApple) {
+  for (int head_dim : {4, 64, 128, 256, 512, 1024}) {
+    ExpectDecodeSdpaInputs(delegate_, head_dim, /*expected_inputs=*/4);
+  }
+}
+
+// Other head_dims may not take Flash-Decode, so the mask is kept.
+TEST_F(ConvertSdpaTransposedTest, BoolMaskKeptForDecodeUnsupportedHeadDims) {
+  for (int head_dim : {96, 384, 2048}) {
+    ExpectDecodeSdpaInputs(delegate_, head_dim, /*expected_inputs=*/5);
+  }
 }
 #endif  // __APPLE__
 

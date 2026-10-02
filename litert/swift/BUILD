@@ -27,7 +27,7 @@ package(
 
 cc_library(
     name = "CLiteRT_objc",
-    hdrs = ["Sources/LiteRT/LiteRtC.h"],
+    hdrs = ["Sources/CLiteRT/CLiteRT.h"],
     aspect_hints = [":CLiteRT_swift_hint"],
     deps = [
         "//litert/c:litert_any",
@@ -78,7 +78,6 @@ swift_test(
         ":LiteRT_Swift",
         # Dependency placeholder: apple_frameworks Metal,
         # Dependency placeholder: swift foundation,
-        "//third_party/swift/swift-testing",
         # Dependency placeholder: swift xctest,
     ],
 )
@@ -287,6 +286,83 @@ apple_static_xcframework(
     ],
 )
 
+# The delegate headers are vended by their own xcframeworks but include the
+# TFLite C headers, which live in `Headers/TensorFlowLiteC/` of
+# `:TensorFlowLiteC`. Their `#include` paths are therefore rewritten to
+# `TensorFlowLiteC/<header>.h`. Mirrors `strip_common_include_path_subspecs` in
+# //tflite/ios.
+strip_common_include_path_prefix(
+    name = "TensorFlowLiteCCoreML_headers",
+    hdr_labels = [
+        "//tflite/delegates/coreml:coreml_delegate.h",
+    ],
+    prefix = "TensorFlowLiteC/",
+)
+
+strip_common_include_path_prefix(
+    name = "TensorFlowLiteCMetal_headers",
+    hdr_labels = [
+        "//tflite/delegates/gpu:metal_delegate.h",
+    ],
+    prefix = "TensorFlowLiteC/",
+)
+
+# The Core ML delegate, packaged so that the `TensorFlowLiteCCoreML` binary
+# target in Package.swift has an artifact to resolve. CoreMLDelegate.swift
+# imports this module. The TFLite runtime is left out and resolved from
+# `:TensorFlowLiteC` instead, so that it is only linked once.
+#
+# bazel build -c opt --config=ios --define=use_coreml_delegate=1 //litert/swift:TensorFlowLiteCCoreML
+apple_static_xcframework(
+    name = "TensorFlowLiteCCoreML",
+    avoid_deps = [
+        ":TensorFlowLiteC_objc",
+    ],
+    bundle_name = "TensorFlowLiteCCoreML",
+    ios = {
+        "simulator": [
+            "x86_64",
+            "arm64",
+        ],
+        "device": ["arm64"],
+    },
+    minimum_os_versions = {"ios": "15.0"},
+    public_hdrs = [
+        ":TensorFlowLiteCCoreML_headers",
+    ],
+    deps = [
+        "//tflite/delegates/coreml:coreml_delegate",
+    ],
+)
+
+# The Metal delegate, packaged so that the `TensorFlowLiteCMetal` binary target
+# in Package.swift has an artifact to resolve. MetalDelegate.swift imports this
+# module. The TFLite runtime is left out and resolved from `:TensorFlowLiteC`
+# instead, so that it is only linked once.
+#
+# bazel build -c opt --config=ios --define=use_metal_delegate=1 //litert/swift:TensorFlowLiteCMetal
+apple_static_xcframework(
+    name = "TensorFlowLiteCMetal",
+    avoid_deps = [
+        ":TensorFlowLiteC_objc",
+    ],
+    bundle_name = "TensorFlowLiteCMetal",
+    ios = {
+        "simulator": [
+            "x86_64",
+            "arm64",
+        ],
+        "device": ["arm64"],
+    },
+    minimum_os_versions = {"ios": "15.0"},
+    public_hdrs = [
+        ":TensorFlowLiteCMetal_headers",
+    ],
+    deps = [
+        "//tflite/delegates/gpu:metal_delegate",
+    ],
+)
+
 # The full source list, including both delegates. Consumed by the all-delegates
 # variant that the tests build against, which lives in its own package so the
 # two `TensorFlowLite` modules don't share an output directory.
@@ -329,7 +405,7 @@ strip_common_include_path_prefix(
 # artifacts (Maven, Python wheel) instead of a hardcoded placeholder.
 genrule(
     name = "CLiteRT_info_plist",
-    srcs = ["Sources/LiteRT/Info.plist"],
+    srcs = ["Sources/CLiteRT/Info.plist"],
     outs = ["CLiteRT_Info.plist"],
     cmd = "sed 's/@VERSION@/{version}/g' $< > $@".format(
         version = LITERT_EXPERIMENTAL_VERSION,
@@ -362,9 +438,17 @@ apple_xcframework(
     ],
 )
 
+# A static build of the LiteRT C API for C and Objective-C consumers, shipped as
+# the `CLiteRT_static` binary target in Package.swift. SwiftPM requires the
+# binary target name to match the `.xcframework` name inside the zip, so the
+# bundle (and therefore the Clang module) is named `CLiteRT_static` rather than
+# `CLiteRT`. This also keeps it from clashing with the `CLiteRT` module of the
+# dynamic `:CLiteRT` framework that the Swift `LiteRT` target depends on.
+#
+# bazel build -c opt --config=ios //litert/swift:CLiteRT_static
 apple_static_xcframework(
     name = "CLiteRT_static",
-    bundle_name = "CLiteRT",
+    bundle_name = "CLiteRT_static",
     ios = {
         "simulator": [
             "arm64",
@@ -447,6 +531,7 @@ genrule(
     srcs = [
         "@litert_prebuilts//:ios_arm64/libLiteRtMetalAccelerator.dylib",
         "@litert_prebuilts//:ios_sim_arm64/libLiteRtMetalAccelerator.dylib",
+        "@litert_prebuilts//:macos_arm64/libLiteRtMetalAccelerator.dylib",
     ],
     outs = ["LiteRtMetalAccelerator.xcframework.zip"],
     # The prebuilt Metal accelerator is shipped as a plain dylib
@@ -460,13 +545,26 @@ genrule(
     # its install name is rewritten to match, and the Info.plists are filled
     # in with the keys Xcode and App Store validation expect from an
     # embeddable dynamic framework.
+    #
+    # The iOS slices use the shallow bundle layout, with the binary and
+    # Info.plist at the root of the bundle. macOS only supports the versioned
+    # layout: the contents live in `Versions/A/` (Info.plist in
+    # `Versions/A/Resources/`), and `Versions/Current`, the binary and
+    # `Resources` at the root are symlinks into it. The archive is zipped with
+    # `-y` so that those symlinks are stored as links.
     cmd = """
        OUT_ZIP=$$(pwd)/$@
        XCFRAMEWORK=metal_tmp/LiteRtMetalAccelerator.xcframework
-       mkdir -p $$XCFRAMEWORK/ios-arm64/LiteRtMetalAccelerator.framework
-       mkdir -p $$XCFRAMEWORK/ios-arm64-simulator/LiteRtMetalAccelerator.framework
-       cp $(location @litert_prebuilts//:ios_arm64/libLiteRtMetalAccelerator.dylib) $$XCFRAMEWORK/ios-arm64/LiteRtMetalAccelerator.framework/LiteRtMetalAccelerator
-       cp $(location @litert_prebuilts//:ios_sim_arm64/libLiteRtMetalAccelerator.dylib) $$XCFRAMEWORK/ios-arm64-simulator/LiteRtMetalAccelerator.framework/LiteRtMetalAccelerator
+       IOS_FRAMEWORK=$$XCFRAMEWORK/ios-arm64/LiteRtMetalAccelerator.framework
+       SIM_FRAMEWORK=$$XCFRAMEWORK/ios-arm64-simulator/LiteRtMetalAccelerator.framework
+       MAC_FRAMEWORK=$$XCFRAMEWORK/macos-arm64/LiteRtMetalAccelerator.framework
+       mkdir -p $$IOS_FRAMEWORK $$SIM_FRAMEWORK $$MAC_FRAMEWORK/Versions/A/Resources
+       cp $(location @litert_prebuilts//:ios_arm64/libLiteRtMetalAccelerator.dylib) $$IOS_FRAMEWORK/LiteRtMetalAccelerator
+       cp $(location @litert_prebuilts//:ios_sim_arm64/libLiteRtMetalAccelerator.dylib) $$SIM_FRAMEWORK/LiteRtMetalAccelerator
+       cp $(location @litert_prebuilts//:macos_arm64/libLiteRtMetalAccelerator.dylib) $$MAC_FRAMEWORK/Versions/A/LiteRtMetalAccelerator
+       ln -s A $$MAC_FRAMEWORK/Versions/Current
+       ln -s Versions/Current/LiteRtMetalAccelerator $$MAC_FRAMEWORK/LiteRtMetalAccelerator
+       ln -s Versions/Current/Resources $$MAC_FRAMEWORK/Resources
        # The prebuilts are linked with an install name of
        # `@rpath/libLiteRtMetalAccelerator.dylib`. The linker copies that
        # string verbatim into every app that links the framework, so it has to
@@ -474,13 +572,16 @@ genrule(
        # cannot find it at launch. install_name_tool refreshes the ad-hoc
        # linker signature of the arm64 slices on its own, so no separate
        # codesign step is needed.
-       for SLICE in ios-arm64 ios-arm64-simulator; do
-         BINARY=$$XCFRAMEWORK/$$SLICE/LiteRtMetalAccelerator.framework/LiteRtMetalAccelerator
+       for BINARY in $$IOS_FRAMEWORK/LiteRtMetalAccelerator $$SIM_FRAMEWORK/LiteRtMetalAccelerator; do
          chmod +w $$BINARY
          xcrun install_name_tool -id @rpath/LiteRtMetalAccelerator.framework/LiteRtMetalAccelerator $$BINARY
        done
+       MAC_BINARY=$$MAC_FRAMEWORK/Versions/A/LiteRtMetalAccelerator
+       chmod +w $$MAC_BINARY
+       xcrun install_name_tool -id @rpath/LiteRtMetalAccelerator.framework/Versions/A/LiteRtMetalAccelerator $$MAC_BINARY
        # The version keys carry the LiteRT release version, matching the
-       # CLiteRT framework shipped alongside this one.
+       # CLiteRT framework shipped alongside this one. The minimum OS versions
+       # match the platforms declared in Package.swift.
        cat << 'EOF' > metal_tmp/framework_Info.plist
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -506,13 +607,14 @@ genrule(
     </array>
     <key>CFBundleVersion</key>
     <string>{version}</string>
-    <key>MinimumOSVersion</key>
-    <string>15.0</string>
+    <key>@MIN_OS_KEY@</key>
+    <string>@MIN_OS_VERSION@</string>
 </dict>
 </plist>
 EOF
-       sed 's/@PLATFORM@/iPhoneOS/' metal_tmp/framework_Info.plist > $$XCFRAMEWORK/ios-arm64/LiteRtMetalAccelerator.framework/Info.plist
-       sed 's/@PLATFORM@/iPhoneSimulator/' metal_tmp/framework_Info.plist > $$XCFRAMEWORK/ios-arm64-simulator/LiteRtMetalAccelerator.framework/Info.plist
+       sed -e 's/@PLATFORM@/iPhoneOS/' -e 's/@MIN_OS_KEY@/MinimumOSVersion/' -e 's/@MIN_OS_VERSION@/15.0/' metal_tmp/framework_Info.plist > $$IOS_FRAMEWORK/Info.plist
+       sed -e 's/@PLATFORM@/iPhoneSimulator/' -e 's/@MIN_OS_KEY@/MinimumOSVersion/' -e 's/@MIN_OS_VERSION@/15.0/' metal_tmp/framework_Info.plist > $$SIM_FRAMEWORK/Info.plist
+       sed -e 's/@PLATFORM@/MacOSX/' -e 's/@MIN_OS_KEY@/LSMinimumSystemVersion/' -e 's/@MIN_OS_VERSION@/12.0/' metal_tmp/framework_Info.plist > $$MAC_FRAMEWORK/Versions/A/Resources/Info.plist
        cat << 'EOF' > $$XCFRAMEWORK/Info.plist
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -550,6 +652,20 @@ EOF
             <key>SupportedPlatformVariant</key>
             <string>simulator</string>
         </dict>
+        <dict>
+            <key>BinaryPath</key>
+            <string>LiteRtMetalAccelerator.framework/Versions/A/LiteRtMetalAccelerator</string>
+            <key>LibraryIdentifier</key>
+            <string>macos-arm64</string>
+            <key>LibraryPath</key>
+            <string>LiteRtMetalAccelerator.framework</string>
+            <key>SupportedArchitectures</key>
+            <array>
+                <string>arm64</string>
+            </array>
+            <key>SupportedPlatform</key>
+            <string>macos</string>
+        </dict>
     </array>
     <key>CFBundlePackageType</key>
     <string>XFWK</string>
@@ -558,7 +674,7 @@ EOF
 </dict>
 </plist>
 EOF
-       cd metal_tmp && zip -q -r "$$OUT_ZIP" LiteRtMetalAccelerator.xcframework && cd ..
+       cd metal_tmp && zip -q -r -y "$$OUT_ZIP" LiteRtMetalAccelerator.xcframework && cd ..
        rm -rf metal_tmp
     """.format(version = LITERT_EXPERIMENTAL_VERSION),
     visibility = ["//visibility:public"],

@@ -23,6 +23,7 @@
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/status_macros.h"  // from @com_google_absl
+#include "ml_drift/common/data_type.h"  // from @ml_drift
 #include "ml_drift/common/gpu_info.h"  // from @ml_drift
 #include "ml_drift/common/gpu_model.h"  // from @ml_drift
 #include "ml_drift/common/gpu_model_builder.h"  // from @ml_drift
@@ -36,6 +37,8 @@
 #include "ml_drift_delegate/delegate/composite/add_values_to_cache_parser.h"
 #include "ml_drift_delegate/delegate/composite/gated_delta_update_kernel.h"
 #include "ml_drift_delegate/delegate/composite/gated_delta_update_parser.h"
+#include "ml_drift_delegate/delegate/composite/glu_kernel.h"
+#include "ml_drift_delegate/delegate/composite/glu_parser.h"
 #include "ml_drift_delegate/delegate/composite/moe_experts_kernel.h"
 #include "ml_drift_delegate/delegate/composite/moe_experts_parser.h"
 #include "ml_drift_delegate/delegate/composite/qkv_norm_rope_kernel.h"
@@ -46,8 +49,6 @@
 #include "ml_drift_delegate/delegate/composite/sdpa_transposed_parser.h"
 #include "ml_drift_delegate/delegate/composite/short_conv_step_kernel.h"
 #include "ml_drift_delegate/delegate/composite/short_conv_step_parser.h"
-#include "ml_drift_delegate/delegate/composite/swiglu_kernel.h"
-#include "ml_drift_delegate/delegate/composite/swiglu_parser.h"
 
 namespace litert::ml_drift {
 
@@ -117,11 +118,11 @@ void LiteRtOpSelector::ParamTensorToBuffer(
   }
   auto param_tensor = param_tensor_handle_or.value();
   if (param_tensor.tensor_desc.GetStorageType() ==
-      ::ml_drift::TensorStorageType::BUFFER) {
+      ::ml_drift::TensorStorageType::kBuffer) {
     return;
   }
   ::ml_drift::TensorDescriptor new_desc = param_tensor.tensor_desc;
-  new_desc.SetStorageType(::ml_drift::TensorStorageType::BUFFER);
+  new_desc.SetStorageType(::ml_drift::TensorStorageType::kBuffer);
   auto new_param_tensor = model_builder->AddTensor(new_desc);
   // Emit an explicit copy instead of re-pointing the producer of `param_id` at
   // `new_param_tensor`. The param tensor can be read by other consumers that
@@ -185,8 +186,14 @@ absl::Status LiteRtOpSelector::GPUOperationFromNode(
   }
   if (node.operation.type == kSdpaTransposedType) {
     std::vector<::ml_drift::Value*> sdpa_inputs = inputs;
-    if (inputs.size() > 4) {
-      int param_index = 4;
+    int param_index = -1;
+    if (inputs.size() == 4 &&
+        inputs[3]->tensor.type == ::ml_drift::DataType::kInt32) {
+      param_index = 3;
+    } else if (inputs.size() > 4) {
+      param_index = 4;
+    }
+    if (param_index >= 0) {
       // Ensure param tensor is a buffer tensor as kernel programs expect so.
       ParamTensorToBuffer(param_index, inputs, model_builder);
       if (replaced_tensors_.contains(inputs[param_index]->id)) {
@@ -202,7 +209,7 @@ absl::Status LiteRtOpSelector::GPUOperationFromNode(
                                     model_builder);
   }
   if (node.operation.type == kSwigluType) {
-    return CreateSwigluFromNode(inputs, outputs, node, model_builder);
+    return CreateGluFromNode(inputs, outputs, node, model_builder);
   }
   if (node.operation.type == kQkvNormRopeType) {
     return CreateQkvNormRopeFromNode(inputs, outputs, node, model_builder);
@@ -210,7 +217,7 @@ absl::Status LiteRtOpSelector::GPUOperationFromNode(
   if (node.operation.type == kShortConvStepType) {
     return CreateShortConvStepFromNode(inputs, outputs, node, model_builder);
   }
-  if (node.operation.type == ToString(::ml_drift::OperationType::ROPE)) {
+  if (node.operation.type == ToString(::ml_drift::OperationType::kRope)) {
     return CreateRoPEFromNode(inputs, outputs, node, model_builder);
   }
   return ::ml_drift::GPUOperationFromNode(gpu_info_, op_def, create_info_,

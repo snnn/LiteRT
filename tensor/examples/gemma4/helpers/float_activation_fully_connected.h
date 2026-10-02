@@ -26,7 +26,7 @@ limitations under the License.
 #include "tensor/internal/mixin.h"
 #include "tensor/tensor.h"
 #include "tensor/utils/macros.h"
-#include "tensor/utils/source_location.h"
+#include "absl/types/source_location.h"
 
 namespace litert::tensor::graph {
 
@@ -64,7 +64,7 @@ absl::Status ValidateFloatActivationFullyConnected(const TensorHandle& input,
 template <class... Mixins>
 Tensor<Mixins...> FloatActivationFullyConnected(
     Tensor<Mixins...> input, Tensor<Mixins...> weights,
-    source_location loc = source_location::current()) {
+    absl::SourceLocation loc = absl::SourceLocation::current()) {
   LRT_TENSOR_RETURN_IF_ERROR(
       ValidateFloatActivationFullyConnected(input, weights));
   auto op = std::make_shared<graph::FloatActivationFullyConnectedOperation>();

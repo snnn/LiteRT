@@ -40,6 +40,19 @@ cc_test(
 )
 
 cc_library(
+    name = "test_backends",
+    testonly = True,
+    hdrs = ["test_backends.h"],
+    deps = [
+        "//tensor",
+        "//tensor/backends/xnnpack:arithmetic",
+        "//tensor/backends/xnnpack:conversion",
+        "//tensor/runners/xnnpack:runner",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
     name = "gemma4_graph",
     hdrs = ["gemma4_graph.h"],
     deps = [
@@ -69,6 +82,7 @@ cc_test(
         ":gemma4_config",
         ":gemma4_graph",
         ":gemma4_weights",
+        ":test_backends",
         "//tensor",
         "//tensor:buffer",
         "//tensor:datatypes",
@@ -89,11 +103,71 @@ cc_library(
     srcs = ["gemma4_weights.cc"],
     hdrs = ["gemma4_weights.h"],
     deps = [
+        ":gemma4_config",
         "//tensor",
+        "//tensor:buffer",
+        "//tensor:datatypes",
+        "//tensor/examples/utils:perfetto_session",
         "//tensor/examples/utils:tensor_mapping",
+        "//tensor/utils:macros",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@perfetto//:libperfetto_client_experimental",
+    ],
+)
+
+cc_test(
+    name = "gemma4_weights_test",
+    srcs = ["gemma4_weights_test.cc"],
+    deps = [
+        ":gemma4_config",
+        ":gemma4_weights",
+        "//tensor",
+        "//tensor:buffer",
+        "//tensor:datatypes",
+        "//tensor/examples/utils:safetensor_loader",
+        "//tensor/examples/utils:safetensor_test_util",
+        "//tensor/examples/utils:tensor_mapping",
+        "//tensor/utils:matchers",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "gemma4_runtime",
+    srcs = ["gemma4_runtime.cc"],
+    hdrs = ["gemma4_runtime.h"],
+    deps = [
+        ":gemma4_config",
+        ":gemma4_graph",
+        ":gemma4_weights",
+        "//tensor",
+        "//tensor:buffer",
+        "//tensor:datatypes",
+        "//tensor/examples/gemma3:tokenizer",
+        "//tensor/examples/gemma3:util",
+        "//tensor/examples/gemma4/helpers:quantized_embedding",
+        "//tensor/examples/gemma4/helpers:rope",
+        "//tensor/examples/utils:perfetto_session",
+        "//tensor/examples/utils:safetensor_loader",
+        "//tensor/examples/utils:tensor_mapping",
+        "//tensor/runners/common_nnpack:runner",
+        "//tensor/utils:macros",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/functional:function_ref",
+        "@com_google_absl//absl/log:absl_log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:span",
+        "@perfetto//:libperfetto_client_experimental",
     ],
 )
 
