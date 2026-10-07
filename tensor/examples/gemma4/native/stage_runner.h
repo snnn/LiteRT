@@ -83,8 +83,9 @@ class StageRunner final : public NnpackRunner {
   // Compatibility with the runner API, without mutating the borrowed pool.
   // A count other than the supplied pool's count causes runtime creation or Run
   // to return FailedPrecondition. Create already records the correct pool count.
-  void SetNumThreads(size_t num_threads) override {
-    NnpackRunner::SetNumThreads(num_threads);
+  // As in NnpackRunner, changes are rejected after runtime preparation.
+  absl::Status SetNumThreads(size_t num_threads) override {
+    return NnpackRunner::SetNumThreads(num_threads);
   }
 
   pthreadpool_t threadpool() const { return threadpool_; }

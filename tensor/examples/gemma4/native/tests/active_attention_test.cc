@@ -157,7 +157,7 @@ struct Attention {
         context(BatchMatMul(probs, Cast(v, Type::kFP32), false, transposed)),
         runner(Take(XnnpackRunner::Create({context, qk, probs}, flags))) {
     Check(context.GetStatus());
-    runner.SetNumThreads(1);
+    Check(runner.SetNumThreads(1));
   }
   uint32_t Id(const XT& t) const {
     return runner.graph().values()[Take(runner.graph().Lookup(t))].id;

@@ -74,6 +74,7 @@
 #include "litert/vendors/qualcomm/core/builders/l2_norm_op_builder.h"
 #include "litert/vendors/qualcomm/core/builders/layer_norm_op_builder.h"
 #include "litert/vendors/qualcomm/core/builders/leaky_relu_op_builder.h"
+#include "litert/vendors/qualcomm/core/builders/local_response_norm_op_builder.h"
 #include "litert/vendors/qualcomm/core/builders/log_softmax_op_builder.h"
 #include "litert/vendors/qualcomm/core/builders/logistic_op_builder.h"
 #include "litert/vendors/qualcomm/core/builders/matmul_op_builder.h"
@@ -568,6 +569,23 @@ REGISTER_SIMPLE_OP_BUILDER(BuildSpaceToBatchNdOp, BuildSpaceToBatchNdOp)
 REGISTER_SIMPLE_OP_BUILDER(BuildAddNOp, BuildAddNOp)
 
 #undef REGISTER_SIMPLE_OP_BUILDER
+
+LiteRtStatus BuildAtan2Op(const litert::compiler::Op& litert_op,
+                          ::qnn::TensorPool& tensor_pool,
+                          std::vector<::qnn::TensorWrapperRef>& input_tensors,
+                          std::vector<::qnn::TensorWrapperRef>& output_tensors,
+                          std::vector<::qnn::OpWrapper>& op_wrappers) {
+  if (input_tensors.size() != 2 || output_tensors.size() != 1) {
+    return kLiteRtStatusErrorInvalidArgument;
+  }
+  if (!input_tensors[0].get().IsF32() || !input_tensors[1].get().IsF32() ||
+      !output_tensors[0].get().IsF32()) {
+    return kLiteRtStatusErrorInvalidArgument;
+  }
+  op_wrappers =
+      ::qnn::BuildElementwiseAtan2Op(tensor_pool, input_tensors, output_tensors);
+  return kLiteRtStatusOk;
+}
 
 LiteRtStatus BuildQuantizeOp(
     const litert::compiler::Op&, ::qnn::TensorPool& tensor_pool,
@@ -1398,6 +1416,26 @@ LiteRtStatus BuildLeakyReluOp(
   return kLiteRtStatusOk;
 }
 
+LiteRtStatus BuildLocalResponseNormOp(
+    const litert::compiler::Op& litert_op, ::qnn::TensorPool& tensor_pool,
+    std::vector<::qnn::TensorWrapperRef>& input_tensors,
+    std::vector<::qnn::TensorWrapperRef>& output_tensors,
+    std::vector<::qnn::OpWrapper>& op_wrappers) {
+  auto options = litert::compiler::GetOptionsAs<
+      litert::compiler::LocalResponseNormalizationOptions>(litert_op.ctx(),
+                                                           litert_op.Get());
+  if (!options) {
+    return kLiteRtStatusErrorInvalidArgument;
+  }
+  int32_t radius = options->radius;
+  float bias = options->bias;
+  float alpha = options->alpha;
+  float beta = options->beta;
+  op_wrappers.emplace_back(::qnn::CreateLocalResponseNormOp(
+      input_tensors[0], output_tensors[0], radius, bias, alpha, beta));
+  return kLiteRtStatusOk;
+}
+
 LiteRtStatus BuildResizeBilinearOp(
     const litert::compiler::Op& litert_op, ::qnn::TensorPool& tensor_pool,
     std::vector<::qnn::TensorWrapperRef>& input_tensors,
@@ -1528,6 +1566,7 @@ GetOpBuilders() {
   std::array<OpBuilder, kLiteRtOpCodeShloComposite + 1> builders{};
   builders[kLiteRtOpCodeTflAdd] = Adapt<BuildAddOp>;
   builders[kLiteRtOpCodeTflAddN] = Adapt<BuildAddNOp>;
+  builders[kLiteRtOpCodeTflAtan2] = Adapt<BuildAtan2Op>;
   builders[kLiteRtOpCodeTflAveragePool2d] = Adapt<BuildAveragePool2dOp>;
   builders[kLiteRtOpCodeTflConcatenation] = Adapt<BuildConcatenationOp>;
   builders[kLiteRtOpCodeTflConv2d] = Adapt<BuildConv2dOp>;
@@ -1539,6 +1578,8 @@ GetOpBuilders() {
   builders[kLiteRtOpCodeTflFullyConnected] = Adapt<BuildFullyConnectedOp>;
   builders[kLiteRtOpCodeTflL2Normalization] = Adapt<BuildL2NormalizationOp>;
   builders[kLiteRtOpCodeTflL2Pool2d] = Adapt<BuildL2Pool2dOp>;
+  builders[kLiteRtOpCodeTflLocalResponseNormalization] =
+      Adapt<BuildLocalResponseNormOp>;
   builders[kLiteRtOpCodeTflLogistic] = Adapt<BuildLogisticOp>;
   builders[kLiteRtOpCodeTflMaxPool2d] = Adapt<BuildMaxPool2dOp>;
   builders[kLiteRtOpCodeTflMul] = Adapt<BuildMulOp>;

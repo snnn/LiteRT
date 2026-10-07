@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/types/source_location.h"
 #include "xnnpack.h"
 #include "tensor/backends/xnnpack/conversion.h"
 #include "tensor/backends/xnnpack/utils.h"
@@ -72,7 +73,7 @@ ValidateBundleDynamicInt2FullyConnected(const TensorHandle &input,
 template <class... Mixins>
 Tensor<Mixins...> BundleDynamicInt2FullyConnected(
     Tensor<Mixins...> input, Tensor<Mixins...> weights,
-    source_location loc = source_location::current()) {
+    absl::SourceLocation loc = absl::SourceLocation::current()) {
   LRT_TENSOR_RETURN_IF_ERROR(
       ValidateBundleDynamicInt2FullyConnected(input, weights));
   auto op = std::make_shared<graph::BundleDynamicInt2FullyConnectedOperation>();

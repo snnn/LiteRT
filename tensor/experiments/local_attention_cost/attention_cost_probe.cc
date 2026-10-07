@@ -59,7 +59,7 @@ struct AttentionCostCase {
                     false, true), mask)), Cast(v, Type::kFP32),
                     false, transposed)),
         runner(Take(XnnpackRunner::Create({output}))) {
-    runner.SetNumThreads(threads);
+    Check(runner.SetNumThreads(threads));
     Check(runner.SetInput(q, in.q));
     const absl::Span<const int8_t> keys(
         in.keys.data(), size_t(in.extent) * in.dim);

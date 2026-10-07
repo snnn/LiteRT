@@ -112,9 +112,9 @@ static absl::Status Check() {
           result.data()[1] == 33.5f && result.data()[2] == 32.5f &&
           result.data()[3] == 78.5f);
 
-  survivor.SetNumThreads(1);
-  REQUIRE(absl::IsFailedPrecondition(survivor.Run()));
-  survivor.SetNumThreads(2);
+  REQUIRE(absl::IsFailedPrecondition(survivor.SetNumThreads(1)));
+  LRT_TENSOR_RETURN_IF_ERROR(survivor.Run());
+  REQUIRE(absl::IsFailedPrecondition(survivor.SetNumThreads(2)));
   LRT_TENSOR_RETURN_IF_ERROR(survivor.Run());
   stages.clear();
   // An output lock must retain its buffer after its runner is destroyed.
@@ -124,6 +124,9 @@ static absl::Status Check() {
   // Null pool/cache is a valid serial runner and also owns no shared resource.
   LRT_TENSOR_ASSIGN_OR_RETURN(auto serial,
       StageRunner::Create({output}, nullptr, nullptr));
+  LRT_TENSOR_RETURN_IF_ERROR(serial->SetNumThreads(2));
+  REQUIRE(absl::IsFailedPrecondition(serial->PrepareRuntime()));
+  LRT_TENSOR_RETURN_IF_ERROR(serial->SetNumThreads(1));
   LRT_TENSOR_RETURN_IF_ERROR(serial->SetInput(input, data));
   LRT_TENSOR_RETURN_IF_ERROR(serial->Run());
   LRT_TENSOR_ASSIGN_OR_RETURN(auto serial_result,

@@ -24,6 +24,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <vector>
+#include "absl/types/source_location.h"
 #include "xnnpack.h"
 #include "tensor/backends/xnnpack/arithmetic.h"
 #include "tensor/backends/xnnpack/conversion.h"
@@ -244,7 +245,7 @@ namespace litert::tensor::examples::gemma4::native {
 template <class... Mixins>
 Tensor<Mixins...> StaticInt2FullyConnected(
     Tensor<Mixins...> input, Tensor<Mixins...> weight,
-    source_location loc = source_location::current()) {
+    absl::SourceLocation loc = absl::SourceLocation::current()) {
   LRT_TENSOR_RETURN_IF_ERROR(ValidateStaticInt2FullyConnected(input, weight));
   auto op = std::make_shared<graph::StaticInt2FullyConnectedOperation>();
   RegisterMixins<Mixins...>(op);

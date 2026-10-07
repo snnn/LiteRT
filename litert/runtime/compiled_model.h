@@ -51,7 +51,6 @@
 #include "litert/runtime/tfl_utils.h"
 #include "tflite/converter/allocation.h"
 #include "tflite/core/api/error_reporter.h"
-#include "tflite/delegates/utils/simple_opaque_delegate.h"
 #include "tflite/interpreter.h"
 #include "tflite/model_builder.h"
 
@@ -401,10 +400,6 @@ class LiteRtCompiledModelT {
   // this root set and does not add transitively referenced callees.
   litert::Expected<void> InitializeActiveSubgraphs(LiteRtOptions options);
 
-  // Marks signature subgraph input and output tensors as kTfLiteNonCpu to
-  // prevent TFLite's ArenaPlanner from allocating host heap buffers for them.
-  void MarkSignatureIoTensorsNonCpu();
-
   // Returns NotFound when an explicitly unselected signature is used.
   litert::Expected<void> ValidateSignatureIsActive(
       absl::string_view signature_key) const;
@@ -461,7 +456,8 @@ class LiteRtCompiledModelT {
   litert::Expected<void> MarkSignatureAllocationUpToDate(
       const tflite::SignatureRunner* runner);
 
-  // Returns true if the given signature needs tensor allocation.
+  // Returns true if the given signature needs tensor allocation, including
+  // when it has never been allocated.
   litert::Expected<bool> SignatureNeedsAllocation(
       const tflite::SignatureRunner* runner) const;
 
@@ -563,7 +559,8 @@ class LiteRtCompiledModelT {
   absl::flat_hash_map<absl::string_view, tflite::SignatureRunner*>
       signature_runners_;
 
-  // Map to track which signature needs allocation.
+  // Map to track which signature needs allocation. A signature without an
+  // entry has never been allocated and is treated as needing allocation.
   absl::flat_hash_map<const tflite::SignatureRunner*, bool>
       signature_needs_allocation_;
 

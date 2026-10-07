@@ -585,7 +585,7 @@ absl::StatusOr<CompiledRunners> CompileRunners(
       auto runner, XnnpackRunner::Create(
                        graphs.prefill_outputs.GetAllHandles(dump_intermediates),
                        runtime_flags));
-  runner.SetNumThreads(num_threads);
+  LRT_TENSOR_RETURN_IF_ERROR(runner.SetNumThreads(num_threads));
   if (use_weight_cache && weight_cache_provider != nullptr) {
     runner.SetWeightsCache(&weight_cache_provider->GetCacheProvider());
   }
@@ -595,7 +595,7 @@ absl::StatusOr<CompiledRunners> CompileRunners(
       XnnpackRunner::Create(
           graphs.decode_outputs.GetAllHandles(dump_intermediates),
           runtime_flags));
-  decode_runner.SetNumThreads(num_threads);
+  LRT_TENSOR_RETURN_IF_ERROR(decode_runner.SetNumThreads(num_threads));
   if (use_weight_cache && weight_cache_provider != nullptr) {
     decode_runner.SetWeightsCache(&weight_cache_provider->GetCacheProvider());
   }

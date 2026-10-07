@@ -15,11 +15,9 @@
 #ifndef ODML_LITERT_LITERT_CC_LITERT_COMPILED_MODEL_H_
 #define ODML_LITERT_LITERT_CC_LITERT_COMPILED_MODEL_H_
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -1549,8 +1547,10 @@ class CompiledModel : public internal::BaseHandle<LiteRtCompiledModel> {
     if (input_index >= static_cast<size_t>(num_inputs)) {
       return Error(Status::kErrorInvalidArgument, "Input index out of bounds");
     }
-    return internal::compiled_model_detail::FetchSignatureInputTensorTypeByIndex(
-        env_, lite_rt_signature, static_cast<LiteRtParamIndex>(input_index));
+    return internal::compiled_model_detail::
+        FetchSignatureInputTensorTypeByIndex(
+            env_, lite_rt_signature,
+            static_cast<LiteRtParamIndex>(input_index));
   }
 
   /// @brief Returns the tensor type for a given input tensor name.
@@ -2120,10 +2120,10 @@ class CompiledModel : public internal::BaseHandle<LiteRtCompiledModel> {
                                   StringView input_name) const {
     LITERT_ASSIGN_OR_RETURN(const auto input_names,
                             GetSignatureInputNames(signature_index));
-    auto it = std::find(input_names.begin(), input_names.end(),
-                        input_name);  // NOLINT
-    if (it != input_names.end()) {
-      return std::distance(input_names.begin(), it);
+    for (size_t i = 0; i < input_names.size(); ++i) {
+      if (input_names[i] == input_name) {
+        return i;
+      }
     }
     return Unexpected(Status::kErrorNotFound,
                       "Failed to find input: " + std::string(input_name));
@@ -2135,10 +2135,10 @@ class CompiledModel : public internal::BaseHandle<LiteRtCompiledModel> {
                                    StringView output_name) const {
     LITERT_ASSIGN_OR_RETURN(const auto output_names,
                             GetSignatureOutputNames(signature_index));
-    auto it = std::find(output_names.begin(), output_names.end(),
-                        output_name);  // NOLINT
-    if (it != output_names.end()) {
-      return std::distance(output_names.begin(), it);
+    for (size_t i = 0; i < output_names.size(); ++i) {
+      if (output_names[i] == output_name) {
+        return i;
+      }
     }
     return Unexpected(Status::kErrorNotFound,
                       "Failed to find output: " + std::string(output_name));

@@ -68,15 +68,15 @@ TEST(TensorTypeUtil, EmptyPackedAndStridedByteSizes) {
     auto packed = GetNumPackedBytes(type, absl::MakeSpan(dimensions));
     ASSERT_TRUE(packed);
     EXPECT_EQ(*packed, 0);
-    auto strided = GetNumBytes(type, absl::MakeSpan(dimensions),
-                              absl::MakeSpan(strides));
+    auto strided =
+        GetNumBytes(type, absl::MakeSpan(dimensions), absl::MakeSpan(strides));
     ASSERT_TRUE(strided);
     EXPECT_EQ(*strided, 0);
   }
   constexpr std::array<int, 4> invalid_strides = {256, 256, 256, -1};
   EXPECT_FALSE(GetNumBytes(kLiteRtElementTypeFloat32,
-                          absl::MakeSpan(dimensions),
-                          absl::MakeSpan(invalid_strides)));
+                           absl::MakeSpan(dimensions),
+                           absl::MakeSpan(invalid_strides)));
 }
 
 TEST(TensorTypeUtil, GetNumElementsWithOverflow) {

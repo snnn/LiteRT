@@ -369,7 +369,7 @@ TEST(CompiledModelTest, OwningCreateRunsAfterModelMove) {
   LITERT_ASSERT_OK_AND_ASSIGN(
       CompiledModel compiled_model,
       CompiledModelTestPeer::Create(env, std::move(model), options));
-  EXPECT_FALSE(model);
+  EXPECT_FALSE(model);  // NOLINT(bugprone-use-after-move)
   LITERT_ASSERT_OK_AND_ASSIGN(std::vector<TensorBuffer> input_buffers,
                               compiled_model.CreateInputBuffers());
   LITERT_ASSERT_OK_AND_ASSIGN(std::vector<TensorBuffer> output_buffers,
@@ -404,7 +404,10 @@ TEST(CompiledModelTest, OwningCreateRunsAfterModelMove) {
 //                               compiled_model.CreateOutputBuffers());
 //   const auto after = GetPrimarySubgraphAllocInfo(*interpreter);
 //
-//   EXPECT_EQ(after.arena_size, before.arena_size);
+//   // The first output shape query allocates tensors for a never-allocated
+//   // signature, so TFLite's ArenaPlanner allocates host arena memory for the
+//   // I/O tensors.
+//   EXPECT_NE(after.arena_size, before.arena_size);
 //   EXPECT_EQ(after.arena_persist_size, before.arena_persist_size);
 //   EXPECT_EQ(after.dynamic_size, before.dynamic_size);
 //   EXPECT_EQ(after.resource_size, before.resource_size);
@@ -426,11 +429,7 @@ TEST(CompiledModelTest, OwningCreateRunsAfterModelMove) {
 //                               compiled_model.CreateOutputBuffers());
 //   const auto after = GetPrimarySubgraphAllocInfo(*interpreter);
 //
-//   // Output tensors are marked kTfLiteNonCpu during CompiledModel
-//   // initialization, so TFLite's ArenaPlanner does not allocate host arena
-//   // memory for them even when AllocateTensors is invoked to resolve dynamic
-//   // output dimensions.
-//   EXPECT_EQ(after.arena_size, before.arena_size);
+//   EXPECT_NE(after.arena_size, before.arena_size);
 //   EXPECT_EQ(after.arena_persist_size, before.arena_persist_size);
 //   EXPECT_EQ(after.dynamic_size, before.dynamic_size);
 //   EXPECT_EQ(after.resource_size, before.resource_size);
@@ -1631,8 +1630,8 @@ TEST(CompiledModelTest, EmptyInputResizeAndRunTransitions) {
     LITERT_ASSERT_OK_AND_ASSIGN(
         CompiledModel model,
         CompiledModel::Create(env,
-                             testing::GetTestFilePath(kDynamicModelFileName),
-                             HwAccelerators::kCpu));
+                              testing::GetTestFilePath(kDynamicModelFileName),
+                              HwAccelerators::kCpu));
     for (int rows : {0, 3, 0, 1}) {
       SCOPED_TRACE(rows);
       const std::vector<int> dims = {rows, 2, 3};
@@ -1643,7 +1642,7 @@ TEST(CompiledModelTest, EmptyInputResizeAndRunTransitions) {
           LITERT_ASSERT_OK(model.ResizeInputTensorNonStrict(input, dims));
         }
         LITERT_ASSERT_OK_AND_ASSIGN(auto requirements,
-                                   model.GetInputBufferRequirements(input));
+                                    model.GetInputBufferRequirements(input));
         LITERT_ASSERT_OK_AND_ASSIGN(size_t bytes, requirements.BufferSize());
         EXPECT_EQ(bytes, rows * 6 * sizeof(float));
       }
@@ -1657,7 +1656,7 @@ TEST(CompiledModelTest, EmptyInputResizeAndRunTransitions) {
       }
       LITERT_ASSERT_OK(model.Run(inputs, outputs));
       LITERT_ASSERT_OK_AND_ASSIGN(auto layouts,
-                                 model.GetOutputTensorLayouts(size_t(0)));
+                                  model.GetOutputTensorLayouts(size_t(0)));
       ASSERT_EQ(layouts.size(), 1);
       EXPECT_THAT(layouts[0].Dimensions(), ElementsAre(rows, 2, 3));
       if (!values.empty()) {
@@ -1677,8 +1676,8 @@ TEST(CompiledModelTest, EmptyInputAutomaticResizeTransitions) {
   LITERT_ASSERT_OK_AND_ASSIGN(
       CompiledModel model,
       CompiledModel::Create(env,
-                           testing::GetTestFilePath(kDynamicModelFileName),
-                           HwAccelerators::kCpu));
+                            testing::GetTestFilePath(kDynamicModelFileName),
+                            HwAccelerators::kCpu));
   for (int rows : {0, 3, 0, 1}) {
     SCOPED_TRACE(rows);
     const RankedTensorType type(ElementType::Float32,
@@ -1687,9 +1686,8 @@ TEST(CompiledModelTest, EmptyInputAutomaticResizeTransitions) {
     std::vector<TensorBuffer> inputs;
     for (size_t input = 0; input < 2; ++input) {
       LITERT_ASSERT_OK_AND_ASSIGN(
-          auto buffer,
-          TensorBuffer::CreateManaged(env, TensorBufferType::kHostMemory,
-                                      type, bytes));
+          auto buffer, TensorBuffer::CreateManaged(
+                           env, TensorBufferType::kHostMemory, type, bytes));
       if (rows != 0) {
         const std::vector<float> values(rows * 6, 2.0f);
         LITERT_ASSERT_OK(buffer.Write<float>(values));
@@ -1697,16 +1695,15 @@ TEST(CompiledModelTest, EmptyInputAutomaticResizeTransitions) {
       inputs.push_back(std::move(buffer));
     }
     LITERT_ASSERT_OK_AND_ASSIGN(
-        auto output,
-        TensorBuffer::CreateManaged(env, TensorBufferType::kHostMemory,
-                                    type, bytes));
+        auto output, TensorBuffer::CreateManaged(
+                         env, TensorBufferType::kHostMemory, type, bytes));
     std::vector<TensorBuffer> outputs;
     outputs.push_back(std::move(output));
     // Run must detect the empty/nonempty input layouts without an explicit
     // ResizeInputTensor call, and keep the supplied output allocation valid.
     LITERT_ASSERT_OK(model.Run(inputs, outputs));
     LITERT_ASSERT_OK_AND_ASSIGN(auto layouts,
-                               model.GetOutputTensorLayouts(size_t(0)));
+                                model.GetOutputTensorLayouts(size_t(0)));
     ASSERT_EQ(layouts.size(), 1);
     EXPECT_THAT(layouts[0].Dimensions(), ElementsAre(rows, 2, 3));
     if (rows != 0) {

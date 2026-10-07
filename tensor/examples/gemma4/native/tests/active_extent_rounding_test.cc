@@ -84,7 +84,7 @@ struct PvOnly {
         v(I("value_rows", {1,1,1,dim}, vs)),
         out(BatchMatMul(p, Cast(v, Type::kFP32), false, false)),
         runner(Take(XnnpackRunner::Create({out}))) {
-    runner.SetNumThreads(1);
+    Check(runner.SetNumThreads(1));
   }
   std::vector<float> Run(const Inputs& in, const std::vector<float>& fixed_probabilities,
                          int fixed_extent, int source_offset = 0) {
