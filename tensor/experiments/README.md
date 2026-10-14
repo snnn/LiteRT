@@ -35,8 +35,15 @@ these implementations. The production runner was consolidated from the former
 | [litert_chunked_prefill](litert_chunked_prefill/README.md) | Joined native and LiteRT chunked prefill with correctness and memory checks. |
 | [litert_production_phones](litert_production_phones/README.md) | Original three-phone production/native campaign controllers and analysis. |
 | [runner_memory_accounting](runner_memory_accounting/README.md) | Container accounting, embedding residency, and pageout diagnostics. |
+| [compact_int2_dynamic_shapes](compact_int2_dynamic_shapes/README.md) | Default-off compact bundle and variable-row prefill experiments, with paired timings and memory accounting. |
+| [explicit_dynamic_shapes](explicit_dynamic_shapes/README.md) | Explicit TFLite shape contracts, strict E2B resize validation, and a direct Core IR Python attention pilot. |
+| [prefill_signature_comparison](prefill_signature_comparison/README.md) | Fixed, dynamic, and bucketed prefill through 16K tokens, with isolated XNNPACK scale-allocation diagnostics. |
+| [signature_memory_breakdown](signature_memory_breakdown/README.md) | Desktop allocation and residency audit of extra prefill signatures, including duplicated quantization metadata. |
+| [runner_upstream_sweep](runner_upstream_sweep/README.md) | Three-phone upstream LiteRT-LM versus Tensor API prompt/capacity sweep, model-card workload, and stock CLI memory cross-check. |
+| [select_prefill](select_prefill/README.md) | Isolated builtin Select vectorization experiment, with correctness checks and upstream LiteRT-LM prefill measurements. |
 | [local_attention_cost](local_attention_cost/README.md) | Local-attention cost probe. |
 | [ynnpack_attention_layout](ynnpack_attention_layout/README.md) | YNNPACK attention layout experiment and patch. |
+| [ynnpack_dynamism](ynnpack_dynamism/README.md) | Core IR symbolic lowering, ordered KV append/views, full Gemma4 E2B integration, and Linux/TECNO/Pixel measurements. |
 | [history](history/README.md) | Earlier source snapshots and migration provenance. |
 
 For a new phone measurement, use the

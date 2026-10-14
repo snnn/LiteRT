@@ -32,6 +32,7 @@ struct ActiveLayerGraph {
 struct ActiveGraphContext {
   int layer = 0;
   bool broadcast_mask = false;
+  bool dynamic_prefill_rows = false;
   TensorHandle local_mask = TensorHandle::Invalid();
   TensorHandle global_mask = TensorHandle::Invalid();
   std::vector<int> owners;

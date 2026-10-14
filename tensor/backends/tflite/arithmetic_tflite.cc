@@ -362,14 +362,6 @@ absl::StatusOr<TfLiteOpBuildInfo> OpMixin<
   LRT_TENSOR_ASSIGN_OR_RETURN(const auto& input_info, GetInfo(op.inputs[0]));
   LRT_TENSOR_ASSIGN_OR_RETURN(auto from_type,
                               litert::tensor::ToTfLite(input_info.type));
-  LRT_TENSOR_ASSIGN_OR_RETURN(auto outputs, GetOutputs(op));
-  LRT_TENSOR_ASSIGN_OR_RETURN(const auto& output_info, GetInfo(outputs.at(0)));
-  if (input_info.quantization && data.to == Type::kFP32) {
-    return TfLiteOpBuildInfo(tflite::BuiltinOperator_DEQUANTIZE);
-  }
-  if (output_info.quantization) {
-    return TfLiteOpBuildInfo(tflite::BuiltinOperator_QUANTIZE);
-  }
 
   return TfLiteOpBuildInfo(::tflite::BuiltinOperator_CAST,
                            tflite::CastOptionsT{.in_data_type = from_type,
@@ -495,9 +487,16 @@ OpMixin<ReshapeOperation, TfLiteMixinTag>::ToTfLite(
     const graph::Operation& op) const {
   LRT_TENSOR_ASSIGN_OR_RETURN(const ReshapeOperation& data,
                               op.As<ReshapeOperation>());
+  auto shape = data.new_shape;
+  if (data.inferred_axis >= 0) {
+    if (static_cast<size_t>(data.inferred_axis) >= shape.size())
+      return absl::InvalidArgumentError(
+          "Reshape inferred axis is out of range");
+    shape[data.inferred_axis] = -1;
+  }
   return TfLiteOpBuildInfo(
       ::tflite::BuiltinOperator_RESHAPE,
-      tflite::ReshapeOptionsT{.new_shape = data.new_shape});
+      tflite::ReshapeOptionsT{.new_shape = std::move(shape)});
 }
 
 absl::StatusOr<TfLiteOpBuildInfo>

@@ -17,9 +17,15 @@
 
 from pathlib import Path
 from collections import Counter
-import hashlib, json, mmap, re, sys, time
+import hashlib
+import json
+import mmap
+import re
+import sys
+import time
 import numpy as np
 import argparse
+from model_spec import SPECS
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
@@ -32,12 +38,17 @@ parser.add_argument("--inventory", type=Path, required=True)
 parser.add_argument("--trace", type=Path, required=True)
 parser.add_argument("--kv", type=Path, required=True)
 parser.add_argument("--output-dir", type=Path, required=True)
+parser.add_argument("--model-variant", choices=("e2b", "e4b"), default="e2b")
+parser.add_argument("--compact-int2", action="store_true")
 args = parser.parse_args()
+
+spec = SPECS[args.model_variant]
 if not (args.schema_dir / "tflite/Model.py").is_file():
     parser.error("--schema-dir must contain generated tflite/Model.py")
 sys.path.insert(0, str(args.schema_dir.resolve()))
-from tflite.Model import Model
-from tflite.TensorType import TensorType
+from tflite.Model import Model  # noqa: E402 - schema path supplied by CLI
+from tflite.TensorType import TensorType  # noqa: E402
+from tflite.FullyConnectedOptions import FullyConnectedOptions  # noqa: E402
 
 TT = {v: k for k, v in vars(TensorType).items() if isinstance(v, int)}
 OUT = args.output_dir.resolve()
@@ -88,6 +99,10 @@ def raw(key, gi, ti):
     model = models[key]
     t = model.Subgraphs(gi).Tensors(ti)
     b = model.Buffers(t.Buffer())
+    if b.Offset():
+        offset = secs[key]["begin"] + b.Offset()
+        assert offset + b.Size() <= secs[key]["end"]
+        return np.frombuffer(mm, dtype=np.uint8, count=b.Size(), offset=offset)
     assert b.DataLength() > 0, (key, gi, ti, b.Offset(), b.Size())
     return b.DataAsNumpy()
 
@@ -188,15 +203,19 @@ def export_quant(name, key, gi, ti):
     shape = t.ShapeAsNumpy().tolist()
     data = raw(key, gi, ti)
     assert dtype in ["INT2", "INT4", "INT8"]
-    target = "int4" if dtype in ["INT2", "INT4"] else "int8"
-    rel = "tensors/" + name + (".i4" if target == "int4" else ".i8")
+    target = (
+        dtype.lower()
+        if args.compact_int2
+        else ("int4" if dtype in ["INT2", "INT4"] else "int8")
+    )
+    rel = "tensors/" + name + (".i" + target[3:])
     path = OUT / rel
     assert not path.exists(), path
     h = hashlib.sha256()
     with path.open("wb") as f:
         for i in range(0, len(data), CHUNK):
             chunk = data[i : i + CHUNK]
-            if dtype == "INT2":
+            if dtype == "INT2" and not args.compact_int2:
                 widened = lookup[chunk]
                 lo = widened[:, 0]
                 hi = widened[:, 1]
@@ -215,7 +234,9 @@ def export_quant(name, key, gi, ti):
             h.update(memoryview(out).cast("B"))
     stats["numeric_weight_codes_preserved"] += int(np.prod(shape, dtype=np.int64))
     stats["int2_widened_codes"] += (
-        int(np.prod(shape, dtype=np.int64)) if dtype == "INT2" else 0
+        int(np.prod(shape, dtype=np.int64))
+        if dtype == "INT2" and not args.compact_int2
+        else 0
     )
     q = t.Quantization()
     assert q and q.QuantizedDimension() == 0
@@ -232,9 +253,11 @@ def export_quant(name, key, gi, ti):
         "name": name,
         "dtype": target,
         "shape": shape,
-        "encoding": "signed_twos_complement_low_nibble_first"
-        if target == "int4"
-        else "signed_int8",
+        "encoding": {
+            "int2": "signed_twos_complement_low_2bits_first",
+            "int4": "signed_twos_complement_low_nibble_first",
+            "int8": "signed_int8",
+        }[target],
         "file": rel,
         "bytes": path.stat().st_size,
         "sha256": h.hexdigest(),
@@ -250,19 +273,28 @@ def export_quant(name, key, gi, ti):
         },
         "sources": [source(key, gi, ti)],
     }
-    if dtype != "INT2":
+    if dtype != "INT2" or args.compact_int2:
         assert record["sha256"] == record["sources"][0]["source_data_sha256"]
     add(record)
     return record
 
 
-# Main 277 active FC weights and all 552 explicit static activation scale scalars.
+# Active FC weights and their explicit static activation scale scalars.
 fcs = [o for o in dec_trace["operators"] if o["type"] == "FULLY_CONNECTED"]
-assert len(fcs) == 277
+assert len(fcs) == 7 * spec.num_layers + 2 * spec.num_kv_owners + 2
 for index, op in enumerate(fcs):
     wt = op["inputs"][1]
     name = name_for_fc(wt["name"])
-    export_quant(name + ".weight", DKEY, 0, wt["index"])
+    record = export_quant(name + ".weight", DKEY, 0, wt["index"])
+    table = dg.Operators(op["index"]).BuiltinOptions()
+    options = FullyConnectedOptions()
+    options.Init(table.Bytes, table.Pos)
+    record["fully_connected_options"] = {
+        "keep_num_dims": options.KeepNumDims(),
+        "asymmetric_quantize_inputs": options.AsymmetricQuantizeInputs(),
+        "fused_activation_function": options.FusedActivationFunction(),
+        "weights_format": options.WeightsFormat(),
+    }
     for role, tinfo in [("input", op["inputs"][0]), ("output", op["outputs"][0])]:
         if "scales" not in tinfo:
             continue
@@ -289,7 +321,14 @@ for index, op in enumerate(fcs):
         }
         add(record)
     if index % 35 == 0:
-        print("FC", index + 1, "of277", round(time.time() - start, 2), "s", flush=True)
+        print(
+            "FC",
+            index + 1,
+            f"of{len(fcs)}",
+            round(time.time() - start, 2),
+            "s",
+            flush=True,
+        )
 # All learned RMSNorm weights mapped by actual consumers, not nearest-value guesses.
 for op in dec_trace["operators"]:
     if op.get("composite_name") != "odml.rms_norm":
@@ -327,7 +366,7 @@ for op in dec_trace["operators"]:
     rec = export_float(name, DKEY, 0, ti)
     rec["mapped_by_consumer"] = {"operator_index": op["index"], "output_name": path}
     stats["learned_norms"] += 1
-assert stats["learned_norms"] == 227
+assert stats["learned_norms"] == 6 * spec.num_layers + spec.num_kv_owners + 2
 # Every layer residual scalar is a stored float constant with a named MUL consumer.
 for op in dec_trace["operators"]:
     path = op["outputs"][0]["name"]
@@ -338,13 +377,13 @@ for op in dec_trace["operators"]:
     for inp in op["inputs"]:
         t = dg.Tensors(inp["index"])
         b = dec.Buffers(t.Buffer())
-        if b.DataLength():
+        if b.DataLength() or b.Size():
             static.append(inp["index"])
     assert len(static) == 1, path
     rec = export_float(f"model.layers.{layer}.layer_scalar", DKEY, 0, static[0], [1])
     rec["mapped_by_consumer"] = {"operator_index": op["index"], "output_name": path}
     stats["layer_scalars"] += 1
-assert stats["layer_scalars"] == 35
+assert stats["layer_scalars"] == spec.num_layers
 # Main table is independently sourced from the actual embedder section.
 key = "tf_lite_embedder"
 g = models[key].Subgraphs(0)
@@ -354,25 +393,31 @@ tables = [
 assert len(tables) == 1
 export_quant("model.embed_tokens.weight", key, 0, tables[0])
 print("Main embedding exported", flush=True)
-# Assemble all 35 per-layer packed tables and full FP32 scale columns into token-major lookup layout.
+# Assemble per-layer packed tables and FP32 scale columns in token-major order.
 key = "tf_lite_per_layer_embedder"
 model = models[key]
 g = model.Subgraphs(0)
-tis = [i for i in range(g.TensorsLength()) if TT[g.Tensors(i).Type()] == "INT4"]
-assert len(tis) == 35
+tis = [
+    i for i in range(g.TensorsLength()) if TT[g.Tensors(i).Type()] in ("INT2", "INT4")
+]
+assert len(tis) == spec.num_layers
+ple_dtype = TT[g.Tensors(tis[0]).Type()]
+assert ple_dtype == "INT4" or args.compact_int2, "INT2 PLE requires --compact-int2"
+ple_bytes = spec.per_layer_input_dim // (4 if ple_dtype == "INT2" else 2)
 parts = []
 scale_columns = []
 sources = []
 for layer, ti in enumerate(tis):
     t = g.Tensors(ti)
-    assert t.ShapeAsNumpy().tolist() == [262144, 256]
+    assert t.ShapeAsNumpy().tolist() == [spec.vocab_size, spec.per_layer_input_dim]
+    assert TT[t.Type()] == ple_dtype
     q = t.Quantization()
     assert (
         q.QuantizedDimension() == 0
-        and q.ScaleLength() == 262144
+        and q.ScaleLength() == spec.vocab_size
         and np.all(q.ZeroPointAsNumpy() == 0)
     )
-    parts.append(raw(key, 0, ti).reshape(262144, 128))
+    parts.append(raw(key, 0, ti).reshape(spec.vocab_size, ple_bytes))
     scales = q.ScaleAsNumpy()
     assert np.all(np.isfinite(scales)) and np.all(scales > 0)
     scale_columns.append(scales)
@@ -384,14 +429,14 @@ for layer, ti in enumerate(tis):
         }
     )
 name = "model.embed_tokens_per_layer.weight"
-rel = "tensors/" + name + ".i4"
+rel = "tensors/" + name + (".i2" if ple_dtype == "INT2" else ".i4")
 path = OUT / rel
 assert not path.exists()
 h = hashlib.sha256()
 with path.open("wb") as f:
-    for row in range(0, 262144, 4096):
-        end = min(row + 4096, 262144)
-        block = np.empty((end - row, 35, 128), dtype=np.uint8)
+    for row in range(0, spec.vocab_size, 4096):
+        end = min(row + 4096, spec.vocab_size)
+        block = np.empty((end - row, spec.num_layers, ple_bytes), dtype=np.uint8)
         for layer, part in enumerate(parts):
             block[:, layer, :] = part[row:end]
         for layer, part in enumerate(parts):
@@ -403,9 +448,11 @@ info = write_bytes("scales/" + name + ".f32", scale_matrix)
 add(
     {
         "name": name,
-        "dtype": "int4",
-        "shape": [262144, 8960],
-        "encoding": "signed_twos_complement_low_nibble_first",
+        "dtype": ple_dtype.lower(),
+        "shape": [spec.vocab_size, spec.num_layers * spec.per_layer_input_dim],
+        "encoding": "signed_twos_complement_low_2bits_first"
+        if ple_dtype == "INT2"
+        else "signed_twos_complement_low_nibble_first",
         "file": rel,
         "bytes": path.stat().st_size,
         "sha256": h.hexdigest(),
@@ -414,7 +461,7 @@ add(
             "block_size": 256,
             "quantized_dimension": 0,
             "scales_file": info["file"],
-            "scales_shape": [262144, 35],
+            "scales_shape": [spec.vocab_size, spec.num_layers],
             "scales_dtype": "float32",
             "scales_bytes": info["bytes"],
             "scales_sha256": info["sha256"],
@@ -423,14 +470,20 @@ add(
         "sources": sources,
     }
 )
-stats["numeric_weight_codes_preserved"] += 262144 * 8960
-stats["per_layer_table_partitions"] = 35
+stats["numeric_weight_codes_preserved"] += (
+    spec.vocab_size * spec.num_layers * spec.per_layer_input_dim
+)
+stats["per_layer_table_partitions"] = spec.num_layers
 print("Per-layer embeddings exported", round(time.time() - start, 2), "s", flush=True)
 # Inventory every remaining main-graph FP32 constant. Unknown variable coefficients are fatal.
 for ti in range(dg.TensorsLength()):
     t = dg.Tensors(ti)
     b = dec.Buffers(t.Buffer())
-    if TT[t.Type()] != "FLOAT32" or not b.DataLength() or ti in exported_main_float:
+    if (
+        TT[t.Type()] != "FLOAT32"
+        or not (b.DataLength() or b.Size())
+        or ti in exported_main_float
+    ):
         continue
     name = t.Name().decode()
     data = raw(DKEY, 0, ti)
@@ -464,7 +517,11 @@ for op in dec_trace["operators"]:
     for ti in range(g.TensorsLength()):
         t = g.Tensors(ti)
         b = dec.Buffers(t.Buffer())
-        if TT[t.Type()] != "FLOAT32" or not b.DataLength() or t.Buffer() in seen:
+        if (
+            TT[t.Type()] != "FLOAT32"
+            or not (b.DataLength() or b.Size())
+            or t.Buffer() in seen
+        ):
             continue
         seen.add(t.Buffer())
         constants.append(
@@ -485,7 +542,7 @@ for key in ["tf_lite_embedder", "tf_lite_per_layer_embedder"]:
     for ti in range(g.TensorsLength()):
         t = g.Tensors(ti)
         b = model.Buffers(t.Buffer())
-        if TT[t.Type()] != "FLOAT32" or not b.DataLength():
+        if TT[t.Type()] != "FLOAT32" or not (b.DataLength() or b.Size()):
             continue
         constants.append(
             {
@@ -511,27 +568,32 @@ kv = [
 kv_specs = [
     {
         "owner": x["owner_layer"],
-        "head_dim": 512 if x["owner_layer"] % 5 == 4 else 256,
+        "head_dim": spec.global_key_size
+        if spec.is_global(x["owner_layer"])
+        else spec.head_dim,
         "key_scale": x["key_scale"],
         "value_scale": x["value_scale"],
         "zero_point": 0,
+        "num_kv_heads": spec.num_kv_heads,
         "key_shape_template": [
             1,
-            1,
+            spec.num_kv_heads,
             "capacity",
-            512 if x["owner_layer"] % 5 == 4 else 256,
+            spec.global_key_size if spec.is_global(x["owner_layer"]) else spec.head_dim,
         ],
         "value_shape_template": [
             1,
-            1,
-            512 if x["owner_layer"] % 5 == 4 else 256,
+            spec.num_kv_heads,
+            spec.global_key_size if spec.is_global(x["owner_layer"]) else spec.head_dim,
             "capacity",
         ],
     }
     for x in kv
 ]
 manifest = {
-    "schema_version": 1,
+    "schema_version": 2,
+    "model_config": spec.to_dict(),
+    "kv_owners": list(spec.owners),
     "status": "complete" if not unmapped else "incomplete_unmapped_float_coefficients",
     "source_bundle": {"path": p["path"], "bytes": p["bytes"], "sha256": sha(mm)},
     "source_inventory_sha256": sha(INV.read_bytes()),
@@ -546,10 +608,26 @@ manifest = {
     "export_seconds": time.time() - start,
     "constraints": [
         "All weights and float coefficients come directly from published bundle buffers, not from CT.",
-        "INT2 codes widened losslessly to signed INT4; model exporter restores the original compact INT2 representation.",
+        (
+            "INT2 codes retain their original compact storage."
+            if args.compact_int2
+            else "INT2 codes widened losslessly to signed INT4; model exporter restores the original compact INT2 representation."
+        ),
         "Fixed scalar and RoPE constants separately exported for explicit graph alignment.",
         "No inference, builds or device actions performed.",
     ],
+}
+if args.compact_int2:
+    manifest["experimental_storage"] = "compact_int2_v1"
+manifest["semantic_constants"] = {
+    "logits_softcap_reciprocal": next(
+        c["name"]
+        for c in constants
+        if any(
+            "_post_process_decoding/div2" in x["output_name"]
+            for x in c.get("consumers", [])
+        )
+    )
 }
 (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 print(

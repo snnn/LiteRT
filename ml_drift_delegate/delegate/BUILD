@@ -135,10 +135,17 @@ cc_library(
 )
 
 cc_library(
+    name = "webgpu_command_capture",
+    hdrs = ["webgpu_command_capture.h"],
+    deps = ["@ml_drift//ml_drift/webgpu:command_buffer_capture"],
+)
+
+cc_library(
     name = "gpu_backend_webgpu",
     srcs = ["gpu_backend_webgpu.cc"],
     hdrs = ["gpu_backend_webgpu.h"],
     deps = [
+        ":webgpu_command_capture",
         ":delegate_data",
         ":delegate_utils",
         ":gpu_backend",
@@ -165,6 +172,7 @@ cc_library(
         "@ml_drift//ml_drift/common/task:profiling_info",
         "@ml_drift//ml_drift/common/task:tensor_desc",
         "@ml_drift//ml_drift/webgpu:buffer",
+        "@ml_drift//ml_drift/webgpu:command_buffer_capture",
         "@ml_drift//ml_drift/webgpu:converter",
         "@ml_drift//ml_drift/webgpu:execution_environment",
         "@ml_drift//ml_drift/webgpu:inference_context",
@@ -196,9 +204,10 @@ cc_test(
     deps = [
         ":gpu_backend",
         ":gpu_backend_webgpu",
-        "//third_party/vulkan_loader",
+        ":webgpu_command_capture",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",
         "@ml_drift//ml_drift/common:data_type",
         "@ml_drift//ml_drift/common:gpu_model",
@@ -210,6 +219,7 @@ cc_test(
         "@ml_drift//ml_drift/common/task:tensor_desc",
         "@ml_drift//ml_drift/webgpu:execution_environment",
         "@ml_drift//ml_drift/webgpu:spatial_tensor",
+        "@ml_drift//ml_drift/webgpu:command_buffer_capture",
     ],
 )
 

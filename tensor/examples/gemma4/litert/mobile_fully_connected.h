@@ -125,15 +125,13 @@ Tensor<Mixins...> MobileFullyConnected(
         absl::InvalidArgumentError("Mobile static FC requires FP32 input and "
                                    "quantized INT2/INT4/INT8 weights"));
   }
-  Tensor<Mixins...> quantized_input = Cast(input, Type::kI8);
-  quantized_input.SetQuantization(
-      std::make_shared<PerChannelAffineQuantization>(
-          std::vector<float>{*input_scale}, std::vector<int64_t>{0}));
+  Tensor<Mixins...> quantized_input =
+      Quantize(input, Type::kI8, {*input_scale}, {0});
   Tensor<Mixins...> quantized_output = FullyConnected(quantized_input, weight);
   quantized_output.SetQuantization(
       std::make_shared<PerChannelAffineQuantization>(
           std::vector<float>{*output_scale}, std::vector<int64_t>{0}));
-  return Cast(quantized_output, Type::kFP32);
+  return Dequantize(quantized_output);
 }
 
 }  // namespace litert::tensor::examples::gemma4::cpu

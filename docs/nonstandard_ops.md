@@ -6,11 +6,12 @@ It describes the **serialized TFLite contract** for a converter that writes
 FlatBuffers directly, including `litert-converter`. Using the
 `STABLEHLO_COMPOSITE` opcode does not require a StableHLO conversion pipeline.
 
-**Emit a non-standard op only when the selected runtime configuration can
-execute it.** A recognized spelling is insufficient: encoding, operand order,
-types, layouts, attributes, registration, and backend restrictions must also
-match. Otherwise emit equivalent supported builtins, or fail conversion with
-the unsupported contract identified. A custom-op stub cannot execute the op.
+**Converter contracts and backend readiness are separate.** The converter can
+emit the intended contract while a backend implementation catches up. Preserve
+the model's semantics and record the required runtime support; do not change
+the serialized math to accommodate a backend bug. For execution today, provide
+an equivalent supported decomposition or select a compatible backend. A custom
+op has no automatic decomposition, and a custom-op stub cannot execute it.
 
 **Prefer one serialized graph for CPU and GPU where their contracts overlap.**
 Backend-specific packing and kernel selection should stay inside the backend.
@@ -21,13 +22,14 @@ and unresolved compatibility gaps explicitly.
 
 ## Scope and source revisions
 
-Checked on 2026-09-17:
+Refreshed on 2026-09-30 after reading the recent commit messages and checking
+the corresponding emitters, parsers, kernels, and tests:
 
 | Repository | Reference | Commit |
 | --- | --- | --- |
-| `~/src/LiteRT` | `upstream/main` | `3b85c10ece5412df7913136ba71383e9bc1232a3` |
-| `~/src/litert-torch` | `origin/main`; the official upstream remote is named `origin` locally | `a05e1e1441be1a81f151d21ad62c2fc20ff099bd` |
-| `/data/home/chasun/src/ml-drift` | Local checkout | `0e2092a49cc1b2269662bb98ff9438538b24c961` |
+| `~/src/LiteRT` | Fetched `upstream/main` | `6c6af0163c346459fe6f3024b0bb5c3a02f4a834` |
+| `~/src/litert-torch` | Local `HEAD` | `78ff964262f8a5f9c536789d68a4ec29cf39061a` |
+| `~/src/ml-drift` | Local `HEAD` | `17ec4e6aa3f0103020bdaacc1303b1f2ad270c87` |
 
 LiteRT and torch evidence comes from those Git trees, not local changes. The
 separate MLDrift checkout also qualifies; source links below pin the audited
@@ -43,6 +45,30 @@ recognized only by a converter. In particular, `odml.detector` and
 runtime consumer in the checked sources. Do not emit them as runtime custom
 ops. Their occurrence in a converter allowlist does not establish support.
 Legacy GenAI CPU custom kernels are intentionally outside this catalog.
+
+### Changes relevant to converter authors
+
+| Area | Converter action |
+| --- | --- |
+| Transposed SDPA causality | Emit boolean `is_causal` explicitly. Set it true only for a proven purely causal mask; eligible GPU paths may discard that mask. Missing means false. |
+| Shared SDPA graph | Keep Q/output rank 4 and GQA heads on the head axis at the composite boundary; put decode flattening outside. Use `softcap` as the canonical cap attribute and keep backend gaps documented below. |
+| Torch export controls | `use_sdpa_composite=True` now enables prefill and decode and implies `apply_gpu_composites=True`. The old `use_sdpa_composite_for_prefill` flag is deprecated. |
+| MoE | Emit `activation="gelu_tanh"` for the torch reference math; pass per-expert output scales exactly once. Both MLDrift and XNNPACK now accept blockwise int8 expert scales. |
+| YNNPACK expert composite | `odml.moe_experts` now admits 7/10 inputs, 16-bit floating types, and quantized expert weights. It remains a separate contract from custom `moe`. |
+| Gated delta | Preserve distinct Q/K and V head counts and the new padding sentinels; the runtime now handles head sharing without converter-side repetition. |
+| GPU kernels and tests | Upstream fixes earlier SDPA mask/bias/GQA problems and adds OpenCL FlashDecode. These improve backend support without requiring new op names. |
+
+The top torch commit explains why `is_causal` matters: older exports omitted
+it, so the GPU retained a large global mask even when runtime parameters could
+replace it. Text generation alone is not proof of causality. The emitter now
+requires a text-only task, a known causal model key, a global layer, and a
+causal attention module. Multimodal, sliding-window, noncausal, and unrecognized
+exports retain their masks. A direct FlatBuffer converter should establish
+the same semantic guarantee from its model rather than blindly copy an
+allowlist. See the detailed contracts below for runtime conditions.
+
+Sources: [torch causal attribute and background](https://github.com/google-ai-edge/litert-torch/commit/78ff964262f8a5f9c536789d68a4ec29cf39061a),
+[export configuration](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/core/exportable_module_config.py).
 
 ## Direct serialization and execution requirements
 
@@ -102,12 +128,12 @@ likewise arrange its own resolver and delegates. MLDrift's legacy
 `GraphFloat32` and newer IR paths differ; an alias supported by one is not
 automatically supported by the other.
 
-Sources: [FlatBuffer schema](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/converter/schema/schema.fbs),
-[composite fallback](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/stablehlo_composite.cc),
-[standard registrations](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/core/kernels/register.cc),
-[custom registrations and accelerator stubs](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/runtime/compiled_model.cc),
-[MLDrift legacy factory](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/custom_parsers.cc),
-[MLDrift IR factory](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/ir/custom_parsers.cc).
+Sources: [FlatBuffer schema](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/converter/schema/schema.fbs),
+[composite fallback](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/stablehlo_composite.cc),
+[standard registrations](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/core/kernels/register.cc),
+[custom registrations and accelerator stubs](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/runtime/compiled_model.cc),
+[MLDrift legacy factory](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/custom_parsers.cc),
+[MLDrift IR factory](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/ir/custom_parsers.cc).
 
 ## Catalog
 
@@ -120,7 +146,7 @@ device or every build. See each linked section for the admitted contract.
 | [`odml.scaled_dot_product_attention`](#odmlscaled_dot_product_attention) | C; U for XNNPACK/YNNPACK | XNNPACK, YNNPACK, MLDrift composite |
 | [`odml.sdpa_transposed`](#odmlsdpa_transposed) | C; U for YNNPACK | MLDrift, YNNPACK |
 | [`odml.rms_norm`](#odmlrms_norm) | C | MLDrift; Qualcomm, MediaTek, NVIDIA and Samsung plugin implementations |
-| [`odml.group_norm`](#odmlgroup_norm) | C | MLDrift, Qualcomm plugin |
+| [`odml.group_norm`](#odmlgroup_norm) | C | MLDrift, Qualcomm; MediaTek plugin for `num_groups=1` |
 | [`odml.l2_norm`](#odmll2_norm) | C | Qualcomm and MediaTek plugins |
 | [`odml.runtime_bmm`](#odmlruntime_bmm) | C; U for YNNPACK | MLDrift, YNNPACK, NVIDIA plugin |
 | [`odml.cache_update`](#odmlcache_update) | C | MLDrift, NVIDIA plugin |
@@ -164,7 +190,7 @@ Notation: `B`=batch, `T`=query/update tokens, `S`=KV length/capacity,
 
 **Converter policy: favor `odml.sdpa_transposed` over
 `odml.scaled_dot_product_attention` for fixed-capacity KV-cache attention when
-the target backend supports the required transposed contract.** The primary
+designing the converter's cache-aware attention contract.** The primary
 reason is to avoid computing over unused cache capacity by supplying the live
 active length. This preference is especially important for MLDrift, whose
 standard SDPA implementation has no active-length operand. The converter must
@@ -182,10 +208,10 @@ layout optimizations are separate from limiting work to the active prefix.
 | XNNPACK CPU | No active-length operand consumed; work follows the supplied K/V extent. | No handler in the checked implementation. |
 | YNNPACK CPU | Supports an optional runtime parameter operand and slices K/V to the active prefix. | Supports the same active-prefix mechanism. |
 
-Backend support still takes precedence: do not emit the transposed op for
-XNNPACK. On YNNPACK, both forms can honor active length, so this particular
-advantage does not distinguish them; choose the form that fits the model's
-layout and verified backend behavior.
+XNNPACK needs the transposed composite's executable decomposition or a future
+native implementation. On YNNPACK, both names can honor active length, so this
+particular advantage does not distinguish them; choose the intended model
+layout and document the available execution path.
 
 In YNNPACK, a fourth integer operand supplies parameters when no mask is
 present; with a mask in slot 3, parameters occupy slot 4. It reads length from
@@ -224,171 +250,122 @@ end-to-end speedup estimate. Benchmark fixed capacity with several active
 lengths, and verify delegation as well as numerical results, to confirm the
 exported model actually benefits.
 
-Sources: [MLDrift standard parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/model_builder.cc),
-[MLDrift transposed kernels](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc),
-[XNNPACK attention visitor](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/xnnpack/xnnpack_delegate.cc),
-[YNNPACK input decoding and slicing](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/attention.cc),
-[YNNPACK live length handling](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/ynnpack_delegate.cc),
-[CPU backend selection](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/c/options/litert_cpu_options.h),
-[YNNPACK accelerator setup](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/runtime/accelerators/ynnpack/ynnpack_accelerator.cc),
-[torch fallback matmul](https://github.com/google-ai-edge/litert-torch/blob/a05e1e1441be1a81f151d21ad62c2fc20ff099bd/litert_torch/generative/export_hf/experimental/composites/runtime_batched_matmul.py).
+Sources: [MLDrift standard parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/model_builder.cc),
+[MLDrift transposed kernels](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc),
+[XNNPACK attention visitor](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/xnnpack/xnnpack_delegate.cc),
+[YNNPACK input decoding and slicing](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/attention.cc),
+[YNNPACK live length handling](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/ynnpack_delegate.cc),
+[CPU backend selection](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/c/options/litert_cpu_options.h),
+[YNNPACK accelerator setup](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/runtime/accelerators/ynnpack/ynnpack_accelerator.cc),
+[torch fallback matmul](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/experimental/composites/runtime_batched_matmul.py).
 
 #### Sharing an SDPA graph between CPU and GPU
 
-The native pair considered here is **YNNPACK CPU + MLDrift GPU**. XNNPACK does
-not supply the transposed handler, and the public CPU runtime does not enable
-YNNPACK by default. A deployment requiring native active-length attention on
-both devices must include and select YNNPACK on CPU.
+Use the following intended converter contract for new shared models. Native
+consumers currently include YNNPACK CPU and MLDrift GPU; XNNPACK can execute
+supported builtins in the decomposition but has no transposed-SDPA handler.
+Backend implementation gaps do not require a different semantic contract.
 
-Assuming no existing `odml.sdpa_transposed` models need compatibility, use one
-canonical contract for new shared models. Several ABI differences can already
-be accommodated in one serialized composite; the cap attribute requires the
-CPU fix identified below before capped models meet this target contract.
-
-| Concern | Target shared graph representation and current implementation status |
-| --- | --- |
-| Layout and output rank | Use rank-4 Q `[B,Nq,T,H]`, K `[B,Nkv,S,H]`, V `[B,Nkv,H,S]`, and output `[B,Nq,T,H]`. Put any output flattening in a subsequent reshape, outside the composite. |
-| Scale | Multiply Q by the model's attention scale before the composite. Omit `scale` or set it to floating `1.0`; YNNPACK's transposed default is 1 and MLDrift expects pre-scaled Q. |
-| Runtime bound | Use runtime `INT32 [1,1,1,7]`; for a simple linear cache, supply the same exact positive length L in elements 1 and 2, with `L<=S`. Keep element 0 consistent with the current query/cache-update offset. Preserve a mask excluding invalid entries, including any padding processed by GPU kernels. |
-| Logit cap | Emit only floating `softcap=C` when the model requires a positive cap C, with the same cap in the decomposition. Torch and MLDrift already use this name. Update YNNPACK to read it for `odml.sdpa_transposed`; do not introduce a `logit_cap` alias without a compatibility requirement. The checked CPU implementation still needs this fix. |
-| Causal semantics | Supply an explicit causal mask using the actual query positions. The GPU fused prefill path also imposes causality internally; YNNPACK relies on the supplied mask. Noncausal attention cannot use that fused prefill path equivalently. |
-| Physical cache layout | Keep logical tensor shapes in the graph. Let the GPU cache writer and its consumers agree on internal packing. Do not set `from_cache_update=true` for ordinary externally supplied K/V just to request a faster kernel. |
-
-This is a **candidate shared representation based on source inspection**, not
-an end-to-end validated model profile. Start validation with batch 1, equal
-query/KV head counts, floating K/V, a linear cache, and single-token decode.
-Do not infer general GQA support from the op name: the fused GPU kernels map
-query heads to KV heads explicitly, while the checked YNNPACK attention
-lowering has no corresponding head-repeat/grouping step. Quantized K/V are
-outside YNNPACK's admission for this op and the GPU SDPA parser retains TODOs
-for them.
-
-The source audit also found semantic discrepancies in masking, causality, and
-cap attributes, detailed below. These need backend correctness fixes rather
-than permanent differences in the CPU and GPU model graphs. They prevent a
-general masked-attention portability claim for the checked revisions.
-
-Sharing the attention node does not establish a shared cache-state contract
-for the whole model. Check cache updates, initialization/reset, aliasing, and
-state feedback on both runtimes. GPU packed state is not automatically a
-portable buffer for switching to CPU midway through a session. Validate the
-same FlatBuffer on both backends across changing and unaligned active lengths,
-prefill/chunk offsets, masks, and any required GQA configuration, checking
-numerical agreement and native delegation. The backend should ultimately own
-alignment and packing behind a consistent semantic contract; converter
-workarounds should not become permanent backend-dependent model semantics.
-
-Sources: [YNNPACK admission and attributes](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/attention.cc#L104),
-[CPU live bound](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/ynnpack_delegate.cc#L382),
-[GPU parameter/layout parsing](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/ir/sdpa_transposed_parser.cc#L134),
-[GPU decode fast loop](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc#L218),
-[GPU decode tail mask](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc#L328),
-[GPU prefill causality](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc#L566).
-
-#### Correctness fixes for a shared SDPA contract
-
-The following findings can change numerical results for the same serialized
-composite. They are based on the checked source and its emitted decomposition;
-the illustrative regression cases below have not been executed on GPU.
-
-| Implementation | Discrepancy | Fix to request |
+| Concern | Intended serialized representation | Current backend status |
 | --- | --- | --- |
-| MLDrift fused decode | The 16-token fast loop omits the supplied mask/bias. Only the tail loop applies it. The runtime active bound does not replace a mask within the active prefix. | Apply boolean/additive masks before online softmax in every loop, or disable the unmasked fast loop when a mask is supplied. |
-| MLDrift fused prefill | Q is multiplied by `1/ln(2)` for an `exp2` softmax, but finite additive mask values are added without that conversion. This effectively scales the model's additive bias by `ln(2)`. | Convert additive mask/bias values to the same base-2 logit units before adding them. |
-| MLDrift fused prefill | Kernel selection depends on shapes, cache origin, storage, and GPU, then the kernel unconditionally imposes causal masking. The decomposition and CPU implementation follow the supplied mask; they do not imply causality from these conditions. | Preserve arbitrary mask semantics, or select the causal specialization only when causality is explicitly established. Fall back to an equivalent native path otherwise. |
-| YNNPACK SDPA | Torch emits `softcap`, which MLDrift consumes, but YNNPACK only reads `logit_cap`. A model containing only `softcap` silently loses capping on CPU. | Standardize `odml.sdpa_transposed` on `softcap` and update YNNPACK accordingly. With no existing models to preserve, no alias or conflict-resolution rule is needed. The separate standard-SDPA contract is unaffected. |
-| YNNPACK boolean masking | CPU adds `-10000` to a false-mask logit; the emitted decomposition and GPU multi-operation path replace that logit with `-10000`. These are different functions. | Implement the same boolean selection semantics as the composite contract, including its masked fill value. Do not approximate replacement by a finite additive penalty. |
+| Layout/output | Q/output `[B,Nq,T,H]`, K `[B,Nkv,S,H]`, V `[B,Nkv,H,S]`; flatten decode output with a following reshape. | Torch now marks the rank-4 output before flattening. MLDrift can fuse the following decode reshape internally; YNNPACK requires rank 4 at the composite boundary. |
+| GQA | Require `Nq % Nkv == 0`; query head h uses KV head `h // (Nq/Nkv)`. Keep heads separate from tokens at the boundary. | Torch packs query heads only inside the fallback decomposition to avoid copying K/V. MLDrift's multi-operation path now handles this mapping. YNNPACK uses 5D broadcasting for transposed prefill and folding for decode. |
+| Scale | Pre-scale Q once; omit `scale` or use floating `1.0`. | MLDrift expects pre-scaled Q; YNNPACK's transposed default is 1. |
+| Runtime bounds | Supply live `INT32 [1,1,1,7]` parameters, an accurate query offset, and a mask covering the semantic active prefix. | YNNPACK reads element 1; MLDrift reads element 2 and some kernels require aligned work bounds. See the alignment caveat below. |
+| Logit cap | Emit floating `softcap=C` for positive C and reproduce it in the decomposition. | MLDrift reads `softcap`, with `logit_cap` as a fallback alias. YNNPACK still reads only `logit_cap`; canonical `softcap` support remains backend work. |
+| Causality | Emit boolean `is_causal`, true only when runtime bounds/positions fully reproduce the causal mask. Keep the explicit mask in the serialized graph/decomposition. | MLDrift may prune a BOOL mask on eligible Apple paths. YNNPACK follows the supplied mask and does not read `is_causal`. |
+| State | Keep logical cache shapes and explicit fallback state updates. | Native GPU cache packing, initialization, and aliasing remain runtime responsibilities. `from_cache_update` describes actual packed cache origin, not a generic optimization hint. |
 
-Small regression cases to attach to these fixes:
+The exact active length L and an aligned GPU work bound are not interchangeable.
+The current ATS cases use a 32-aligned L in both elements 1 and 2. For unaligned
+lengths, an aligned element 2 can include padding that the explicit mask must
+exclude. Fused kernels also read element 2 as `active_tokens`; mask pruning
+therefore requires checking that their causal bounds and valid-query handling
+still reproduce the mask, including partial chunks. Do not infer this from
+`is_causal=true` alone or treat aligned ATS coverage as proof for exact lengths.
+The intended contract remains the model's exact valid-token semantics; any
+alignment discrepancy belongs in the backend implementation.
 
-- **Decode mask:** packed-cache Apple decode, `B=Nq=Nkv=T=1`, `H=128`,
-  `S=L=256`, Q/K all zero. Set the first 16 V tokens to 1 and the rest to 0,
-  and exclude the first 16 tokens with the mask. Correct output is 0;
-  ignoring that mask gives `16/256 = 0.0625`. This shape exercises the fast
-  loop, not just the tail.
-- **Prefill additive bias:** in an eligible causal prefill row with two
-  allowed keys, zero QK scores, V values `[0,1]`, and additive biases `[0,1]`,
-  correct output is `e/(1+e) ~= 0.7311`. Adding the bias in base-2 units gives
-  `2/(1+2) ~= 0.6667`.
-- **Prefill causality:** eligible packed-cache prefill with `T=3`, `L=3`,
-  query offset 0, zero QK scores, V token values `[0,0,1]`, and a mask allowing
-  all three valid keys. The first query should return `1/3`; forced causality
-  returns 0. Exclude unused capacity if S is larger than 3.
-- **Cap attribute:** serialize only `softcap=1.0`. For logits `[0,4]` and V
-  values `[0,1]`, the result must use `softmax([0,tanh(4)])`, not
-  `softmax([0,4])`, on both devices.
-- **Boolean mask:** logits `[0,20000]`, mask `[true,false]`, and V values
-  `[0,1]`. Replacement gives logits `[0,-10000]` and output near 0; the CPU's
-  additive implementation gives `[0,10000]` and output near 1.
+Validate cache allocation, initialization/reset, state feedback, and masking
+on both runtimes. GPU packed state is not automatically a portable buffer for
+switching to CPU midway through a session. Source support for a dtype, GQA, or
+layout is not an end-to-end performance or numerical validation result.
 
-Keep capability/ABI issues separate from these correctness bugs. Parameter
-element 1 versus element 2 can intentionally distinguish exact and aligned
-lengths; their names alone do not prove a defect. Rank-4 output admission,
-YNNPACK deployment, and missing GQA/quantized support need explicit contracts
-or support work. Backend-specific physical packing is compatible with one
-logical graph when state ownership and boundary conversions are correct.
+Sources: [torch composite boundary and fallback](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/experimental/composites/sdpa.py),
+[YNNPACK attention](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/attention.cc),
+[GPU parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/ir/sdpa_transposed_parser.cc),
+[GPU kernels](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc),
+[decode reshape fusion](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/fuse_sdpa_transposed_reshape.cc),
+[aligned ATS inputs](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/test/generators/sdpa_transposed.h),
+[GPU bound alignment](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/task/gpu_operation.h).
 
-Sources: [decode fast loop](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc#L218),
-[decode tail mask](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc#L328),
-[prefill Q conversion](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc#L614),
-[prefill mask and causal rule](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc#L736),
-[prefill exp2](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc#L755),
-[CPU cap parsing](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/attention.cc#L227),
-[CPU boolean mask conversion](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/attention.cc#L264),
-[emitted cap and mask semantics](https://github.com/google-ai-edge/litert-torch/blob/a05e1e1441be1a81f151d21ad62c2fc20ff099bd/litert_torch/generative/export_hf/experimental/composites/sdpa.py#L432).
+#### Correctness status and backend follow-up
+
+Several GPU findings in the September 17 audit have been fixed upstream.
+Keep the regression cases, but do not describe those old implementations as
+current behavior:
+
+| Area | Status at the checked revisions |
+| --- | --- |
+| Fused decode masks and softcap | The fast loop now applies masks and softcap as well as the tail. The later unified Metal/OpenCL implementation retains explicit mask handling. |
+| Fused prefill additive bias | Additive bias is now multiplied by `1/ln(2)` to match the base-2 softmax logits. |
+| Fused prefill causality | `is_causal` defaults false; causal bounds are conditional on the attribute. A noncausal mask is no longer overridden merely because the fused prefill kernel was selected. |
+| GPU GQA fallback | Query heads are grouped for matmuls and restored for mask application/output, matching the contiguous head mapping. |
+| YNNPACK cap attribute | Still reads only `logit_cap`. A converter emitting canonical `softcap` must use its decomposition or a backend with the attribute implemented to preserve capped results today. |
+| YNNPACK BOOL masks | Still converts false to an additive `-10000` penalty. Torch/GPU decomposition semantics replace the logit with `-10000`; extreme logits distinguish these functions. |
+
+Useful converter/backend regression cases are: a masked prefix spanning the
+fused decode fast loop; finite additive prefill biases; noncausal prefill with
+future keys allowed; `softcap=1.0` with saturating logits; BOOL replacement with
+an excluded large positive logit; GQA prefill with different masks per query;
+and exact/unaligned active lengths with partial chunks. Include all-masked
+rows explicitly if the model permits them: fused kernels use large-negative
+sentinels and special handling that should not be assumed identical to a
+finite-fill decomposition in every numerical corner case.
+
+These remaining backend gaps do not change the recommended `softcap` spelling,
+BOOL selection semantics, or logical layout for new converter output. Keep
+compatibility workarounds explicit and reproduce the same math in fallback.
+
+Sources: [GPU fixes](https://github.com/google-ai-edge/LiteRT/commit/77a7a2ce9bc88d003273d7bd0e84cf5f4f8123ff),
+[GPU GQA fix](https://github.com/google-ai-edge/LiteRT/commit/6d59736316f2e63d215904c152059f8d81aaec95),
+[current fused kernels](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc),
+[current CPU attributes and masking](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/attention.cc).
 
 #### What the current ATS coverage establishes
 
-ATS includes `SdpaTransposed`: the generator was added in commit `5e529eda5`
-on 2026-09-10. Registration requests 16 grid cases for each combination of
-float32/float16, mask presence, softcap presence, and parameter presence
-(256 cases before filters or generation failures). Inference uses a numerical
-reference evaluator for the generated decomposition. That is useful coverage,
-but it does not exercise several contracts discussed above:
+The `SdpaTransposed` registration still requests 16 grid cases for each
+float32/float16, mask, softcap, and parameter combination (256 before filters
+or generation failures). Its generator has changed substantially:
 
-| Coverage gap | What the checked ATS source actually does | Consequence |
-| --- | --- | --- |
-| Fused packed-cache kernels | K/V are ordinary graph inputs; there is no `odml.cache_update` producer or `from_cache_update=true` attribute. | The Apple fused decode and prefill paths are not selected. Their mask and causality bugs are outside these cases. |
-| Boolean and nontrivial additive masks | `Params::bool_mask` is assigned from the grid but never used to build inputs or the graph. Every emitted mask has the floating Q/K/V dtype and contains only zeros. | No boolean selection, masked-out token, or finite additive bias is tested. Ignoring the mask entirely would be indistinguishable for these inputs. |
-| Partial active cache | Parameters are zero-filled, then only element 2 is set to `kv_len`. The reference ignores parameters. | GPU uses full capacity; CPU element 1 remains zero, which also selects full capacity. Neither shorter active lengths nor the exact/aligned field distinction is checked. |
-| Native decode/GQA layouts | Q is `[B,Nkv,num_q_heads,H]`, while K/V also have Nkv heads. The native parser interprets Q's third axis as query length, which is 4 or 8 throughout the grid. | Labels such as "Decode" and "GQA" do not establish coverage of `T=1` or the native `[B,Nq,T,H]` to `[B,Nkv,S,H]` head mapping. |
-| CPU equivalence | `cpu_ats` and the base `ats` target's default arguments exclude `SdpaTransposed`; CPU option setup does not enable YNNPACK. | These default targets do not check YNNPACK's cap-attribute or boolean-mask semantics against GPU/reference results. |
-| Strong softcapping | The cap is always 50, with small random K/V values and Q scaled by `1/sqrt(H)`. | This weakly exercises the nonlinear cap; an omitted cap can be hidden by numerical tolerance. Use deliberately saturating logits and a small cap for a decisive test. |
+| Area | Current coverage and limits |
+| --- | --- |
+| Layout and GQA | Q is now `[B,Nq,T,H]`; query length is independent of head count. The decomposition groups contiguous query heads correctly. |
+| Masks | Actual BOOL masks include holes inside the active prefix; floating masks include finite negative biases and excluded keys. The BOOL reference uses selection rather than an additive penalty. |
+| Active cache | Parameters include a query offset and matching lengths in elements 1/2. Where possible, length is below capacity and rounded to a multiple of 32. Unaligned bounds and live changes across calls still need separate tests. |
+| Softcap | Cap is now 1.0, and both `softcap` and `logit_cap` are emitted. This improves numerical sensitivity but does not test a `softcap`-only contract on YNNPACK. |
+| Fused packed-cache paths | K/V remain ordinary inputs, with no cache-update producer or `from_cache_update=true`. The cases do not establish coverage of packed Flash kernels or causal-mask pruning. No `is_causal` attribute is emitted. |
+| CPU suite | Default CPU targets still exclude `SdpaTransposed` and do not enable YNNPACK. They do not establish CPU/GPU equivalence for this composite. |
 
-Suite selection matters too: the device `gpu_ats` target's positive filter
-selects `SingleOp` and selected model names, while this registration uses
-`CompositeOp`. It therefore does not include these cases by default. The
-`metal_macos_ats` target can include them, but is tagged `manual` and still uses
-the same generator without packed-cache producers. These statements describe
-the source configuration; no CI pass/fail history or hardware ATS rerun was
-used to establish this audit.
+The device `gpu_ats` registration now includes `SdpaTransposed` explicitly;
+the earlier claim that its positive filter excludes these cases is obsolete.
+Suite configuration and source tests are evidence of coverage intent, not a
+claim that this refresh ran ATS on hardware. Add cache-update-to-attention
+models and explicitly enabled YNNPACK execution for portability testing; verify
+which native path was selected and compare against independent model math.
 
-To make ATS a portability check, add an explicitly enabled YNNPACK CPU suite
-and execute the same serialized models on CPU and GPU against an independent
-semantic reference. Add cache-update-to-attention graphs and verify selection
-of the intended fused/native path. Vary query length independently of head
-counts; include native GQA, actual boolean masks, finite biases, causal and
-noncausal masks, small/saturating caps, and changing positive active lengths
-below capacity (including unaligned lengths). The reference must honor the
-active-prefix contract for those new cases. Include the targeted regressions
-listed above; increasing random iterations of the current generator cannot
-cover code paths and semantics that its graphs never represent.
-
-Sources: [ATS registration](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/ats/register_sdpa_transposed.cc#L32),
-[grid iteration count](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/ats/register_composite_ops.cc#L28),
-[generated inputs and parameters](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/test/generators/sdpa_transposed.h#L151),
-[generated graph and reference](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/test/generators/sdpa_transposed.h#L253),
-[CPU exclusions](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/ats/BUILD#L35),
-[device GPU inclusion filter](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/ats/BUILD#L202),
-[Metal suite](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/ats/BUILD#L362),
-[CPU runtime options](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/ats/configure.cc#L187),
-[numerical comparator](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/ats/inference_fixture.h#L312).
+Sources: [ATS registration](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/ats/register_sdpa_transposed.cc),
+[grid iteration count](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/ats/register_composite_ops.cc),
+[current generator/reference](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/test/generators/sdpa_transposed.h),
+[suite filters](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/ats/BUILD),
+[CPU options](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/ats/configure.cc).
 
 #### MLDrift work still tied to cache capacity
 
-The specialized MLDrift implementation itself selects either an Apple fused
-kernel or a multi-operation GPU graph in `BuildSdpaTransposedGpuGraph`. Both
-execute within the native implementation after delegation. The observations
+The specialized MLDrift implementation itself selects either a fused kernel
+(Apple Metal prefill/decode or OpenCL decode) or a multi-operation GPU graph in
+`BuildSdpaTransposedGpuGraph`. Both execute within the native implementation
+after delegation. The observations
 here concern that native GPU graph, independently of the composite's TFLite
 fallback decomposition.
 
@@ -401,7 +378,7 @@ stage of either native path proportional to that bound.
 | Stage | When it occurs | Work that still depends on capacity S |
 | --- | --- | --- |
 | Boolean mask application | Multi-operation path with a boolean mask, including packed-cache attention. | `SelectV2(mask, logits, -10000)` receives no runtime bound and traverses the full score tensor. This kernel is not linkable into QK by the checked elementwise merger. |
-| K/V transpose and packing | Generic `BatchedMatMul` path (`from_cache_update=false`) when the direct fully connected implementation is not selected. | The RHS transpose and `WeightsConversion(..., Layout::HWIO, ...)` receive no runtime bound. They process full-capacity K/V even though the following matmul receives the bound. |
+| K/V transpose and packing | Generic `BatchedMatMul` path (`from_cache_update=false`) when the direct fully connected implementation is not selected. | The RHS transpose and weight conversion receive no runtime bound. They process full-capacity K/V even though the following matmul receives the bound. |
 | Final softmax normalization | Generic path when `Softmax` selects its two-pass implementation: score rows per GPU compute unit >= 256. | The reduction receives the bound, but `SoftmaxElementwise` / `CreateSoftmaxFinal` computes `exp(logit-max)/sum` over the full score tensor without it. |
 | Redundant softmax reductions | Generic path when `SelectSoftmax` chooses `Softmax1x1` and the full-capacity output requires multiple workgroups. | Dispatch uses the full number of output slices. Every workgroup performs the active-prefix reduction before checking whether its output slice is active, so groups entirely beyond the bound still repeat that reduction. They do not scan inactive keys, but their redundant work depends on S. |
 
@@ -417,8 +394,10 @@ The packed-cache multi-operation path already uses a bound-aware weights
 converter when repacking is needed, then `SoftmaxReduce` with normalization
 fused into the value matmul. It therefore avoids the generic transpose/packing
 and separate-normalization gaps above, but its boolean `SelectV2` remains.
-The selected Apple fused prefill/decode kernels use active-prefix loops and
-avoid these separate intermediate passes. Selection requirements are listed
+The selected fused prefill/decode kernels use active-prefix loops and
+avoid these separate intermediate passes. Eligible Apple causal paths also
+prune the BOOL mask; retained masks in the multi-operation path still incur
+the selection pass described above. Selection requirements are listed
 under [`odml.sdpa_transposed`](#odmlsdpa_transposed).
 
 Intermediate allocations and some dispatch grids also retain capacity-sized
@@ -428,16 +407,16 @@ inactive workgroups. Mask construction outside the composite likewise does
 not acquire a bound merely because SDPA consumes one. These are source-audit
 findings; their latency impact requires profiling the selected path.
 
-Sources: [SDPA graph construction](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc#L854),
-[boolean selection kernel](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/kernels/select_v2.cc#L25),
-[generic matmul preparation](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/gpu_model_builder.cc#L3213),
-[softmax path selection](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/gpu_model_builder.cc#L2315),
-[unbounded final normalization](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/kernels/softmax.cc#L344),
-[Softmax1x1 reduction and dispatch](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/kernels/softmax1x1.cc#L182),
-[softmax selector](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/selectors/simple_selectors.cc#L205),
-[node linking](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/merge_nodes.cc#L362),
-[packed-cache weights conversion](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/gpu_model_builder.cc#L1141),
-[runtime-bound alignment](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/task/gpu_operation.h#L343).
+Sources: [SDPA graph construction](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc),
+[boolean selection kernel](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/kernels/select_v2.cc),
+[generic matmul preparation](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/gpu_model_builder.cc),
+[softmax path selection](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/gpu_model_builder.cc),
+[unbounded final normalization](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/kernels/softmax.cc),
+[Softmax1x1 reduction and dispatch](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/kernels/softmax1x1.cc),
+[softmax selector](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/selectors/simple_selectors.cc),
+[node linking](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/merge_nodes.cc),
+[packed-cache weights conversion](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/gpu_model_builder.cc),
+[runtime-bound alignment](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/task/gpu_operation.h).
 
 ### `odml.scaled_dot_product_attention`
 
@@ -470,7 +449,9 @@ The legacy MLDrift composite parser reads `scale` but does not read `logit_cap`;
 do not select it for capped attention unless the cap is implemented elsewhere.
 The intended math is `softmax(cap_if_requested(scale*Q@K^T)+mask)@V`.
 
-YNNPACK additionally accepts float16/bfloat16 tensors, boolean masks
+YNNPACK currently requires equal Q/K/V head counts for this sequence-major
+entry point; its new native GQA handling is admitted for `odml.sdpa_transposed`.
+It additionally accepts float16/bfloat16 tensors, boolean masks
 (true=keep; false is converted to additive -10000), and an optional runtime
 length operand as described under `odml.sdpa_transposed`. Its Q/K/V/output
 admission is floating-only and rank 4. Validate these extensions against the
@@ -482,9 +463,9 @@ XNNPACK also transposes internally, so preserving this op alone does not prove
 a performance gain. Emit floating attributes and preserve scale application
 exactly once in both the native path and decomposition.
 
-Sources: [XNNPACK visitor](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/xnnpack/xnnpack_delegate.cc),
-[YNNPACK visitor](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/attention.cc),
-[MLDrift composite parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/model_builder.cc).
+Sources: [XNNPACK visitor](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/xnnpack/xnnpack_delegate.cc),
+[YNNPACK visitor](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/attention.cc),
+[MLDrift composite parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/model_builder.cc).
 
 ### `odml.rms_norm`
 
@@ -514,17 +495,18 @@ attribute. Only select it when that matches the model. The compiler control
 names (comma-separated `rms_norm,cache_update,runtime_bmm`), or use `none` to
 inline them; unset enables the supported native paths.
 
-Sources: [MLDrift parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/model_builder.cc),
-[IR conversion](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/convert/convert_rms_norm.cc),
-[IR admission](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/support/support_rms_norm.cc),
-[Qualcomm builder](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/qualcomm/core/builders/rms_norm_op_builder.cc),
-[MediaTek dispatch](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/mediatek/compiler/create_model.cc),
-[NVIDIA builder](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/nvidia/compiler/tensorrt_graph_builder.cc),
-[Samsung builder](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/samsung/compiler/builders/rms_norm_op_builder.cc).
+Sources: [MLDrift parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/model_builder.cc),
+[IR conversion](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/convert/convert_rms_norm.cc),
+[IR admission](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/support/support_rms_norm.cc),
+[Qualcomm builder](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/qualcomm/core/builders/rms_norm_op_builder.cc),
+[MediaTek dispatch](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/mediatek/compiler/create_model.cc),
+[NVIDIA builder](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/nvidia/compiler/tensorrt_graph_builder.cc),
+[Samsung builder](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/samsung/compiler/builders/rms_norm_op_builder.cc).
 
 ### `odml.group_norm`
 
-Preserved composite handled by MLDrift and Qualcomm. Ordered operands are
+Preserved composite handled by MLDrift and Qualcomm; MediaTek additionally
+recognizes the `num_groups=1` specialization. Ordered operands are
 floating channel-last `x`, constant floating `gamma[C]`, constant floating
 `beta[C]`; output has x's shape and type. Use float32 for the common contract.
 Group normalization computes `(x-mean)*rsqrt(variance+epsilon)*gamma+beta`
@@ -546,14 +528,22 @@ for backward compatibility. Do not infer GroupNorm solely from the name.
 For subtype 1, normalize the last channel dimension per location; this is not
 general multiaxis LayerNorm.
 
+MediaTek's current options-aware path admits `num_groups=1` and lowers to
+`NEURON_LAYER_NORMALIZATION`, reading `epsilon` and `channel_axis` (default
+last dimension). Its older name-only path still recognizes only RMS/L2 norm.
+This is a LayerNorm specialization, not evidence for arbitrary spatial
+GroupNorm or G>1; match the reduction axes and decomposition.
+
 Qualcomm has its own group/layer lowering and maps `num_groups==1` to its layer
 builder. Check that the chosen reduction dimensions agree with the model and
 decomposition before selecting that path. Attributes tolerated by one parser
 do not change another backend's normalization axes.
 
-Sources: [MLDrift dispatch and normalization checks](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/model_builder.cc),
-[Qualcomm group builder](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/qualcomm/core/builders/group_norm_op_builder.cc),
-[Qualcomm composite mapping](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/qualcomm/compiler/qnn_compose_graph.cc).
+Sources: [MLDrift dispatch and normalization checks](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/model_builder.cc),
+[Qualcomm group builder](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/qualcomm/core/builders/group_norm_op_builder.cc),
+[MediaTek admission](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/mediatek/compiler/legalizations/common_op_legalization.cc),
+[MediaTek LayerNorm lowering](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/mediatek/compiler/legalizations/layer_norm_op_legalization.cc),
+[Qualcomm composite mapping](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/qualcomm/compiler/qnn_compose_graph.cc).
 
 ### `odml.l2_norm`
 
@@ -569,10 +559,10 @@ especially at zero and tiny norms. Use float32 unless a target-specific
 quantized path is verified. Builtin `L2_NORMALIZATION` has its own contract and
 is not automatically interchangeable with every epsilon placement.
 
-Sources: [decomposition](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/test/testdata/l2_norm_composite.mlir),
-[Qualcomm builder](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/qualcomm/core/builders/l2_norm_op_builder.cc),
-[MediaTek dispatch](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/mediatek/compiler/create_model.cc),
-[MediaTek attribute handling](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/mediatek/compiler/legalizations/common_op_legalization.cc).
+Sources: [decomposition](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/test/testdata/l2_norm_composite.mlir),
+[Qualcomm builder](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/qualcomm/core/builders/l2_norm_op_builder.cc),
+[MediaTek dispatch](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/mediatek/compiler/create_model.cc),
+[MediaTek attribute handling](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/mediatek/compiler/legalizations/common_op_legalization.cc).
 
 ### `odml.runtime_bmm`
 
@@ -615,9 +605,12 @@ not a substitute for this metadata.
 | 3 | Cache-update ring-buffer update length, when ring mode is enabled. |
 | 4..6 | Not read by the implementations described here. |
 
-A common linear-cache invocation sets `[start,start+T,start+T,0,0,0,0]`.
-The executor must fill live values; zero-filled export examples must not become
-constants. Choose source/destination bounds consistent with the mask and cache.
+For a linear cache, element 0 is `start` and element 1 is `start+T`; element 2
+supplies the GPU work bound. A 32-aligned `start+T` can use
+`[start,start+T,start+T,0,0,0,0]` directly. For other lengths, check the selected
+kernel's alignment and retain masking of any padded work, as discussed in the
+shared-SDPA section. The executor must fill live values; zero-filled export
+examples must not become constants.
 
 YNNPACK reads active length from element **1**, not 2 (a one-element parameter
 tensor uses element 0). Nonpositive values leave the full capacity selected;
@@ -635,12 +628,12 @@ or inactive value probabilities to be zero. It dequantizes using tensor
 metadata. Do not select this path for a standalone BMM that requires the
 inactive output region to match a runtime-bounded placeholder exactly.
 
-Sources: [MLDrift parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/runtime_batched_matmul_parser.cc),
-[IR parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/ir/runtime_batched_matmul_parser.cc),
-[YNNPACK lowering](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/dot.cc),
-[live parameter reading](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/ynnpack_delegate.cc),
-[NVIDIA implementation](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/nvidia/compiler/tensorrt_graph_builder.cc),
-[torch emitter](https://github.com/google-ai-edge/litert-torch/blob/a05e1e1441be1a81f151d21ad62c2fc20ff099bd/litert_torch/generative/export_hf/experimental/composites/runtime_batched_matmul.py).
+Sources: [MLDrift parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/runtime_batched_matmul_parser.cc),
+[IR parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/ir/runtime_batched_matmul_parser.cc),
+[YNNPACK lowering](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/dot.cc),
+[live parameter reading](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/ynnpack_delegate.cc),
+[NVIDIA implementation](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/nvidia/compiler/tensorrt_graph_builder.cc),
+[torch emitter](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/experimental/composites/runtime_batched_matmul.py).
 
 ### `odml.cache_update`
 
@@ -696,67 +689,93 @@ checks. That specialization uses parameter 0 for offset and 3 for valid update
 length. Do not assume a node accepted by its generic quantized path has these
 prefill semantics.
 
-Sources: [MLDrift parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/add_values_to_cache_parser.cc),
-[packing and ring-buffer kernel](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/add_values_to_cache_kernel.cc),
-[NVIDIA implementation](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/vendors/nvidia/compiler/tensorrt_graph_builder.cc),
-[seven-input decomposition](https://github.com/google-ai-edge/litert-torch/blob/a05e1e1441be1a81f151d21ad62c2fc20ff099bd/litert_torch/generative/export_hf/experimental/composites/cache_update.py).
+Sources: [MLDrift parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/add_values_to_cache_parser.cc),
+[packing and ring-buffer kernel](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/add_values_to_cache_kernel.cc),
+[NVIDIA implementation](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/vendors/nvidia/compiler/tensorrt_graph_builder.cc),
+[seven-input decomposition](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/experimental/composites/cache_update.py).
 
 ### `odml.sdpa_transposed`
 
-This attention composite uses head-major tensors and can consume MLDrift's
-packed K/V cache. It is distinct from `odml.scaled_dot_product_attention`.
-MLDrift handles the composite; YNNPACK recognizes both composite and same-name
-`CUSTOM` forms. A custom form still needs registration and has no decomposition.
+This preserved attention composite uses head-major tensors and can consume
+MLDrift's packed K/V cache. It is distinct from
+`odml.scaled_dot_product_attention`. MLDrift handles the composite; YNNPACK
+also recognizes the same-name `CUSTOM` form, which requires registration and
+has no attached decomposition.
 
 | Slot | Tensor | Converter contract |
 | --- | --- | --- |
-| input 0 | `query` | Floating point `[B, Nq, T, H]`; **already multiplied by the attention scale**. |
-| input 1 | `key` | Floating point, logical `[B, Nkv, S, H]` for `k_ts_idx=2`. |
-| input 2 | `value` | Floating point, logical `[B, Nkv, H, S]` for `v_ts_idx=3`. |
-| input 3 | `mask` or `param_tensor` | Four-input form: `INT32` means runtime parameters; another type means mask. A boolean mask means true=keep; floating masks are additive. |
-| input 4 | `param_tensor` | Five-input form: mask is slot 3, `INT32` runtime parameters are slot 4. Index 2 is the active-channel bound. |
-| output 0 | `output` | Normally `[B, Nq, T, H]`. The torch decode emitter uses `[B, 1, Nq*H]` for `T=1`; verify the selected backend supports this flattening. |
+| input 0 | `query` | Floating `[B,Nq,T,H]`, **already multiplied by the attention scale**. |
+| input 1 | `key` | Floating, logical `[B,Nkv,S,H]` for `k_ts_idx=2`. |
+| input 2 | `value` | Floating, logical `[B,Nkv,H,S]` for `v_ts_idx=3`. |
+| input 3 | `mask` or `param_tensor` | Four-input form: `INT32` means parameters; otherwise mask. BOOL true=keep, false=replace with `-10000`; floating masks are additive. |
+| input 4 | `param_tensor` | Five-input form: mask at slot 3, runtime `INT32 [1,1,1,7]` parameters at slot 4. MLDrift reads active bound at index 2. |
+| output 0 | `output` | Floating `[B,Nq,T,H]`. Put decode flattening to `[B,1,Nq*H]` outside the composite. |
 
-The torch emitter records integer `k_ts_idx` and `v_ts_idx`, plus optional float
-`softcap`. Its decomposition computes matmul, optional
-`softcap*tanh(logits/softcap)`, masking, softmax, then the value matmul. MLDrift's
-composite parser reads `softcap` and optional boolean `from_cache_update`; it
-does **not** read `k_ts_idx`/`v_ts_idx` to transpose arbitrary tensors. Use the
-physical layout its selected kernel expects. Quantized cache support in the
-ordinary runtime-BMM path does not imply support here: the SDPA parser retains
-explicit TODOs for quantized weights.
+MLDrift admits 3–5 runtime inputs and one output. The three-input form is
+unmasked attention. For GQA require `Nq % Nkv == 0` and map query head h to
+KV head `h // (Nq/Nkv)`. Do not pack heads into T at the composite boundary.
 
-MLDrift checks 3–5 runtime inputs and one output. Its fused Apple GPU prefill
-path requires cache-produced packed buffer storage, `H % 4 == 0`, and `H <= 128`;
-the fused decode path requires `H == 128`. Other configurations use its
-multi-operation GPU graph. The fused prefill kernel applies causal masking
-using absolute token positions; a converter must preserve that semantic
-assumption. Do not pack GQA heads into the token axis for this fused path.
+| FlexBuffers attribute | Converter meaning / consumer behavior |
+| --- | --- |
+| `k_ts_idx=2`, `v_ts_idx=3` | Integer logical time axes used by the torch decomposition. MLDrift does not use these attributes to transpose arbitrary input layouts. |
+| `softcap` | Optional positive float C: `C*tanh(logits/C)` before masking. MLDrift reads this first, otherwise `logit_cap`; YNNPACK still reads only `logit_cap`. Use canonical `softcap` for new exports. |
+| `is_causal` | Boolean, default false. True promises that explicit mask semantics are fully represented by causal positions and the active cache bound. This is permission to remove the mask on an eligible path. |
+| `from_cache_update` | Optional boolean identifying MLDrift cache-produced packed K/V. The parser also infers it from a visible cache-update producer. Do not assert it for ordinary external K/V. |
 
-The torch emitter's CPU decomposition contains ordinary matmuls and a mask;
-runtime parameters are retained through zero-valued dependencies. Compare
-decomposition and delegated results using the same live cache contents and
-mask, including padded tokens and nonzero cache offsets.
+Set `is_causal=true` only after proving the mask is purely causal. Sliding
+windows, bidirectional image spans, arbitrary padding/attention patterns, and
+finite additive biases need their explicit mask unless their complete semantics
+are otherwise represented. The torch helper defaults false; the top commit's
+export path opts in only for known causal text-generation models, global
+layers, and modules that permit causality. A missing module `is_causal` uses
+true only within that already gated export path. Task/model names alone are
+not a general-purpose causality test for a direct converter.
 
-YNNPACK reads float `scale` (default **1.0** for this transposed name) and
-positive float `logit_cap`; MLDrift reads `softcap` and expects Q already
-scaled. These cap attributes are not aliases across backends. For new shared
-models with no compatibility requirement, the target contract above uses only
-`softcap`; YNNPACK must be fixed before capped models are portable.
+Keep the mask operand and its semantics in the serialized decomposition.
+In the checked Apple-build parsers, pruning requires all of `is_causal=true`,
+cache origin, runtime parameters, a BOOL mask, and either eligible prefill
+(`H % 4 == 0`, `H <= 128`) or single-token decode with `H == 128`.
+The intended Metal fused path then uses `key < active_tokens` and
+`key <= q_start + query_index`. Missing `is_causal` retains the mask. Older
+runtimes can ignore the extra attribute while still using that mask. Do not
+remove host mask construction merely because the attribute was emitted:
+that requires runtime confirmation that every relevant consumer can skip it.
 
-YNNPACK's live length uses parameter element **1**, while MLDrift uses element
-2. A nonpositive YNNPACK length selects full capacity. YNNPACK admits float32,
-float16, or bfloat16 Q/K/V/output and requires all four to have rank 4; it
-rejects quantized K/V at this entry point. Its parameter may be int32 or int64.
-A boolean false mask becomes additive -10000, which is not identical to
-negative infinity for every input. Emit attributes and masks for the selected
-consumer and verify capped/masked results against the decomposition.
+Kernel selection is broader than mask pruning. Current fused prefill requires
+Apple Metal, cache-produced buffer storage, `H % 4 == 0`, and `H <= 128`.
+Fused decode now supports Apple Metal **and OpenCL**, with buffer K/V,
+`H % 4 == 0`, `S % 4 == 0`, divisible head counts, and device workgroup limits.
+Its mask, if present, must be shared across heads, have one row or T rows,
+and cover S entries. The parser treats `T>2` or batch greater than 1 as prefill;
+other cases can enter decode. The `H==128` restriction now describes the
+special wave-SIMD implementation and the narrow mask-pruning guard, not all
+fused decode support. Other configurations use the native multi-operation
+GPU graph. Quantized K/V remain TODOs in this SDPA parser.
 
-Sources: [emitter](https://github.com/google-ai-edge/litert-torch/blob/a05e1e1441be1a81f151d21ad62c2fc20ff099bd/litert_torch/generative/export_hf/experimental/composites/sdpa.py),
-[MLDrift parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/ir/sdpa_transposed_parser.cc),
-[GPU kernels](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc),
-[YNNPACK contract](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/attention.cc),
-[YNNPACK live length](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/ynnpack_delegate.cc).
+Torch now keeps the composite boundary/output rank 4, packs GQA only inside
+its decomposition, and applies the final decode reshape after `mark_outputs`.
+MLDrift can fuse that following reshape itself. Runtime parameters are retained
+through zero-valued dependencies in the torch fallback matmuls; fallback still
+computes full extent and relies on the mask for valid-token semantics.
+The torch helper also converts a floating mask to `mask == 0` when parameters
+are present. A direct converter must preserve finite additive bias instead of
+copying that conversion for arbitrary floating masks.
+
+YNNPACK accepts float32/float16/bfloat16 rank-4 Q/K/V/output and floating or BOOL
+masks. Its parameter may be int32 or int64 and supplies active length at index
+1; nonpositive selects full capacity. It defaults `scale` to 1.0 for this name,
+implements GQA, and still converts false BOOL entries to additive `-10000`.
+See the shared-contract section for cap, BOOL, and exact/aligned-bound gaps.
+
+Sources: [torch emitter](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/experimental/composites/sdpa.py),
+[task/model gating](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/core/exportable_module.py),
+[layer gating](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/core/attention.py),
+[legacy GPU parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/sdpa_transposed_parser.cc),
+[IR GPU parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/ir/sdpa_transposed_parser.cc),
+[GPU kernels and selection](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/sdpa_transposed_kernel.cc),
+[decode reshape fusion](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/fuse_sdpa_transposed_reshape.cc),
+[YNNPACK contract](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/attention.cc),
+[YNNPACK live length](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/ynnpack_delegate.cc).
 
 ### `odml.rope`
 
@@ -801,10 +820,10 @@ compatible with that packing and validate partial rotation at the boundary.
 The split form does not use `kernel_type` to select the combined form's 2-D
 pairing. Keep the emitted decomposition's pairing and timescale formula exact.
 
-Sources: [emitter](https://github.com/google-ai-edge/litert-torch/blob/a05e1e1441be1a81f151d21ad62c2fc20ff099bd/litert_torch/generative/export_hf/experimental/composites/rope.py),
-[parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/rope_parser.cc),
-[kernel](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/kernels/rope.cc),
-[attribute defaults](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/operations.h).
+Sources: [emitter](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/experimental/composites/rope.py),
+[parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/rope_parser.cc),
+[kernel](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/kernels/rope.cc),
+[attribute defaults](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/operations.h).
 
 ### `odml.qkv_norm_rope`
 
@@ -836,9 +855,9 @@ emitter's floating tensor contract and verify batch handling, head packing,
 rotary pairing, and positions against its decomposition. As with the standalone
 torch RoPE helper, rank-2 positions use row 0 in the decomposition.
 
-Sources: [emitter](https://github.com/google-ai-edge/litert-torch/blob/a05e1e1441be1a81f151d21ad62c2fc20ff099bd/litert_torch/generative/export_hf/experimental/composites/qkv_norm_rope.py),
-[parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/ir/qkv_norm_rope_parser.cc),
-[kernel](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/qkv_norm_rope_kernel.cc).
+Sources: [emitter](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/experimental/composites/qkv_norm_rope.py),
+[parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/ir/qkv_norm_rope_parser.cc),
+[kernel](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/qkv_norm_rope_kernel.cc).
 
 ### `odml.swiglu`
 
@@ -858,9 +877,9 @@ The GPU concatenated path splits at a four-channel slice boundary, so choose
 `D` divisible by four; do not assume an arbitrary scalar split is implemented.
 The parser counts 1 or 2 **runtime** inputs and exactly one output.
 
-Sources: [emitter](https://github.com/google-ai-edge/litert-torch/blob/a05e1e1441be1a81f151d21ad62c2fc20ff099bd/litert_torch/generative/export_hf/experimental/composites/swiglu.py),
-[parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/ir/swiglu_parser.cc),
-[kernel](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/swiglu_kernel.cc).
+Sources: [emitter](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/experimental/composites/swiglu.py),
+[parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/ir/swiglu_parser.cc),
+[kernel](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/swiglu_kernel.cc).
 
 ### `odml.short_conv_step`
 
@@ -888,45 +907,63 @@ layout handling is specialized; verify the exported tensor descriptors with
 the kernel, rather than extending the torch helper's batch support to the GPU.
 State is explicit: return output 1 as input 1 on the next invocation.
 
-Sources: [emitter](https://github.com/google-ai-edge/litert-torch/blob/a05e1e1441be1a81f151d21ad62c2fc20ff099bd/litert_torch/generative/export_hf/experimental/composites/short_conv.py),
-[parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/short_conv_step_parser.cc),
-[kernel](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/short_conv_step_kernel.cc).
+Sources: [emitter](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/experimental/composites/short_conv.py),
+[parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/short_conv_step_parser.cc),
+[kernel](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/short_conv_step_kernel.cc).
 
 ### `odml.moe_experts`
 
-YNNPACK recognizes this preserved composite. Its contract is separate from the
-plain custom `moe` op described below; changing only the name/encoding is not a
-supported conversion.
+YNNPACK recognizes this preserved composite. It now supports 7 or 10 inputs
+and one output; it still does not recognize plain custom `moe` through this
+visitor. Similar operand order does not make the two names/encodings aliases.
 
-| Slot | Tensor | Required type / shape |
-| --- | --- | --- |
-| input 0 | `tokens` | `FLOAT32 [B,T,D]` |
-| input 1 | `routing_weights` | `FLOAT32 [B,T,A]` |
-| input 2 | `expert_indices` | `INT32 [B,T,A]`, IDs in `[0,E)` |
-| input 3 | `gate_weights` | Constant `FLOAT32 [F,E,1,D]` |
-| input 4 | `up_weights` | Constant `FLOAT32 [F,E,1,D]` |
-| input 5 | `down_weights` | Constant `FLOAT32 [D,E,1,F]` |
-| input 6 | `scale` | Constant `FLOAT32`, one element or E elements |
-| output 0 | `output` | `FLOAT32 [B,T,D]` |
+| Tensor | 7-input slot | 10-input slot | Shape |
+| --- | --- | --- | --- |
+| tokens | 0 | 0 | `[B,T,D]` |
+| routing weights | 1 | 1 | `[B,T,A]` |
+| expert indices | 2 | 2 | `INT32 [B,T,A]`, IDs in `[0,E)` |
+| gate weights | 3 | 3 | Constant `[F,E,1,D]` |
+| gate scales | None | 4 | Constant floating scale tensor; per-row form `[F,E,1,1]` |
+| up weights | 4 | 5 | Constant `[F,E,1,D]` |
+| up scales | None | 6 | Constant floating scale tensor; per-row form `[F,E,1,1]` |
+| down weights | 5 | 7 | Constant `[D,E,1,F]` |
+| down scales | None | 8 | Constant floating scale tensor; per-row form `[D,E,1,1]` |
+| output scale | 6 | 9 | Constant floating tensor, one or E elements |
+| output | output 0 | output 0 | `[B,T,D]`, same dtype as tokens |
 
-Exactly 7 inputs and 1 output. The delegate infers E from weight axis 1 and A
-from the last index dimension; `A>0`. No composite attributes are consumed.
-It gathers selected experts, applies approximate GELU to the gate projection,
-multiplies by the up projection, applies the down projection, then weights and
-sums the expert results. The supplied scale can be shared or per expert.
-Provide a matching decomposition for runtimes without YNNPACK.
+Tokens, routing weights, output scale, and output can be float32, float16, or
+bfloat16. All three weight tensors must have the same dtype: one of those
+floating types, or INT8/INT4/INT2. Sub-byte packing must be valid both before
+and after the weight transpose: the input and output channel dimensions must
+hold whole bytes (multiples of 2 for int4, 4 for int2). Constants and tensor
+quantization must also pass YNNPACK's tensor-support checks.
 
-Source: [YNNPACK implementation](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/ynnpack/moe.cc).
+For quantized weights, the 7-input form takes quantization parameters from
+tensor metadata; the 10-input form takes explicit floating projection scales
+and leaves weight zero points implicit (symmetric). Those scales are
+transposed/gathered with the weights and must broadcast to the intended dot
+quantization. The explicit scales are not applied to floating weights. Do not
+infer that every block-scale layout accepted by custom `moe` is supported here.
+
+E is inferred from weight axis 1 and A from the last index dimension; require
+`0<A<=E`. No composite attributes are consumed. The gate uses approximate
+GELU, then multiplies the up projection, applies the down projection, weights
+by the route and output scale, and sums selected experts. Quantized execution
+dynamically quantizes activations and the intermediate to int8 and dequantizes
+int32 dot accumulations. Match fallback/reference tolerances to that arithmetic;
+float metadata support alone does not establish identical low-bit numerics.
+
+Sources: [YNNPACK implementation](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/moe.cc),
+[MoE tests](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/ynnpack/moe_test.cc).
 
 ## Expert and other runtime custom ops
 
 ### `moe`
 
-Plain `CUSTOM` routed expert block implemented by MLDrift and the checked
-XNNPACK MoE delegate kernel. It is distinct from YNNPACK's
-`odml.moe_experts` composite. Provide routing outside this op, with
-`0<A<=E`, expert IDs in `[0,E)`, and the intended normalized route weights.
-There are no expert biases.
+Plain `CUSTOM` routed expert block implemented by MLDrift and XNNPACK. It is
+distinct from YNNPACK's `odml.moe_experts` composite. Provide routing outside
+this op, with `0<A<=E`, expert IDs in `[0,E)`, and the intended normalized route
+weights. There are no expert biases.
 
 | Slot | Tensor | Common contract |
 | --- | --- | --- |
@@ -935,57 +972,92 @@ There are no expert biases.
 | input 2 | top indices | `INT32 [1,1,T,A]` |
 | output 0 | result | Floating, same logical shape as input 0 |
 
-Floating mode has **7 inputs**, quantized mode **10**. All remaining operands
-are constant weights/scales; weight layout is `[out_channels,E,1,in_channels]`,
-not `[E,out_channels,in_channels]`.
+Floating mode has **7 inputs**, quantized mode **10**. Remaining operands are
+constant weights/scales. Weight layout is `[out_channels,E,1,in_channels]`,
+not `[E,out_channels,in_channels]`. Let Gg, Gu, Gd be the scale block counts
+for gate/up/down; each is positive and divides that projection's input width.
 
-| Tensor | Float slot / shape | Int8 slot / shape |
+| Tensor | Float slot / shape | Quantized slot / shape |
 | --- | --- | --- |
 | gate weight | 3 / `[F,E,1,D]` | 3 / `[F,E,1,D]` |
-| gate scale | None | 4 / `[F,E,1,1]` |
+| gate scale | None | 4 / `[F,E,1,Gg]` |
 | up weight | 4 / `[F,E,1,D]` | 5 / `[F,E,1,D]` |
-| up scale | None | 6 / `[F,E,1,1]` |
+| up scale | None | 6 / `[F,E,1,Gu]` |
 | down weight | 5 / `[D,E,1,F]` | 7 / `[D,E,1,F]` |
-| down scale | None | 8 / `[D,E,1,1]` |
+| down scale | None | 8 / `[D,E,1,Gd]` |
 | per-expert output scale | 6 / `[1,1,1,E]` | 9 / `[1,1,1,E]` |
 
-For expert e and token t:
+For the torch/Gemma-style contract:
 
 ```text
-hidden = gelu(gate_weight[e] @ x[t]) * (up_weight[e] @ x[t])
+hidden = gelu_tanh(gate_weight[e] @ x[t]) * (up_weight[e] @ x[t])
 expert_result = per_expert_scale[e] * (down_weight[e] @ hidden)
 y[t] = sum(route_weight[t,r] * expert_result[expert_id[t,r]])
 ```
 
 Required FlexBuffers keys are integer `num_experts=E`,
 `num_active_experts=A`, `model_dim=D`, `hidden_dim=F`, and string `weight_type`.
-MLDrift accepts `"fp32"` and `"int8"`; optional `activation` must be `"gelu"`
-and optional boolean `renormalized_top_weights` must be true. It can infer the
-required properties only when the entire options buffer is absent, not when
-a present map is incomplete. Emit the complete map.
+Emit the complete map, plus `activation="gelu_tanh"` and boolean
+`renormalized_top_weights=true` for this contract. MLDrift can infer properties
+only when the entire options buffer is absent, not from an incomplete map.
 
-MLDrift int8 weights require symmetric affine quantization (zero points zero)
-and explicit floating row scales. Scale tensors may be float32 or float16.
-XNNPACK requires **float32** activations, outputs, weights in fp32 mode, and all
-scales; weights/scales must use read-only constant buffers (`kTfLiteMmapRo`).
-XNNPACK always requires the attribute map and additionally accepts
-`activation="gelu_tanh"` (default `"gelu"`). Match the GELU approximation to
-the source model; support for a gated expert block does not imply SiLU support.
+**Activation spelling affects math.** Torch now emits `"gelu_tanh"`, matching
+`F.gelu(..., approximate="tanh")`. MLDrift accepts it and legacy `"gelu"`, both
+executing the tanh approximation. XNNPACK distinguishes them: `"gelu"` selects
+exact GELU, `"gelu_tanh"` the approximation. Thus `"gelu"` was not numerically
+portable for the torch reference. SiLU is not part of this custom-op contract.
 
-XNNPACK also supports `weight_type="int4"` with the ten-input order above.
-Weights can be native `INT4` tensors with logical element counts, or `INT8`
-containers holding half as many packed bytes. Each byte holds the earlier
-signed value in its low nibble, then the next in its high nibble. For each
-projection, scales contain `out_channels*E*groups_per_row` float32 values;
-rows are ordered `out_channel*E+expert`, and groups partition input channels.
-Use even input-channel widths and a positive group count dividing that width.
-Dequantization is signed_value times explicit group scale, with no zero-point
-subtraction. This int4 form is **not** supported by the MLDrift parser.
+**Apply per-expert output scale exactly once.** The current torch binding moves
+`router.per_expert_scale` into the last custom-op operand and disables router
+folding, avoiding an external one-hot/matmul scale lookup. If input route
+weights already include that scale, pass ones in the final operand instead.
+This scale is independent of the projection quantization scales.
 
-Sources: [MLDrift attributes and tensors](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/moe_experts_parser.cc),
-[GPU implementation](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/moe_experts_kernel.cc),
-[XNNPACK types, packing and execution](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/xnnpack/moe_delegate_kernel.cc),
-[delegate integration](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/xnnpack/xnnpack_delegate.cc).
+MLDrift supports `weight_type="fp32"` and `"int8"`. Int8 expert scales now accept
+both one scale per output/expert row and multiple input-axis blocks. For a
+projection of shape `[O,E,1,I]` with G blocks:
+
+```text
+row = out_channel * E + expert
+block_size = I / G
+w_real[out_channel, expert, input_channel] =
+    w_int8[out_channel, expert, input_channel] *
+    scales[row * G + input_channel // block_size]
+```
+
+Use positive finite floating scales. MLDrift accepts float32/float16 scale
+operands and symmetric affine, BlockwiseQuantization, or
+BlockwiseQuantizationV2 metadata. For blockwise metadata, a negative zero-point
+tensor index means zero; otherwise the referenced tensor must be constant
+INT8 or INT32 containing only zeros. The explicit scale operands supply the
+kernel scales; quantization metadata must agree and is not a replacement.
+
+XNNPACK also supports blockwise int8 scales, but requires float32 activations,
+outputs, fp32-mode weights, and all scales. Weights/scales must be read-only
+constants (`kTfLiteMmapRo`). It infers block counts from element counts; emit
+the canonical shapes above and enforce exact divisibility in the converter
+even though some CPU helpers tolerate a ragged final block.
+
+XNNPACK additionally supports `weight_type="int4"` with the ten-input order.
+Weights may be native INT4 tensors or INT8 containers holding half as many
+packed bytes. Low nibble stores the earlier signed value, high nibble the next.
+Use even input widths, with the same row/block scale order and no zero-point
+subtraction. MLDrift's custom parser still does not admit this int4 form;
+YNNPACK's separate composite support does not extend the custom `moe` ABI.
+
+GPU decode/remapping optimizations and MLDrift's new shared MoE builder helpers
+change implementation and packing, not this serialized operand order. The
+separate `ml-drift` checkout's latest ringed-weight read-size change concerns
+profiling accounting; it introduces no new converter attribute or op name.
+
+Sources: [torch options, math, and scale binding](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/layers/moe.py),
+[legacy GPU parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/moe_experts_parser.cc),
+[IR GPU parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/ir/moe_experts_parser.cc),
+[GPU implementation](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/moe_experts_kernel.cc),
+[XNNPACK admission and execution](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/xnnpack/moe_delegate_kernel.cc),
+[XNNPACK scale layout](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/xnnpack/moe_block_scale.h),
+[shared GPU MoE builder](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/gpu_model_builder_moe_util.cc),
+[ringed-weight read-size accounting](https://github.com/google-ai-edge/ml-drift/commit/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87).
 
 ### `gated_delta_update` and `custom_call.gated_delta_update`
 
@@ -995,19 +1067,41 @@ they do not acquire a decomposition merely because their math is decomposable.
 
 | Slot | Tensor | Type / shape |
 | --- | --- | --- |
-| input 0 | `q` | `FLOAT32 [B,N,T,Dk]` |
-| input 1 | `k` | `FLOAT32 [B,N,T,Dk]` |
-| input 2 | `v` | `FLOAT32 [B,N,T,Dv]` |
-| input 3 | `beta` | `FLOAT32 [B,N,T]` (same contiguous element count with trailing singleton also works for the CPU loop) |
-| input 4 | `g` | `FLOAT32 [B,N,T]`; **log decay**, exponentiated by the kernel |
-| input 5 | `state` | `FLOAT32 [B,N,Dk,Dv]` |
-| output 0 | `output` | `FLOAT32 [B,N,T,Dv]` |
-| output 1 | `new_state` | `FLOAT32 [B,N,Dk,Dv]` |
+| input 0 | `q` | `FLOAT32 [B,Nk,T,Dk]` |
+| input 1 | `k` | `FLOAT32 [B,Nk,T,Dk]` |
+| input 2 | `v` | `FLOAT32 [B,Nv,T,Dv]` |
+| input 3 | `beta` | `FLOAT32 [B,Nv,T]` (same contiguous element count with trailing singleton also works for the CPU loop) |
+| input 4 | `g` | `FLOAT32 [B,Nv,T]`; **log decay**; positive values are padding sentinels |
+| input 5 | `state` | `FLOAT32 [B,Nv,Dk,Dv]` |
+| output 0 | `output` | `FLOAT32 [B,Nv,T,Dv]` |
+| output 1 | `new_state` | `FLOAT32 [B,Nv,Dk,Dv]` |
 
-Exactly six inputs and two outputs. For each token the recurrent implementation
-computes `S=exp(g)*S`, `delta=beta*(v-k@S)`, `S=S+outer(k,delta)`, and
-`output=q@S`. Normalize/scale Q and K outside this op when required by the model.
-State is explicit, including its initialization and feedback between calls.
+Exactly six inputs and two outputs. Require `Nk>0` and `Nv % Nk == 0`.
+Value head h uses Q/K head `h // (Nv/Nk)`; beta, g, state, and output remain
+indexed by Nv. The updated CPU and GPU kernels perform this mapping directly,
+so the converter need not repeat Q/K to Nv heads.
+
+For each token/head the updated recurrence is:
+
+```text
+decay = exp(g) if g <= 0 else 1
+beta_effective = beta if beta > 0 else 0
+S = decay * S
+delta = beta_effective * (v - k @ S)
+S = S + outer(k, delta)
+output = q @ S
+```
+
+For finite Q/K/V, right padding with `g>0` and `beta<=0` leaves state unchanged.
+It does not automatically zero the output (`q@S` is still computed). Preserve
+these sentinels and mask padded outputs when required. Older kernels that
+unconditionally exponentiate g or use negative beta do not implement this
+contract. Normalize/scale Q and K outside the op when required by the model;
+state initialization and feedback are explicit.
+
+The checked torch eager reference still uses `exp(g)` and raw beta. Its GQA
+mapping is updated, but it is not a reference for positive-g/negative-beta
+sentinel cases; validate those against the updated recurrence above.
 
 Optional FlexBuffers integer `mode` defaults to 0 (recurrent); the LiteRT C++
 custom-kernel implementation also selects a chunked algorithm with mode 1.
@@ -1015,13 +1109,19 @@ The TFLite registration currently always calls the recurrent implementation,
 irrespective of this option. MLDrift parses `mode` but has its own execution
 path; do not use the option to infer identical scheduling across backends.
 MLDrift requires Dk and Dv to be powers of two, at least 16, and multiples of
-four. CPU arity/type checks are incomplete for beta/g/output, so emit the
-full floating contract above even when the parser does not reject a mismatch.
+four. CPU shape/type admission is incomplete, including the head-ratio checks
+in the TFLite wrapper. Validate the full contract in the converter even when a
+backend parser does not reject a mismatch. The torch Qwen3.5 path now forwards
+`use_fused_gdn` and `gdn_mode` through its static-model patches; these select the
+existing custom contract rather than introducing a new op name.
 
-Sources: [CPU registrations](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_tflite_op.cc),
-[numerical implementation](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_impl.cc),
-[LiteRT custom-kernel API](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_litert_custom_op.cc),
-[GPU admission](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/delegate/composite/gated_delta_update_parser.cc).
+Sources: [CPU registrations](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_tflite_op.cc),
+[numerical implementation](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_impl.cc),
+[LiteRT custom-kernel API](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_litert_custom_op.cc),
+[GPU admission](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/gated_delta_update_parser.cc),
+[GPU head mapping and padding](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/delegate/composite/gated_delta_update_kernel.cc),
+[torch Qwen3.5 emitter](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/model_ext/qwen3_5/gated_delta_rule.py),
+[torch export flags](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/model_ext/qwen3_5/patch.py).
 
 ### `gdn_tril_inv` and `custom_call.gdn_tril_inv`
 
@@ -1032,8 +1132,8 @@ must be at least two and the last two dimensions equal. Computes
 This is not a general matrix inverse. No custom options are consumed. No
 same-name MLDrift parser is registered in the checked factory.
 
-Sources: [registration and shape checks](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_tflite_op.cc),
-[forward substitution](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_impl.cc).
+Sources: [registration and shape checks](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_tflite_op.cc),
+[forward substitution](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/experimental/custom_ops/gated_delta_net/gated_delta_update_impl.cc).
 
 ### Legacy GPU normalization custom ops
 
@@ -1053,7 +1153,7 @@ load scale and bias into GPU attributes; a dynamically computed scale tensor
 is not equivalent to a constant weight. Prefer preserved norm composites when
 their backend contract fits and a CPU decomposition is required.
 
-Source: [legacy normalization parsers](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/model_builder.cc).
+Source: [legacy normalization parsers](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/model_builder.cc).
 
 ### Positional embedding custom ops
 
@@ -1070,10 +1170,10 @@ by eight); the kernel selects sine/cosine by channel slice. Position data must
 be representable by the GPU tensor reader, and the absolute-position kernel
 uses the shared position lookup rather than a per-batch position reference.
 
-Sources: [parsers](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/model_builder.cc),
-[IR names](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/ir_model_builder.cc),
-[absolute-position kernel](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/kernels/positional_embedding.cc),
-[rotary kernels](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/kernels/rope.cc).
+Sources: [parsers](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/model_builder.cc),
+[IR names](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/ir_model_builder.cc),
+[absolute-position kernel](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/kernels/positional_embedding.cc),
+[rotary kernels](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/kernels/rope.cc).
 
 ### Pixel shuffle
 
@@ -1088,8 +1188,8 @@ channel ordering against the frontend's pixel-shuffle convention; builtin
 `DEPTH_TO_SPACE` may be a better direct export when it expresses the same
 ordering.
 
-Sources: [legacy parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/model_builder.cc),
-[IR dispatch](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/ir_model_builder.cc).
+Sources: [legacy parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/model_builder.cc),
+[IR dispatch](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/ir_model_builder.cc).
 
 ### `Convolution2DTransposeBias`
 
@@ -1106,8 +1206,8 @@ matching headers; ensure the chosen backend supports the requested activation.
 The common delegate path uses float32 input/output and static weights. Use the
 builtin transpose-convolution form when its contract suffices.
 
-Sources: [GPU parser](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/model_builder.cc),
-[XNNPACK visitor](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/xnnpack/xnnpack_delegate.cc).
+Sources: [GPU parser](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/model_builder.cc),
+[XNNPACK visitor](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/xnnpack/xnnpack_delegate.cc).
 
 ### Pooling with indices and unpooling
 
@@ -1128,11 +1228,11 @@ Output is cleared before scattering. Inputs and indices must have identical
 rank-4 shapes, and every flattened index must be in range. Duplicate scatter
 indices overwrite earlier values; this is not a summing scatter.
 
-Sources: [CPU pooling](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/perception/max_pool_with_argmax.cc),
-[CPU unpooling](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/perception/max_unpooling_2d.cc),
-[legacy GPU contracts](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/model_builder.cc),
-[IR unpooling](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/convert/convert_unpooling2d.cc),
-[XNNPACK contracts](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/xnnpack/xnnpack_delegate.cc).
+Sources: [CPU pooling](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/perception/max_pool_with_argmax.cc),
+[CPU unpooling](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/perception/max_unpooling_2d.cc),
+[legacy GPU contracts](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/model_builder.cc),
+[IR unpooling](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/convert/convert_unpooling2d.cc),
+[XNNPACK contracts](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/xnnpack/xnnpack_delegate.cc).
 
 ### `Resampler` and `DenseImageWarp`
 
@@ -1144,10 +1244,10 @@ Sources: [CPU pooling](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5
 These names differ in coordinate ordering, absolute-versus-relative coordinates,
 and boundary behavior. They cannot be renamed into each other.
 
-Sources: [resampler conversion](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/convert/convert_resampler.cc),
-[resampler admission](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/ml_drift_delegate/tflite/support/support_resampler.cc),
-[GPU sampling](https://github.com/google-ai-edge/ml-drift/blob/0e2092a49cc1b2269662bb98ff9438538b24c961/ml_drift/common/kernels/resampler.cc),
-[CPU warp](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/perception/dense_image_warp.cc).
+Sources: [resampler conversion](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/convert/convert_resampler.cc),
+[resampler admission](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/ml_drift_delegate/tflite/support/support_resampler.cc),
+[GPU sampling](https://github.com/google-ai-edge/ml-drift/blob/17ec4e6aa3f0103020bdaacc1303b1f2ad270c87/ml_drift/common/kernels/resampler.cc),
+[CPU warp](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/perception/dense_image_warp.cc).
 
 ### `TFLite_Detection_PostProcess`
 
@@ -1174,7 +1274,7 @@ class/box suppression algorithms. Supply a positive IoU threshold ≤1 and
 nonzero box scales. Preserve the source model's background-class convention
 and quantization metadata; this op does not perform classifier calibration.
 
-Source: [kernel and options](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/detection_postprocess.cc).
+Source: [kernel and options](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/detection_postprocess.cc).
 
 ### `AudioSpectrogram` and `Mfcc`
 
@@ -1190,9 +1290,9 @@ before the mel filterbank and log/DCT processing. Passing unsquared magnitudes
 changes the features. Match sample rate, window/stride, frequency bounds, and
 DCT count to model preprocessing.
 
-Sources: [spectrogram](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/audio_spectrogram.cc),
-[window/FFT implementation](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/internal/spectrogram.cc),
-[MFCC](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/mfcc.cc).
+Sources: [spectrogram](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/audio_spectrogram.cc),
+[window/FFT implementation](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/internal/spectrogram.cc),
+[MFCC](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/mfcc.cc).
 
 ### `NumericVerify`
 
@@ -1206,7 +1306,7 @@ FlexBuffers options are float `tolerance` and boolean `log_if_failed`. When
 the differences/statistics. This is a debugging boundary, not a replacement
 for quantize/dequantize inference math.
 
-Source: [kernel](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/numeric_verify.cc).
+Source: [kernel](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/numeric_verify.cc).
 
 ### `aeq.hadamard_rotation`
 
@@ -1222,7 +1322,7 @@ it in `Eval`; do not expect random sign flips. Although `Prepare` permits
 contract. The kernel does not infer/resize the output in `Prepare`; serialize
 the correct shape, dtype, and storage size.
 
-Source: [implementation](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/hadamard_rotation.cc).
+Source: [implementation](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/hadamard_rotation.cc).
 
 ### `ParseExample` and `ParseExampleV2`
 
@@ -1251,7 +1351,7 @@ than supplying only feature counts. These kernels cache feature configuration
 after first use; keys and default configuration should be fixed model inputs
 or constants, not changed between invocations.
 
-Source: [parser kernel and registerer](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/parse_example/parse_example.cc).
+Source: [parser kernel and registerer](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/parse_example/parse_example.cc).
 
 ### Other explicit CPU custom registrations
 
@@ -1281,17 +1381,17 @@ across standard-library implementations. Header declarations for custom
 hash-table factories alone do not establish a custom wire contract; the
 checked hash-table runtime operators are builtins.
 
-Sources: [factory declarations](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/custom_ops_register.h),
-[atan2](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/atan2_custom.cc),
-[sign](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/sign_custom.cc),
-[normal RNG](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/random_standard_normal_custom.cc),
-[uniform RNG](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/random_uniform_custom.cc),
-[categorical RNG](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/multinomial.cc),
-[roll](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/roll.cc),
-[IRFFT](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/irfft2d.cc),
-[3-D pooling](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/pooling3d.cc),
-[LUT](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/table.cc),
-[broadcast gradient axes](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/kernels/gradient/bcast_grad_args.cc).
+Sources: [factory declarations](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/custom_ops_register.h),
+[atan2](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/atan2_custom.cc),
+[sign](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/sign_custom.cc),
+[normal RNG](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/random_standard_normal_custom.cc),
+[uniform RNG](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/random_uniform_custom.cc),
+[categorical RNG](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/multinomial.cc),
+[roll](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/roll.cc),
+[IRFFT](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/irfft2d.cc),
+[3-D pooling](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/pooling3d.cc),
+[LUT](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/table.cc),
+[broadcast gradient axes](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/kernels/gradient/bcast_grad_args.cc).
 
 ## Compiler partitions and Select TF Ops
 
@@ -1316,15 +1416,33 @@ selected TensorFlow kernel set. For a direct converter targeting LiteRT without
 TensorFlow, emit supported LiteRT builtins instead; the Flex prefix does not
 provide a universal fallback.
 
-Sources: [partition processing](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/compiler/plugin/compiler_plugin.cc),
-[compiler integration](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/COMPILER_PLUGIN.md),
-[dispatch name and metadata](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/litert/core/build_stamp.h),
-[Flex integration](https://github.com/google-ai-edge/LiteRT/blob/3b85c10ece5412df7913136ba71383e9bc1232a3/tflite/delegates/flex/delegate.cc).
+Sources: [partition processing](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/compiler/plugin/compiler_plugin.cc),
+[compiler integration](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/COMPILER_PLUGIN.md),
+[dispatch name and metadata](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/litert/core/build_stamp.h),
+[Flex integration](https://github.com/google-ai-edge/LiteRT/blob/6c6af0163c346459fe6f3024b0bb5c3a02f4a834/tflite/delegates/flex/delegate.cc).
+
+## Builtin fallbacks affected by recent torch changes
+
+Recent frontend changes also improve decompositions without adding runtime
+custom names. These are useful when choosing builtin fallbacks:
+
+| Source operation | Current lowering pattern |
+| --- | --- |
+| Static contiguous `aten.as_strided` | Flatten, optional static slice for storage offset, reshape. Check row-major strides while ignoring size-1 axes; other views retain the gather path. |
+| Static slice with step > 1 | `STRIDED_SLICE`; the entire shape and bounds must be concrete. Avoid an unnecessary `GATHER_ND` for a simple strided slice. |
+| PReLU | `relu(x) - weight*relu(-x)` avoids the old comparison/SELECT decomposition. Preserve the source's numerical behavior when adopting the rewrite. |
+| Pixel shuffle/unshuffle | Interleave one spatial axis at a time using reshape/transpose with intermediates of rank at most 4. This does not require either legacy pixel-shuffle custom spelling. |
+| Qwen3.5 prefill convolution state | `GATHER` along axis 2 with INT32 indices replaces the floating one-hot selector/matmul. This is state preparation outside `gated_delta_update`. |
+
+Sources: [contiguous-view lowering](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/backend/lowerings/_jax_lowerings/torchax_ops.py),
+[static slices](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/backend/lowerings/_jax_lowerings/lowerings.py),
+[PReLU and shuffle decompositions](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/backend/lowerings/_decomp_registry.py),
+[Qwen3.5 state update](https://github.com/google-ai-edge/litert-torch/blob/78ff964262f8a5f9c536789d68a4ec29cf39061a/litert_torch/generative/export_hf/model_ext/qwen3_5/gated_delta_rule.py).
 
 ## Converter validation
 
-Before admitting a non-standard export, record its target backend and runtime
-registration alongside the exact serialized contract. Validate:
+Record the intended backend and runtime registration alongside the exact
+serialized contract. Before marking an export ready for execution, validate:
 
 1. The final FlatBuffer's exact name, encoding/version, ordered operand/result
    counts, types, shapes, constant buffers, and option bytes.
@@ -1337,11 +1455,13 @@ registration alongside the exact serialized contract. Validate:
 4. Stateful behavior over multiple calls: nonzero offsets, partial prefills,
    cache reuse/reset, capacity boundaries, and ring wraparound where enabled.
 
-Reject a custom node when the required registration/delegate is unavailable.
-For an unsupported specialization of a real composite, emit its equivalent
-builtins if that is the configured fallback. Do not ship an invented name or
-depend on a converter-only allowlist to make it executable. Support on one
-backend does not justify selecting the same contract for another backend.
+Record backend work separately from the intended export contract. For an
+execution-ready artifact, a custom node needs its registration/delegate; a
+composite can use its equivalent builtins when native support is unavailable.
+Do not silently change attributes or model semantics to satisfy an old parser.
+An invented name or converter-only allowlist does not make an op executable.
+Native support on one backend does not establish that another implements the
+same contract; keep unimplemented targets visible as backend follow-up work.
 
 ## Maintaining the inventory
 

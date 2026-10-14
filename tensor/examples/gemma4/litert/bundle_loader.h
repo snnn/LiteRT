@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// Reads the validated published Gemma4 E2B weight-bundle format.
+// Reads validated published Gemma4 E2B/E4B weight bundles.
 #ifndef LITERT_TENSOR_EXAMPLES_GEMMA4_LITERT_MATCHED_BUNDLE_LOADER_H_
 #define LITERT_TENSOR_EXAMPLES_GEMMA4_LITERT_MATCHED_BUNDLE_LOADER_H_
 
@@ -100,7 +100,7 @@ inline absl::StatusOr<size_t> Elements(const Shape& shape) {
   return count;
 }
 inline absl::Status CheckConfig(const Config& c) {
-  const auto e = Config::E2B();
+  const auto e = c.num_kv_heads == 2 ? Config::E4B() : Config::E2B();
   if (c.vocab_size != e.vocab_size || c.embed_dim != e.embed_dim ||
       c.hidden_dim != e.hidden_dim || c.head_dim != e.head_dim ||
       c.num_heads != e.num_heads || c.num_kv_heads != e.num_kv_heads ||
@@ -116,14 +116,16 @@ inline absl::Status CheckConfig(const Config& c) {
       c.global_base_frequency != e.global_base_frequency ||
       c.local_rope_proportion != e.local_rope_proportion ||
       c.global_rope_proportion != e.global_rope_proportion)
-    return Invalid("loader only supports the published E2B configuration");
+    return Invalid("loader only supports the published E2B/E4B configurations");
   const uint16_t endian = 1;
   if (*reinterpret_cast<const uint8_t*>(&endian) != 1 || sizeof(float) != 4 ||
       !std::numeric_limits<float>::is_iec559)
     return Invalid("export requires little-endian IEEE float32");
   return absl::OkStatus();
 }
-inline absl::StatusOr<Object> Manifest(const std::string& directory) {
+inline absl::StatusOr<Object> Manifest(const std::string& directory,
+                                       bool compact_int2 = false,
+                                       const Config& config = Config::E2B()) {
   std::ifstream file(directory + "/manifest.json", std::ios::binary);
   if (!file) return Invalid("cannot open manifest.json");
   file.seekg(0, std::ios::end);
@@ -148,8 +150,43 @@ inline absl::StatusOr<Object> Manifest(const std::string& directory) {
                               Field<std::string>(object, "status"));
   LRT_TENSOR_ASSIGN_OR_RETURN(
       auto unmapped, Field<Array>(object, "unmapped_float_coefficients"));
-  if (version != 1 || status != "complete" || !unmapped.empty())
+  if ((version != 1 && version != 2) || status != "complete" ||
+      !unmapped.empty())
     return Invalid("incomplete, unsupported schema or unmapped coefficients");
+  if (version == 2) {
+    LRT_TENSOR_ASSIGN_OR_RETURN(auto model,
+                                Field<Object>(object, "model_config"));
+    LRT_TENSOR_ASSIGN_OR_RETURN(auto variant,
+                                Field<std::string>(model, "variant"));
+    if (variant != (config.num_kv_heads == 2 ? "e4b" : "e2b"))
+      return Invalid("bundle and runner model variant differ");
+    for (const auto& [key, expected] : std::map<std::string, int>{
+             {"embed_dim", config.embed_dim},
+             {"hidden_dim", config.hidden_dim},
+             {"num_layers", config.num_layers},
+             {"num_heads", config.num_heads},
+             {"num_kv_heads", config.num_kv_heads},
+             {"vocab_size", config.vocab_size},
+             {"num_kv_owners", config.num_kv_heads == 2 ? 24 : 15},
+             {"attention_pattern_size", config.attention_pattern_size},
+             {"head_dim", config.head_dim},
+             {"global_key_size", config.global_key_size},
+             {"per_layer_input_dim", config.per_layer_input_dim},
+             {"sliding_window_size", config.sliding_window_size}}) {
+      LRT_TENSOR_ASSIGN_OR_RETURN(auto actual, Integer(model, key));
+      if (actual != expected) return Invalid("incorrect model config: " + key);
+    }
+    if (compact_int2) {
+      LRT_TENSOR_ASSIGN_OR_RETURN(
+          auto storage, Field<std::string>(object, "experimental_storage"));
+      if (storage != "compact_int2_v1")
+        return Invalid("expected compact INT2 storage");
+    } else if (config.num_kv_heads != 1) {
+      return Invalid("E4B requires the compact published bundle");
+    }
+    return object;
+  }
+  if (config.num_kv_heads != 1) return Invalid("legacy bundle is E2B only");
   LRT_TENSOR_ASSIGN_OR_RETURN(auto source,
                               Field<Object>(object, "source_bundle"));
   LRT_TENSOR_ASSIGN_OR_RETURN(auto hash, Field<std::string>(source, "sha256"));
@@ -161,8 +198,18 @@ inline absl::StatusOr<Object> Manifest(const std::string& directory) {
         "unexpected source bundle identity (not a hash verification)");
   LRT_TENSOR_ASSIGN_OR_RETURN(auto counts,
                               Field<Object>(object, "tensor_counts"));
-  for (const auto& [name, expected] : std::map<std::string, int>{
-           {"float32", 814}, {"int4", 208}, {"int8", 71}}) {
+  if (compact_int2) {
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        auto storage, Field<std::string>(object, "experimental_storage"));
+    if (storage != "compact_int2_v1")
+      return Invalid("expected an experimental compact INT2 bundle");
+    LRT_TENSOR_ASSIGN_OR_RETURN(auto count, Integer(counts, "int2"));
+    if (count != 62) return Invalid("expected 62 original INT2 tensors");
+  }
+  for (const auto& [name, expected] :
+       std::map<std::string, int>{{"float32", 814},
+                                  {"int4", compact_int2 ? 146 : 208},
+                                  {"int8", 71}}) {
     LRT_TENSOR_ASSIGN_OR_RETURN(auto count, Integer(counts, name));
     if (count != expected) return Invalid("unexpected tensor dtype coverage");
   }
@@ -211,7 +258,8 @@ struct Expected {
   std::string dtype;
   Shape shape;
 };
-inline std::map<std::string, Expected> ExpectedTensors(const Config& c) {
+inline std::map<std::string, Expected> ExpectedTensors(
+    const Config& c, bool compact_int2 = false) {
   std::map<std::string, Expected> result;
   auto add = [&](const std::string& name, const std::string& dtype,
                  Shape shape) {
@@ -225,27 +273,36 @@ inline std::map<std::string, Expected> ExpectedTensors(const Config& c) {
       add(module + ".output_scale", "float32", {1});
     }
   };
-  fc("model.per_layer_model_projection", "int8", 8960, c.embed_dim);
-  fc("lm_head", "int4", c.vocab_size, c.embed_dim, false);
-  add("model.embed_tokens.weight", "int4", {c.vocab_size, c.embed_dim});
-  add("model.embed_tokens_per_layer.weight", "int4", {c.vocab_size, 8960});
+  const int ple_width = c.num_layers * c.per_layer_input_dim;
+  const int owner_count = c.num_kv_heads == 2 ? 24 : 15;
+  fc("model.per_layer_model_projection", "int8", ple_width, c.embed_dim);
+  const char* original_int2 = compact_int2 ? "int2" : "int4";
+  fc("lm_head", original_int2, c.vocab_size, c.embed_dim, false);
+  add("model.embed_tokens.weight", original_int2, {c.vocab_size, c.embed_dim});
+  add("model.embed_tokens_per_layer.weight",
+      c.num_kv_heads == 2 ? original_int2 : "int4", {c.vocab_size, ple_width});
   add("model.per_layer_projection_norm.weight", "float32", {256});
   add("model.norm.weight", "float32", {c.embed_dim});
   for (int layer = 0; layer < c.num_layers; ++layer) {
     const auto prefix = absl::StrCat("model.layers.", layer, ".");
     const int dim =
         c.GetLayerType(layer) == Config::LayerType::kGlobal ? 512 : 256;
-    const int hidden = c.hidden_dim * (layer >= 15 ? 2 : 1);
+    const int hidden =
+        c.hidden_dim * (c.num_kv_heads == 1 && layer >= owner_count ? 2 : 1);
     fc(prefix + "self_attn.q_proj", "int4", c.num_heads * dim, c.embed_dim);
     fc(prefix + "self_attn.o_proj", "int4", c.embed_dim, c.num_heads * dim);
-    if (layer < 15) {
-      fc(prefix + "self_attn.k_proj", "int4", dim, c.embed_dim);
-      fc(prefix + "self_attn.v_proj", "int4", dim, c.embed_dim);
+    if (layer < owner_count) {
+      fc(prefix + "self_attn.k_proj", "int4", c.num_kv_heads * dim,
+         c.embed_dim);
+      fc(prefix + "self_attn.v_proj", "int4", c.num_kv_heads * dim,
+         c.embed_dim);
       add(prefix + "self_attn.k_norm.weight", "float32", {dim});
     }
-    fc(prefix + "mlp.gate_proj", "int4", hidden, c.embed_dim);
-    fc(prefix + "mlp.up_proj", "int4", hidden, c.embed_dim);
-    fc(prefix + "mlp.down_proj", "int4", c.embed_dim, hidden);
+    const char* mlp_type =
+        c.num_kv_heads == 1 && layer >= owner_count ? original_int2 : "int4";
+    fc(prefix + "mlp.gate_proj", mlp_type, hidden, c.embed_dim);
+    fc(prefix + "mlp.up_proj", mlp_type, hidden, c.embed_dim);
+    fc(prefix + "mlp.down_proj", mlp_type, c.embed_dim, hidden);
     fc(prefix + "per_layer_input_gate", "int8", 256, c.embed_dim);
     fc(prefix + "per_layer_projection", "int8", c.embed_dim, 256);
     for (const auto* norm :
@@ -271,13 +328,16 @@ inline absl::StatusOr<TensorHandle> LoadTensor(const std::string& directory,
   LRT_TENSOR_ASSIGN_OR_RETURN(auto count, Elements(shape));
   Type type = dtype == "float32" ? Type::kFP32
               : dtype == "int8"  ? Type::kI8
+              : dtype == "int2"  ? Type::kI2
                                  : Type::kI4;
-  if (dtype != "float32" && dtype != "int8" && dtype != "int4")
+  if (dtype != "float32" && dtype != "int8" && dtype != "int4" &&
+      dtype != "int2")
     return Invalid("unsupported dtype: " + name);
   if (count > std::numeric_limits<size_t>::max() / 4)
     return Invalid("overflowing byte count: " + name);
   const size_t bytes = dtype == "float32" ? count * 4
                        : dtype == "int8"  ? count
+                       : dtype == "int2"  ? (count + 3) / 4
                                           : (count + 1) / 2;
   LRT_TENSOR_ASSIGN_OR_RETURN(auto declared, Integer(record, "bytes"));
   if (static_cast<uint64_t>(declared) != bytes)
@@ -286,8 +346,9 @@ inline absl::StatusOr<TensorHandle> LoadTensor(const std::string& directory,
     LRT_TENSOR_ASSIGN_OR_RETURN(auto encoding,
                                 Field<std::string>(record, "encoding"));
     const char* wanted = dtype == "float32" ? "little_endian_float32"
-                         : dtype == "int8"
-                             ? "signed_int8"
+                         : dtype == "int8"  ? "signed_int8"
+                         : dtype == "int2"
+                             ? "signed_twos_complement_low_2bits_first"
                              : "signed_twos_complement_low_nibble_first";
     if (encoding != wanted) return Invalid("unsupported encoding: " + name);
   }
@@ -314,7 +375,8 @@ inline absl::StatusOr<TensorHandle> LoadTensor(const std::string& directory,
     LRT_TENSOR_ASSIGN_OR_RETURN(auto zero, Integer(zps.front()));
     if (zero != 0) return Invalid("nonzero zero point: " + name);
     const bool blockwise = name == "model.embed_tokens_per_layer.weight";
-    const Shape scale_shape = blockwise ? Shape{262144, 35} : Shape{shape[0]};
+    const Shape scale_shape =
+        blockwise ? Shape{shape[0], shape[1] / 256} : Shape{shape[0]};
     LRT_TENSOR_ASSIGN_OR_RETURN(auto actual_scale_shape,
                                 ReadShape(q, "scales_shape"));
     LRT_TENSOR_ASSIGN_OR_RETURN(auto scale_dtype,
@@ -343,14 +405,52 @@ inline absl::StatusOr<TensorHandle> LoadTensor(const std::string& directory,
     for (float scale : scales)
       if (!(scale > 0) || !std::isfinite(scale))
         return Invalid("invalid quantization scale: " + name);
-    if (blockwise)
+    if (blockwise) {
       quantization = std::make_shared<BlockwiseQuantization>(
           std::move(scales), std::vector<int64_t>{0}, block_size, 0);
-    else
+    } else {
+      // Author TFLite-compatible metadata: one zero point per channel scale.
       quantization = std::make_shared<PerChannelAffineQuantization>(
-          std::move(scales), std::vector<int64_t>{0}, 0);
+          std::move(scales), std::vector<int64_t>(scale_count, zero), 0);
+    }
   }
   std::shared_ptr<Buffer> buffer;
+  if (type == Type::kI2) {
+    LRT_TENSOR_ASSIGN_OR_RETURN(auto sources, Field<Array>(record, "sources"));
+    const bool ple = name == "model.embed_tokens_per_layer.weight";
+    if (ple) {
+      if (sources.size() != shape[1] / 256)
+        return Invalid("INT2 PLE partition count");
+      for (size_t i = 0; i < sources.size(); ++i) {
+        const auto* part = sources[i].as<Object>();
+        if (!part) return Invalid("INT2 PLE source record");
+        LRT_TENSOR_ASSIGN_OR_RETURN(
+            auto partition, Integer(*part, "destination_layer_partition"));
+        LRT_TENSOR_ASSIGN_OR_RETURN(auto dtype,
+                                    Field<std::string>(*part, "dtype"));
+        LRT_TENSOR_ASSIGN_OR_RETURN(auto dimensions, ReadShape(*part, "shape"));
+        LRT_TENSOR_ASSIGN_OR_RETURN(auto source_bytes,
+                                    Integer(*part, "source_bytes"));
+        if (partition != i || dtype != "INT2" ||
+            dimensions != Shape({shape[0], 256}) ||
+            source_bytes != size_t(shape[0]) * 64)
+          return Invalid("INT2 PLE provenance");
+      }
+    } else {
+      if (constant || sources.size() != 1 || !sources[0].as<Object>())
+        return Invalid("expected one original INT2 tensor: " + name);
+      const auto& source = *sources[0].as<Object>();
+      LRT_TENSOR_ASSIGN_OR_RETURN(auto original_type,
+                                  Field<std::string>(source, "dtype"));
+      LRT_TENSOR_ASSIGN_OR_RETURN(auto original_shape,
+                                  ReadShape(source, "shape"));
+      LRT_TENSOR_ASSIGN_OR_RETURN(auto source_bytes,
+                                  Integer(source, "source_bytes"));
+      if (original_type != "INT2" || original_shape != shape ||
+          count % 4 != 0 || source_bytes != bytes)
+        return Invalid("compact INT2 provenance mismatch: " + name);
+    }
+  }
   if (!constant && type == Type::kI4 && name != "model.embed_tokens.weight" &&
       name != "model.embed_tokens_per_layer.weight") {
     LRT_TENSOR_ASSIGN_OR_RETURN(auto sources, Field<Array>(record, "sources"));
@@ -391,15 +491,18 @@ inline absl::StatusOr<TensorHandle> LoadTensor(const std::string& directory,
 }  // namespace published_bundle_detail
 
 inline absl::StatusOr<std::vector<KvOwnerSpec>> LoadPublishedKvSpecs(
-    std::string directory, const Config& config) {
+    std::string directory, const Config& config, bool compact_int2 = false) {
   namespace p = published_bundle_detail;
   LRT_TENSOR_RETURN_IF_ERROR(p::CheckConfig(config));
-  LRT_TENSOR_ASSIGN_OR_RETURN(auto manifest, p::Manifest(directory));
+  LRT_TENSOR_ASSIGN_OR_RETURN(auto manifest,
+                              p::Manifest(directory, compact_int2, config));
   LRT_TENSOR_ASSIGN_OR_RETURN(auto records,
                               p::Field<p::Array>(manifest, "kv_cache_specs"));
-  if (records.size() != 15) return p::Invalid("expected exactly 15 KV owners");
-  std::vector<KvOwnerSpec> specs(15);
-  std::vector<bool> seen(15, false);
+  const int owner_count = config.num_kv_heads == 2 ? 24 : 15;
+  if (records.size() != owner_count)
+    return p::Invalid("incorrect KV owner count");
+  std::vector<KvOwnerSpec> specs(owner_count);
+  std::vector<bool> seen(owner_count, false);
   for (const auto& value : records) {
     const auto* record = value.as<p::Object>();
     if (!record) return p::Invalid("invalid KV record");
@@ -410,9 +513,12 @@ inline absl::StatusOr<std::vector<KvOwnerSpec>> LoadPublishedKvSpecs(
         auto key, p::Field<minijson::number>(*record, "key_scale"));
     LRT_TENSOR_ASSIGN_OR_RETURN(
         auto val, p::Field<minijson::number>(*record, "value_scale"));
-    if (owner >= 15 || seen[owner] || zero != 0 ||
-        dim != (owner % 5 == 4 ? 512 : 256) || !(key > 0) || !(val > 0) ||
-        !std::isfinite(key) || !std::isfinite(val) ||
+    if (owner >= owner_count || seen[owner] || zero != 0 ||
+        dim != (config.GetLayerType(owner) == Config::LayerType::kGlobal
+                    ? config.global_key_size
+                    : config.head_dim) ||
+        !(key > 0) || !(val > 0) || !std::isfinite(key) ||
+        !std::isfinite(val) ||
         static_cast<double>(static_cast<float>(key)) != key ||
         static_cast<double>(static_cast<float>(val)) != val)
       return p::Invalid("invalid owner, head width, scale or zero point");
@@ -427,28 +533,30 @@ inline absl::StatusOr<std::vector<KvOwnerSpec>> LoadPublishedKvSpecs(
         return p::Invalid("KV capacity template");
       for (int i : {0, 1, is_key ? 3 : 2}) {
         LRT_TENSOR_ASSIGN_OR_RETURN(auto n, p::Integer(shape[i]));
-        if (n != (i < 2 ? 1 : dim))
+        if (n != (i == 0 ? 1 : i == 1 ? config.num_kv_heads : dim))
           return p::Invalid("KV shape template dimensions");
       }
     }
     seen[owner] = true;
-    specs[owner] =
-        KvOwnerSpec{static_cast<int>(owner), static_cast<int>(dim),
-                    static_cast<float>(key), static_cast<float>(val)};
+    specs[owner] = KvOwnerSpec{static_cast<int>(owner), static_cast<int>(dim),
+                               static_cast<float>(key), static_cast<float>(val),
+                               config.num_kv_heads};
   }
   return specs;
 }
 
 inline absl::StatusOr<LoadedTensors> LoadPublishedBundle(
-    std::string directory, const Config& config, bool embeddings_only = false) {
+    std::string directory, const Config& config, bool embeddings_only = false,
+    bool compact_int2 = false) {
   namespace p = published_bundle_detail;
   LRT_TENSOR_RETURN_IF_ERROR(p::CheckConfig(config));
-  LRT_TENSOR_ASSIGN_OR_RETURN(auto manifest, p::Manifest(directory));
+  LRT_TENSOR_ASSIGN_OR_RETURN(auto manifest,
+                              p::Manifest(directory, compact_int2, config));
   LRT_TENSOR_ASSIGN_OR_RETURN(auto records,
                               p::Field<p::Array>(manifest, "tensors"));
-  auto expected = p::ExpectedTensors(config);
-  if (expected.size() != 1093 || records.size() != expected.size())
-    return p::Invalid("expected all 1,093 active tensor records");
+  auto expected = p::ExpectedTensors(config, compact_int2);
+  if (records.size() != expected.size())
+    return p::Invalid("incorrect active tensor record count");
   absl::flat_hash_map<std::string, TensorHandle> handles;
   handles.reserve(expected.size() + 1);
   for (const auto& value : records) {
@@ -472,13 +580,21 @@ inline absl::StatusOr<LoadedTensors> LoadPublishedBundle(
   if (!expected.empty()) return p::Invalid("missing active tensor names");
   LRT_TENSOR_ASSIGN_OR_RETURN(auto constants,
                               p::Field<p::Array>(manifest, "constants"));
+  std::string softcap_name = "decode.tensor_36";
+  if (manifest.count("semantic_constants")) {
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        auto semantic, p::Field<p::Object>(manifest, "semantic_constants"));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        softcap_name,
+        p::Field<std::string>(semantic, "logits_softcap_reciprocal"));
+  }
   bool found = false;
   for (const auto& value : constants) {
     const auto* record = value.as<p::Object>();
     if (!record) return p::Invalid("constant record must be an object");
     LRT_TENSOR_ASSIGN_OR_RETURN(auto name,
                                 p::Field<std::string>(*record, "name"));
-    if (name != "decode.tensor_36") continue;
+    if (name != softcap_name) continue;
     if (found) return p::Invalid("duplicate logits softcap reciprocal");
     const std::string key = "matched.logits_softcap_reciprocal";
     LRT_TENSOR_ASSIGN_OR_RETURN(

@@ -27,6 +27,7 @@ struct KvOwnerSpec {
   int head_dim;
   float key_scale;
   float value_scale;
+  int num_heads = 1;
 };
 inline std::shared_ptr<PerChannelAffineQuantization> KvQuantization(
     float scale) {
@@ -48,9 +49,10 @@ Tensor<M...> MakeInt8KeyCache(std::string name, int rows, int dim,
 }
 template <class... M>
 Tensor<M...> QuantizeInt8Kv(Tensor<M...> input, const Tensor<M...>& cache) {
-  auto result = Cast(input, Type::kI8);
-  result.SetQuantization(CloneKvQuantization(cache));
-  return result;
+  const auto& quantization =
+      *cache.GetQuantization()->template As<PerChannelAffineQuantization>();
+  return Quantize(input, Type::kI8, quantization.scales,
+                  quantization.zero_points);
 }
 }  // namespace litert::tensor::examples::gemma4::cpu
 #endif

@@ -34,10 +34,10 @@ limitations under the License.
 
 namespace litert::tensor::examples::gemma4::cpu {
 
-// Each owner stores K and V separately, both as contiguous [capacity, head_dim]
-// INT8 codes. Allocation capacity never determines an attention view's extent.
-// Owner IDs identify unique KV producers; shared consumer layers use the same
-// owner's views and must not append another copy of its rows.
+// Each owner/head stores K and V separately, both as contiguous [capacity,
+// head_dim] INT8 codes. Allocation capacity never determines an attention
+// view's extent. Owner IDs identify unique KV producers; shared consumer layers
+// use the same owner's views and must not append another copy of its rows.
 //
 // BeginAppend establishes a transaction at the committed length. After an
 // owner's Append, that owner's pending prefix is readable for attention, even
@@ -62,9 +62,10 @@ class ActiveKvBank {
     }
     for (size_t i = 0; i < specs.size(); ++i) {
       const auto& spec = specs[i];
-      if (spec.owner < 0 || spec.head_dim <= 0 ||
-          !std::isfinite(spec.key_scale) || spec.key_scale <= 0 ||
-          !std::isfinite(spec.value_scale) || spec.value_scale <= 0) {
+      if (spec.owner < 0 || spec.head_dim <= 0 || spec.num_heads <= 0 ||
+          spec.num_heads > 8 || !std::isfinite(spec.key_scale) ||
+          spec.key_scale <= 0 || !std::isfinite(spec.value_scale) ||
+          spec.value_scale <= 0) {
         return absl::InvalidArgumentError("Invalid KV owner metadata");
       }
       for (size_t j = 0; j < i; ++j) {
@@ -85,8 +86,11 @@ class ActiveKvBank {
     for (size_t i = 0; i < bank.specs_.size(); ++i) {
       const size_t bytes =
           static_cast<size_t>(capacity) * bank.specs_[i].head_dim + 64;
-      bank.buffers_[i].keys.Resize(bytes);
-      bank.buffers_[i].values.Resize(bytes);
+      bank.buffers_[i].heads.resize(bank.specs_[i].num_heads);
+      for (auto& head : bank.buffers_[i].heads) {
+        head.keys.Resize(bytes);
+        head.values.Resize(bytes);
+      }
     }
     return bank;
   }
@@ -113,7 +117,8 @@ class ActiveKvBank {
       return absl::OutOfRangeError("KV append exceeds allocation capacity");
     }
     pending_count_ = count;
-    for (auto& buffer : buffers_) buffer.appended = false;
+    for (auto& owner : buffers_)
+      for (auto& head : owner.heads) head.appended = false;
     return absl::OkStatus();
   }
 
@@ -121,7 +126,7 @@ class ActiveKvBank {
   // quantization scales. This copies integer codes verbatim, without transpose,
   // requantization, prefix copying, or writes to any other owner's storage.
   absl::Status Append(int owner, absl::Span<const int8_t> keys,
-                      absl::Span<const int8_t> values) {
+                      absl::Span<const int8_t> values, int head = 0) {
     if (!append_in_flight()) {
       return absl::FailedPreconditionError("BeginAppend must precede Append");
     }
@@ -129,7 +134,9 @@ class ActiveKvBank {
     if (index == specs_.size()) {
       return absl::InvalidArgumentError("Unknown KV owner");
     }
-    auto& buffer = buffers_[index];
+    if (head < 0 || head >= specs_[index].num_heads)
+      return absl::InvalidArgumentError("Invalid KV head");
+    auto& buffer = buffers_[index].heads[head];
     if (buffer.appended) {
       return absl::FailedPreconditionError("KV owner already appended");
     }
@@ -149,9 +156,11 @@ class ActiveKvBank {
     if (!append_in_flight()) {
       return absl::FailedPreconditionError("No KV append to commit");
     }
-    for (const auto& buffer : buffers_) {
-      if (!buffer.appended) {
-        return absl::FailedPreconditionError("KV owner has not appended");
+    for (const auto& owner : buffers_) {
+      for (const auto& head : owner.heads) {
+        if (!head.appended)
+          return absl::FailedPreconditionError(
+              "KV owner/head has not appended");
       }
     }
     length_ += pending_count_;
@@ -163,7 +172,8 @@ class ActiveKvBank {
   // transaction preserves all committed bytes and views of the old prefix.
   void Abort() {
     pending_count_ = 0;
-    for (auto& buffer : buffers_) buffer.appended = false;
+    for (auto& owner : buffers_)
+      for (auto& head : owner.heads) head.appended = false;
   }
 
   void Reset() {
@@ -171,14 +181,14 @@ class ActiveKvBank {
     length_ = 0;
   }
 
-  absl::StatusOr<absl::Span<const int8_t>> Keys(int owner, int begin,
-                                                int end) const {
-    return View(owner, begin, end, false);
+  absl::StatusOr<absl::Span<const int8_t>> Keys(int owner, int begin, int end,
+                                                int head = 0) const {
+    return View(owner, begin, end, false, head);
   }
 
-  absl::StatusOr<absl::Span<const int8_t>> Values(int owner, int begin,
-                                                  int end) const {
-    return View(owner, begin, end, true);
+  absl::StatusOr<absl::Span<const int8_t>> Values(int owner, int begin, int end,
+                                                  int head = 0) const {
+    return View(owner, begin, end, true, head);
   }
 
   // Borrow [begin,padded_end) from the same token-major allocation while
@@ -191,21 +201,27 @@ class ActiveKvBank {
   // this does not promise zero values or zero attention without that mask.
   absl::StatusOr<absl::Span<const int8_t>> PaddedKeys(int owner, int begin,
                                                       int valid_end,
-                                                      int padded_end) const {
-    return PaddedView(owner, begin, valid_end, padded_end, false);
+                                                      int padded_end,
+                                                      int head = 0) const {
+    return PaddedView(owner, begin, valid_end, padded_end, false, head);
   }
 
   absl::StatusOr<absl::Span<const int8_t>> PaddedValues(int owner, int begin,
                                                         int valid_end,
-                                                        int padded_end) const {
-    return PaddedView(owner, begin, valid_end, padded_end, true);
+                                                        int padded_end,
+                                                        int head = 0) const {
+    return PaddedView(owner, begin, valid_end, padded_end, true, head);
   }
 
  private:
-  struct OwnerBuffers {
+  struct HeadBuffers {
     HostBuffer keys;
     HostBuffer values;
     bool appended = false;
+  };
+
+  struct OwnerBuffers {
+    std::vector<HeadBuffers> heads;
   };
 
   ActiveKvBank() = default;
@@ -218,7 +234,7 @@ class ActiveKvBank {
   }
 
   absl::StatusOr<absl::Span<const int8_t>> View(int owner, int begin, int end,
-                                                bool value) const {
+                                                bool value, int head) const {
     const size_t index = Index(owner);
     if (index == specs_.size()) {
       return absl::InvalidArgumentError("Unknown KV owner");
@@ -226,7 +242,9 @@ class ActiveKvBank {
     if (begin < 0 || end < begin || end > pending_end()) {
       return absl::OutOfRangeError("KV view exceeds visible token interval");
     }
-    const auto& buffer = buffers_[index];
+    if (head < 0 || head >= specs_[index].num_heads)
+      return absl::InvalidArgumentError("Invalid KV head");
+    const auto& buffer = buffers_[index].heads[head];
     if (end > length_ && !buffer.appended) {
       return absl::FailedPreconditionError("KV owner has not appended yet");
     }
@@ -241,8 +259,9 @@ class ActiveKvBank {
   absl::StatusOr<absl::Span<const int8_t>> PaddedView(int owner, int begin,
                                                       int valid_end,
                                                       int padded_end,
-                                                      bool value) const {
-    const auto valid = View(owner, begin, valid_end, value);
+                                                      bool value,
+                                                      int head) const {
+    const auto valid = View(owner, begin, valid_end, value, head);
     if (!valid.ok()) return valid.status();
     if (padded_end < valid_end || padded_end > capacity_) {
       return absl::OutOfRangeError("KV padding exceeds allocation capacity");

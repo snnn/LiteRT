@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef THIRD_PARTY_ODML_LITERT_TENSOR_EXAMPLES_OPS_TRANSFORMER_TRANSFORMER_OPS_H_
 #define THIRD_PARTY_ODML_LITERT_TENSOR_EXAMPLES_OPS_TRANSFORMER_TRANSFORMER_OPS_H_
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -41,13 +42,15 @@ namespace litert::tensor {
 // The output is computed as: x * cos + rotated * sin.
 template <class... Mixins>
 Tensor<Mixins...> RoPE(const Tensor<Mixins...>& x, const Tensor<Mixins...>& cos,
-                       const Tensor<Mixins...>& sin) {
+                       const Tensor<Mixins...>& sin,
+                       bool dynamic_leading_dims = false) {
   // We assume a shape of [batch, ..., head_dim].
   const Shape& x_shape = x.GetShape();
   const int last_axis = static_cast<int>(x_shape.size()) - 1;
   const int half_dim = x_shape[last_axis] / 2;
   const Shape slice_size = [&] {
     Shape s = x_shape;
+    if (dynamic_leading_dims) std::fill(s.begin(), s.end() - 1, -1);
     s.back() = half_dim;
     return s;
   }();

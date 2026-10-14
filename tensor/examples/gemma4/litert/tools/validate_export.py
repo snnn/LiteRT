@@ -17,9 +17,15 @@
 
 from pathlib import Path
 from collections import Counter
-import hashlib, json, mmap, re, sys, time
+import hashlib
+import json
+import mmap
+import re
+import sys
+import time
 import numpy as np
 import argparse
+from model_spec import from_manifest
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
@@ -38,7 +44,8 @@ if not (args.schema_dir / "tflite/Model.py").is_file():
     parser.error("--schema-dir must contain generated tflite/Model.py")
 sys.path.insert(0, str(args.schema_dir.resolve()))
 
-from tflite.Model import Model
+from tflite.Model import Model  # noqa: E402 - schema path supplied by CLI
+from tflite.FullyConnectedOptions import FullyConnectedOptions  # noqa: E402
 
 ROOT = args.bundle_dir.resolve()
 manifest = json.loads((ROOT / "manifest.json").read_text())
@@ -59,7 +66,9 @@ B = 4 * 1024 * 1024
 stats = Counter()
 start = time.time()
 byname = {x["name"]: x for x in manifest["tensors"]}
-assert len(byname) == 1093
+spec = from_manifest(manifest)
+assert len(byname) == len(manifest["tensors"])
+assert len(byname) == 28 * spec.num_layers + 7 * spec.num_kv_owners + 8
 
 
 def digest_file(path):
@@ -80,7 +89,13 @@ def source_tensor(src):
 
 def source_data(src):
     t = source_tensor(src)
-    return models[src["section_index"]].Buffers(t.Buffer()).DataAsNumpy()
+    buffer = models[src["section_index"]].Buffers(t.Buffer())
+    if buffer.Offset():
+        section = sections[src["section_index"]]
+        offset = section["begin"] + buffer.Offset()
+        assert offset + buffer.Size() <= section["end"]
+        return np.frombuffer(mm, dtype=np.uint8, count=buffer.Size(), offset=offset)
+    return buffer.DataAsNumpy()
 
 
 def verify_file(record):
@@ -101,6 +116,8 @@ for r in manifest["tensors"]:
         if r["dtype"] == "float32"
         else count
         if r["dtype"] == "int8"
+        else (count + 3) // 4
+        if r["dtype"] == "int2"
         else (count + 1) // 2
     )
     assert path.stat().st_size == expected, (r["name"], expected, path.stat().st_size)
@@ -134,7 +151,7 @@ for r in manifest["tensors"]:
         )
         assert np.all(t.Quantization().ZeroPointAsNumpy() == 0)
         out = np.memmap(path, mode="r", dtype="u1")
-        if s["dtype"] == "INT2":
+        if s["dtype"] == "INT2" and r["dtype"] != "int2":
             # Decode source and destination independently into signed int8 values.
             for begin in range(0, len(src), B):
                 sb = src[begin : begin + B]
@@ -157,21 +174,36 @@ for r in manifest["tensors"]:
         assert (
             q["kind"] == "blockwise"
             and q["block_size"] == 256
-            and r["shape"] == [262144, 8960]
-            and len(r["sources"]) == 35
+            and r["shape"]
+            == [spec.vocab_size, spec.num_layers * spec.per_layer_input_dim]
+            and len(r["sources"]) == spec.num_layers
         )
-        out = np.memmap(path, mode="r", dtype="u1", shape=(262144, 35, 128))
+        out = np.memmap(
+            path,
+            mode="r",
+            dtype="u1",
+            shape=(
+                spec.vocab_size,
+                spec.num_layers,
+                spec.per_layer_input_dim // (4 if r["dtype"] == "int2" else 2),
+            ),
+        )
         parts = []
         for layer, s in enumerate(r["sources"]):
             assert s["destination_layer_partition"] == layer
             src = source_data(s)
             assert hashlib.sha256(src).hexdigest() == s["source_data_sha256"]
-            parts.append(src.reshape(262144, 128))
+            parts.append(
+                src.reshape(
+                    spec.vocab_size,
+                    spec.per_layer_input_dim // (4 if r["dtype"] == "int2" else 2),
+                )
+            )
             assert np.array_equal(
                 scales[:, layer].view("u4"),
                 source_tensor(s).Quantization().ScaleAsNumpy().view("u4"),
             )
-        for begin in range(0, 262144, 4096):
+        for begin in range(0, spec.vocab_size, 4096):
             block = np.asarray(out[begin : begin + 4096])
             for layer, src in enumerate(parts):
                 assert np.array_equal(block[:, layer, :], src[begin : begin + 4096]), (
@@ -185,9 +217,8 @@ for c in manifest["constants"]:
     out = np.fromfile(path, dtype="u1")
     assert np.array_equal(out, source_data(c["sources"][0]))
     stats["fixed_constants_checked"] += 1
-assert (
-    stats["weight_codes_checked"] == 5030936576
-    and stats["independently_decoded_int2_codes"] == 1937768448
+assert stats["weight_codes_checked"] == sum(
+    int(np.prod(r["shape"])) for r in manifest["tensors"] if "quantization" in r
 )
 
 
@@ -223,10 +254,25 @@ for g in trace["graphs"]:
         name = name_for_fc(w["name"])
         rec = byname[name + ".weight"]
         src = {
-            "section_index": 10,
+            "section_index": next(
+                i
+                for i, section in sections.items()
+                if section["items"].get("model_type") == "tf_lite_prefill_decode"
+            ),
             "subgraph_index": g["index"],
             "tensor_index": w["index"],
         }
+        if "fully_connected_options" in rec:
+            graph = models[src["section_index"]].Subgraphs(g["index"])
+            table = graph.Operators(op["index"]).BuiltinOptions()
+            opts = FullyConnectedOptions()
+            opts.Init(table.Bytes, table.Pos)
+            assert rec["fully_connected_options"] == {
+                "keep_num_dims": opts.KeepNumDims(),
+                "asymmetric_quantize_inputs": opts.AsymmetricQuantizeInputs(),
+                "fused_activation_function": opts.FusedActivationFunction(),
+                "weights_format": opts.WeightsFormat(),
+            }
         data = source_data(src)
         assert (
             hashlib.sha256(data).hexdigest() == rec["sources"][0]["source_data_sha256"]
@@ -248,7 +294,7 @@ for g in trace["graphs"]:
         counter += 1
     cross.append({"signature": g["name"], "fc_weight_and_scale_arrays_exact": counter})
 kv = json.loads(args.kv.read_text())["graphs"][0]["cache_updates"]
-assert len(kv) == 15
+assert len(kv) == spec.num_kv_owners
 for a, b in zip(manifest["kv_cache_specs"], kv):
     assert (
         a["owner"] == b["owner"]

@@ -24,7 +24,7 @@ template <class... Mixins>
 std::vector<Tensor<Mixins...>> BundlePerLayerProjectionParts(
     Tensor<Mixins...> scaled_embedding, Tensor<Mixins...> full_weight,
     const absl::flat_hash_map<std::string, Tensor<Mixins...>>& weights,
-    int num_layers, int per_layer_dim) {
+    int num_layers, int per_layer_dim, bool dynamic_rows = false) {
   auto fail = [&](const std::string& message) {
     return std::vector<Tensor<Mixins...>>(
         std::max(1, num_layers), Tensor<Mixins...>(graph::ErrorTensor(
@@ -51,9 +51,11 @@ std::vector<Tensor<Mixins...>> BundlePerLayerProjectionParts(
   Shape expanded_shape = scaled_embedding.GetShape();
   expanded_shape.back() = num_layers;
   expanded_shape.push_back(per_layer_dim);
+  if (dynamic_rows) expanded_shape[1] = kInferredDim;
   Tensor<Mixins...> expanded = Reshape(projected, expanded_shape);
   Shape part_shape = scaled_embedding.GetShape();
   part_shape.back() = per_layer_dim;
+  if (dynamic_rows) part_shape[1] = kInferredDim;
   Shape offsets(expanded_shape.size(), 0);
   Shape sizes = expanded_shape;
   sizes[sizes.size() - 2] = 1;

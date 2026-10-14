@@ -14,21 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Gemma4 E2B through the LiteRT production runner
+# Gemma4 through the LiteRT production runner
 
 This example exports two Tensor API graphs to one `.tflite` model and runs it
 through `LitertDynamicRunner` and the public `CompiledModel` API. The CPU backend
 uses LiteRT's existing XNNPACK delegate. Inference contains no direct XNNPACK
 runtime calls, custom attention operators, or per-layer execution loop.
 
-The model is specialized to the published `gemma-4-E2B-it.litertlm` bundle in
+The original C++ exporter is specialized to the published `gemma-4-E2B-it.litertlm` bundle in
 `litert-community/gemma-4-E2B-it-litert-lm`, revision
 `616f4124e6ff216292f16e7f73ff33b5ba9a4dd4`. Its source SHA-256 is
 `ab7838cdfc8f77e54d8ca45eadceb20452d9f01e4bfade03e5dce27911b27e42`
 (2,583,085,056 bytes). The loader checks this identity and the expected layout;
 the preparation tools validate the actual exported coefficients against the
-source. The example does not load arbitrary checkpoints or E4B. MTP is outside
-its scope.
+source. The shared Python/Core IR author additionally supports the published
+E4B architecture, selected by bundle metadata, and the runner accepts
+`--model_variant=e4b`. E4B requires a compact bundle and a Python-authored model;
+the C++ exporter remains E2B-only. See the
+[E4B instructions and numerical limitations](../../../experiments/explicit_dynamic_shapes/E4B.md).
+The example does not load arbitrary checkpoints. MTP is outside its scope.
+
+The execution and original preparation instructions below describe the E2B
+control. New extractions use schema version 2, which validates architecture and
+source coefficients rather than requiring the original E2B source identity.
+Existing schema-version-1 bundles retain the original identity checks.
 
 ## Execution
 
@@ -58,6 +67,11 @@ materialized per chunk, and concatenation still copies the active history
 inside the graph. This is chunked prefill, not tiled online-softmax attention.
 Original static INT2 MLP weights, the dynamically quantized INT2 head, INT8 KV
 scales and activation quantization boundaries are preserved.
+The authoring uses explicit `Quantize()` and `Dequantize()` operations for
+static FC activations and K/V conversions; numeric `Cast()` does not apply
+quantization scales or zero points.
+Per-channel weights explicitly carry one zero point per scale, so the TFLite
+serializer does not need to expand shared zero points.
 
 ## Build and prepare
 

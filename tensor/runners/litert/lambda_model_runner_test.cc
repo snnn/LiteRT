@@ -138,7 +138,7 @@ TEST(LitertDynamicRunnerTest, CreateFromBufferAndBinaryInput) {
 
 // Concatenation exercises the same empty/growing/shrinking history boundary
 // as chunked attention, with an output whose size really changes after resize.
-TEST(LitertDynamicRunnerTest, ActiveHistoryAcrossSignatures) {
+void CheckActiveHistoryAcrossSignatures(bool strict_shapes) {
   LITERT_ASSIGN_OR_ABORT(auto env, Environment::Create({}));
   LITERT_ASSIGN_OR_ABORT(auto options, Options::Create());
   ASSERT_TRUE(options.SetHardwareAccelerators(HwAccelerators::kCpu));
@@ -151,6 +151,10 @@ TEST(LitertDynamicRunnerTest, ActiveHistoryAcrossSignatures) {
         {.name = "chunk", .type = Type::kFP32, .shape = {rows, 1}});
     auto result = Concatenation({past, chunk}, 0);
     result.SetName("result");
+    if (strict_shapes) {
+      ASSERT_TRUE(factory.SetShapeSignature(past, {-1, 1}).ok());
+      ASSERT_TRUE(factory.SetShapeSignature(result, {-1, 1}).ok());
+    }
     ASSERT_TRUE(factory.AddSignature({result}, name).ok());
   }
   auto model = factory.CreateFlatbuffer();
@@ -168,7 +172,7 @@ TEST(LitertDynamicRunnerTest, ActiveHistoryAcrossSignatures) {
     for (const auto& [name, rows] : std::vector<std::pair<std::string, int>>{
              {"prefill", 4}, {"decode", 1}}) {
       const std::vector<int> shape{length, 1};
-      ASSERT_TRUE(runner.ResizeInput(name, "past", shape, false).ok());
+      ASSERT_TRUE(runner.ResizeInput(name, "past", shape, strict_shapes).ok());
       EXPECT_FALSE(runner.Run(name).ok());
       RankedTensorType type(ElementType::Float32,
                             Layout(Dimensions(shape.begin(), shape.end())));
@@ -203,11 +207,25 @@ TEST(LitertDynamicRunnerTest, ActiveHistoryAcrossSignatures) {
       for (int i = 0; i < rows; ++i) EXPECT_EQ(data.data()[length + i], 100.0f);
     }
   }
-  EXPECT_FALSE(runner.ResizeInput("prefill", "past", {-1, 1}, false).ok());
+  EXPECT_FALSE(
+      runner.ResizeInput("prefill", "past", {-1, 1}, strict_shapes).ok());
+  if (strict_shapes) {
+    EXPECT_FALSE(runner.ResizeInput("prefill", "past", {2, 2}).ok());
+    EXPECT_FALSE(runner.ResizeInput("prefill", "past", {2}).ok());
+    EXPECT_FALSE(runner.ResizeInput("decode", "chunk", {2, 1}).ok());
+  }
   EXPECT_FALSE(runner.ResizeInput("missing", "past", {2, 1}, false).ok());
   EXPECT_FALSE(runner.ResizeInput("prefill", size_t{999}, {2, 1}, false).ok());
   // A rejected resize leaves the last successful binding usable.
   EXPECT_TRUE(runner.Run("prefill").ok());
+}
+
+TEST(LitertDynamicRunnerTest, ActiveHistoryAcrossSignatures) {
+  CheckActiveHistoryAcrossSignatures(/*strict_shapes=*/false);
+}
+
+TEST(LitertDynamicRunnerTest, StrictActiveHistoryAcrossSignatures) {
+  CheckActiveHistoryAcrossSignatures(/*strict_shapes=*/true);
 }
 
 TEST(LitertDynamicRunnerTest, ResizeCopyInputAndValidateBorrowedShape) {

@@ -37,21 +37,25 @@ class Runner {
  public:
   static absl::StatusOr<std::unique_ptr<Runner>> Create(
       Environment& env, Options& options, const std::string& model_path,
-      const std::string& bundle_dir, int capacity, int alignment = 32) {
+      const std::string& bundle_dir, int capacity, int alignment = 32,
+      bool compact_int2 = false, bool dynamic_prefill_rows = false,
+      bool strict_shapes = false, ModelVariant variant = ModelVariant::kE2B) {
+    const auto config = Config::From(variant);
     if (alignment < 1 || alignment > 128 || (alignment & (alignment - 1)))
       return absl::InvalidArgumentError(
           "Alignment must be a power of two <=128");
     LRT_TENSOR_ASSIGN_OR_RETURN(
-        auto specs, LoadPublishedKvSpecs(bundle_dir, Config::E2B()));
+        auto specs, LoadPublishedKvSpecs(bundle_dir, config, compact_int2));
     LRT_TENSOR_ASSIGN_OR_RETURN(
         auto bank, ActiveKvBank::Create(std::move(specs), capacity));
     LRT_TENSOR_ASSIGN_OR_RETURN(
-        auto embeddings, LoadPublishedBundle(bundle_dir, Config::E2B(), true));
+        auto embeddings,
+        LoadPublishedBundle(bundle_dir, config, true, compact_int2));
     LRT_TENSOR_ASSIGN_OR_RETURN(
         auto model, LitertDynamicRunner::Create(env, model_path, options));
-    auto result = std::unique_ptr<Runner>(
-        new Runner(env, std::move(model), std::move(embeddings),
-                   std::move(bank), alignment));
+    auto result = std::unique_ptr<Runner>(new Runner(
+        env, std::move(model), std::move(embeddings), std::move(bank),
+        alignment, dynamic_prefill_rows, strict_shapes, config));
     for (int i = 0; i < 2; ++i) {
       auto& sig = result->signatures_[i];
       sig.name = i == 0 ? "prefill" : "decode";
@@ -111,11 +115,15 @@ class Runner {
     std::array<HostBuffer, 2> masks;
   };
   Runner(Environment& env, LitertDynamicRunner model, LoadedTensors embeddings,
-         ActiveKvBank bank, int alignment)
+         ActiveKvBank bank, int alignment, bool dynamic_prefill_rows,
+         bool strict_shapes, Config config)
       : env_(env),
+        config_(config),
         embeddings_(std::move(embeddings)),
         bank_(std::move(bank)),
         alignment_(alignment),
+        dynamic_prefill_rows_(dynamic_prefill_rows),
+        strict_shapes_(strict_shapes),
         model_(std::move(model)) {}
 
   template <class T>
@@ -130,7 +138,7 @@ class Runner {
   absl::Status Bind(Signature& sig, const std::string& name, ElementType type,
                     const Shape& shape, const void* pointer, size_t bytes) {
     LRT_TENSOR_RETURN_IF_ERROR(
-        model_.ResizeInput(sig.name, name, shape, false));
+        model_.ResizeInput(sig.name, name, shape, strict_shapes_));
     LITERT_ASSIGN_OR_RETURN(
         auto buffer,
         TensorBuffer::CreateFromHostMemory(
@@ -143,12 +151,13 @@ class Runner {
 
   absl::Status RunChunk(Signature& sig, absl::Span<const int32_t> tokens,
                         bool decode) {
-    const int count = tokens.size(), rows = sig.rows, start = bank_.length();
-    if (count <= 0 || count > rows)
+    const int count = tokens.size(), start = bank_.length();
+    const int rows = dynamic_prefill_rows_ && !decode ? count : sig.rows;
+    if (count <= 0 || count > sig.rows)
       return absl::InvalidArgumentError("Invalid chunk size");
     for (int32_t token : tokens)
       if (token < 0 || token >= config_.vocab_size)
-        return absl::InvalidArgumentError("Token outside E2B vocabulary");
+        return absl::InvalidArgumentError("Token outside Gemma4 vocabulary");
     LRT_TENSOR_RETURN_IF_ERROR(bank_.BeginAppend(count));
     struct Transaction {
       ActiveKvBank& bank;
@@ -156,6 +165,18 @@ class Runner {
         if (bank.append_in_flight()) bank.Abort();
       }
     } transaction{bank_};
+    if (dynamic_prefill_rows_ && !decode) {
+      LRT_TENSOR_RETURN_IF_ERROR(
+          model_.ResizeInput(sig.name, "embedded_input",
+                             {1, rows, config_.embed_dim}, strict_shapes_));
+      LRT_TENSOR_RETURN_IF_ERROR(model_.ResizeInput(
+          sig.name, "positions", {1, 1, rows, 1}, strict_shapes_));
+      for (auto [layer, index] : sig.ple_indices) {
+        LRT_TENSOR_RETURN_IF_ERROR(model_.ResizeInput(
+            sig.name, index, {1, rows, config_.per_layer_input_dim},
+            strict_shapes_));
+      }
+    }
     std::vector<int32_t> padded(rows, 0);
     std::copy(tokens.begin(), tokens.end(), padded.begin());
     sig.embeddings.resize(size_t(rows) * config_.embed_dim);
@@ -190,31 +211,35 @@ class Runner {
       int begin =
           global ? 0 : std::max(0, start - config_.sliding_window_size + 1);
       begin = begin / alignment_ * alignment_;
-      LRT_TENSOR_ASSIGN_OR_RETURN(auto keys,
-                                  bank_.Keys(spec.owner, begin, start));
-      LRT_TENSOR_ASSIGN_OR_RETURN(auto values,
-                                  bank_.Values(spec.owner, begin, start));
-      const auto prefix =
-          absl::StrCat("model.layers.", spec.owner, ".self_attn");
-      const Shape past_shape{1, 1, start - begin, spec.head_dim};
-      const Shape pad_shape{1, 1, padded_end - graph_end, spec.head_dim};
-      LRT_TENSOR_RETURN_IF_ERROR(Bind(sig, prefix + ".past_k",
-                                      ElementType::Int8, past_shape,
-                                      keys.data(), keys.size()));
-      LRT_TENSOR_RETURN_IF_ERROR(Bind(sig, prefix + ".past_v",
-                                      ElementType::Int8, past_shape,
-                                      values.data(), values.size()));
-      for (const char* suffix : {".pad_k", ".pad_v"})
-        LRT_TENSOR_RETURN_IF_ERROR(Bind(
-            sig, prefix + suffix, ElementType::Int8, pad_shape, padding_.data(),
-            size_t(padded_end - graph_end) * spec.head_dim));
+      for (int head = 0; head < spec.num_heads; ++head) {
+        LRT_TENSOR_ASSIGN_OR_RETURN(auto keys,
+                                    bank_.Keys(spec.owner, begin, start, head));
+        LRT_TENSOR_ASSIGN_OR_RETURN(
+            auto values, bank_.Values(spec.owner, begin, start, head));
+        const auto prefix = absl::StrCat(
+            "model.layers.", spec.owner, ".self_attn",
+            spec.num_heads > 1 ? absl::StrCat(".head_", head) : "");
+        const Shape past_shape{1, 1, start - begin, spec.head_dim};
+        const Shape pad_shape{1, 1, padded_end - graph_end, spec.head_dim};
+        LRT_TENSOR_RETURN_IF_ERROR(Bind(sig, prefix + ".past_k",
+                                        ElementType::Int8, past_shape,
+                                        keys.data(), keys.size()));
+        LRT_TENSOR_RETURN_IF_ERROR(Bind(sig, prefix + ".past_v",
+                                        ElementType::Int8, past_shape,
+                                        values.data(), values.size()));
+        for (const char* suffix : {".pad_k", ".pad_v"})
+          LRT_TENSOR_RETURN_IF_ERROR(Bind(
+              sig, prefix + suffix, ElementType::Int8, pad_shape,
+              padding_.data(), size_t(padded_end - graph_end) * spec.head_dim));
+      }
     }
     for (int global = 0; global < 2; ++global) {
       int begin =
           global ? 0 : std::max(0, start - config_.sliding_window_size + 1);
       begin = begin / alignment_ * alignment_;
       const int extent = padded_end - begin;
-      const int mask_heads = decode ? config_.num_heads : 1;
+      const int mask_heads =
+          decode ? config_.num_heads / config_.num_kv_heads : 1;
       auto& buffer = sig.masks[global];
       buffer.Resize(size_t(mask_heads) * rows * extent * sizeof(float));
       auto* data = reinterpret_cast<float*>(buffer.data());
@@ -236,19 +261,25 @@ class Runner {
     }
     LRT_TENSOR_RETURN_IF_ERROR(model_.Run(sig.name));
     for (const auto& spec : bank_.specs()) {
-      LRT_TENSOR_ASSIGN_OR_RETURN(
-          auto keys,
-          model_.GetOutput(sig.name, absl::StrCat("new_key_", spec.owner)));
-      LRT_TENSOR_ASSIGN_OR_RETURN(
-          auto values,
-          model_.GetOutput(sig.name, absl::StrCat("new_value_", spec.owner)));
-      auto k = keys.GetBufferPtr()->Lock().As<const int8_t>();
-      auto v = values.GetBufferPtr()->Lock().As<const int8_t>();
-      const size_t size = size_t(count) * spec.head_dim;
-      if (k.size() < size || v.size() < size)
-        return absl::InternalError("Short KV output");
-      LRT_TENSOR_RETURN_IF_ERROR(
-          bank_.Append(spec.owner, {k.data(), size}, {v.data(), size}));
+      for (int head = 0; head < spec.num_heads; ++head) {
+        const auto suffix =
+            spec.num_heads > 1 ? absl::StrCat("_head_", head) : "";
+        LRT_TENSOR_ASSIGN_OR_RETURN(
+            auto keys,
+            model_.GetOutput(sig.name,
+                             absl::StrCat("new_key_", spec.owner, suffix)));
+        LRT_TENSOR_ASSIGN_OR_RETURN(
+            auto values,
+            model_.GetOutput(sig.name,
+                             absl::StrCat("new_value_", spec.owner, suffix)));
+        auto k = keys.GetBufferPtr()->Lock().As<const int8_t>();
+        auto v = values.GetBufferPtr()->Lock().As<const int8_t>();
+        const size_t size = size_t(count) * spec.head_dim;
+        if (k.size() < size || v.size() < size)
+          return absl::InternalError("Short KV output");
+        LRT_TENSOR_RETURN_IF_ERROR(
+            bank_.Append(spec.owner, {k.data(), size}, {v.data(), size}, head));
+      }
     }
     return bank_.Commit();
   }
@@ -258,6 +289,8 @@ class Runner {
   LoadedTensors embeddings_;
   ActiveKvBank bank_;
   int alignment_;
+  bool dynamic_prefill_rows_;
+  bool strict_shapes_;
   std::array<Signature, 2> signatures_;
   HostBuffer padding_;
   // Destroy the model before buffers it borrows.

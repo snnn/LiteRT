@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Extract and validate the fixed published E2B bundle for the LiteRT example."""
+"""Extract and validate the published Gemma4 E2B/E4B bundle for the LiteRT example."""
 
 import argparse
 from pathlib import Path
@@ -36,6 +36,8 @@ def main():
         required=True,
         help="New directory; contains audit/ and weights/",
     )
+    parser.add_argument("--model-variant", choices=("e2b", "e4b"), default="e2b")
+    parser.add_argument("--compact-int2", action="store_true")
     args = parser.parse_args()
     if not __debug__:
         parser.error("Run Python without -O: export assertions validate the source")
@@ -71,7 +73,15 @@ def main():
         "--output",
         trace,
     )
-    run("summarize_kv.py", "--trace", trace, "--output", kv)
+    run(
+        "summarize_kv.py",
+        "--trace",
+        trace,
+        "--output",
+        kv,
+        "--model-variant",
+        args.model_variant,
+    )
     common = [
         "--schema-dir",
         schema,
@@ -82,7 +92,15 @@ def main():
         "--kv",
         kv,
     ]
-    run("export_bundle.py", *common, "--output-dir", weights)
+    run(
+        "export_bundle.py",
+        *common,
+        "--output-dir",
+        weights,
+        "--model-variant",
+        args.model_variant,
+        *(["--compact-int2"] if args.compact_int2 else []),
+    )
     run(
         "validate_export.py",
         *common,

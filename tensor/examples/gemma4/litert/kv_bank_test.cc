@@ -54,6 +54,43 @@ TEST(KvBankTest, TransactionPreservesCommittedRowsOnAbortAndReset) {
   EXPECT_FALSE(bank.Keys(0, 0, 1).ok());
   EXPECT_FALSE(bank.BeginAppend(5).ok());
 }
+TEST(KvBankTest, MultipleHeadsHaveIndependentViewsAndAtomicCommit) {
+  auto result = ActiveKvBank::Create({{0, 4, 0.5f, 0.25f, 2}}, 8);
+  ASSERT_TRUE(result.ok());
+  auto bank = std::move(*result);
+  std::vector<int8_t> first{1, 2, 3, 4, 5, 6, 7, 8};
+  std::vector<int8_t> second{-1, -2, -3, -4, -5, -6, -7, -8};
+  ASSERT_TRUE(bank.BeginAppend(2).ok());
+  ASSERT_TRUE(bank.Append(0, first, second, 0).ok());
+  EXPECT_FALSE(bank.Commit().ok());
+  EXPECT_FALSE(bank.Keys(0, 0, 2, 1).ok());
+  ASSERT_TRUE(bank.Append(0, second, first, 1).ok());
+  ASSERT_TRUE(bank.Commit().ok());
+  auto a = bank.Keys(0, 1, 2, 0);
+  auto b = bank.Keys(0, 1, 2, 1);
+  ASSERT_TRUE(a.ok());
+  ASSERT_TRUE(b.ok());
+  EXPECT_EQ(std::vector<int8_t>(a->begin(), a->end()),
+            (std::vector<int8_t>{5, 6, 7, 8}));
+  EXPECT_EQ(std::vector<int8_t>(b->begin(), b->end()),
+            (std::vector<int8_t>{-5, -6, -7, -8}));
+  EXPECT_NE(a->data(), b->data());
+  ASSERT_TRUE(bank.BeginAppend(1).ok());
+  std::vector<int8_t> pending(4, 99);
+  ASSERT_TRUE(bank.Append(0, pending, pending, 1).ok());
+  bank.Abort();
+  EXPECT_FALSE(bank.Keys(0, 0, 3, 1).ok());
+  EXPECT_EQ(bank.length(), 2);
+  EXPECT_FALSE(bank.Keys(0, 0, 1, 2).ok());
+  EXPECT_FALSE(bank.Keys(0, 0, 1, -1).ok());
+  auto padded = bank.PaddedKeys(0, 1, 2, 4, 1);
+  ASSERT_TRUE(padded.ok());
+  EXPECT_EQ(padded->size(), 12);
+  EXPECT_EQ(padded->data(), b->data());
+  bank.Reset();
+  EXPECT_FALSE(bank.Keys(0, 0, 1, 0).ok());
+  EXPECT_FALSE(bank.Keys(0, 0, 1, 1).ok());
+}
 TEST(KvBankTest, RejectsInvalidOwnersAndAppendSizes) {
   EXPECT_FALSE(ActiveKvBank::Create({}, 4).ok());
   EXPECT_FALSE(ActiveKvBank::Create({{0, 256, 0, 1}}, 4).ok());

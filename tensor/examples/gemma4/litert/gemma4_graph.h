@@ -126,7 +126,8 @@ Gemma4Outputs<Mixins...> BuildGemma4Graph(const Gemma4Inputs<Mixins...>& inputs,
   if (full_projection != inputs.weights.end()) {
     bundle_projection_parts = BundlePerLayerProjectionParts(
         hidden_states, full_projection->second, inputs.weights,
-        config.num_layers, config.per_layer_input_dim);
+        config.num_layers, config.per_layer_input_dim,
+        context.dynamic_prefill_rows);
   }
 
   std::vector<Tensor<Mixins...>> updated_key_caches;

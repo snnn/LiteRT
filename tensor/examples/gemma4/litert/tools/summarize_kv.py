@@ -14,15 +14,19 @@
 # limitations under the License.
 
 from pathlib import Path
-import json, re
+import json
+import re
 import argparse
+from model_spec import SPECS
 
 parser = argparse.ArgumentParser(
     description="Inspect published owner sharing and KV quantization from a graph trace."
 )
 parser.add_argument("--trace", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
+parser.add_argument("--model-variant", choices=SPECS, default="e2b")
 args = parser.parse_args()
+spec = SPECS[args.model_variant]
 if args.output.exists():
     raise FileExistsError(args.output)
 p = json.loads(args.trace.read_text())
@@ -45,6 +49,9 @@ for g in p["graphs"]:
                 "scales": t["scales"],
                 "dtype": t["dtype"],
             }
+        assert len(kin["scales"]) == len(vin["scales"]) == 1
+        assert kin["zero_points"] == vin["zero_points"] == [0]
+        assert kin["shape"][1] == vin["shape"][1] == spec.num_kv_heads
         decomp = g["decompositions"][str(op["decomposition_subgraph"])]
         qs = [o for o in decomp["operators"] if o["type"] == "QUANTIZE"]
         assert len(qs) == 2
@@ -82,10 +89,12 @@ for g in p["graphs"]:
                 "dequantized_inside_bmm": True,
             }
         )
-    assert len(updates) == 15 and len(reads) == (
-        28 if g["name"].startswith("prefill") else 70
+    assert len(updates) == spec.num_kv_owners and len(reads) == (
+        2 * spec.final_prefill_owner
+        if g["name"].startswith("prefill")
+        else 2 * spec.num_layers
     )
-    expected = {i: (i if i < 15 else 14 if i % 5 == 4 else 13) for i in range(35)}
+    expected = dict(enumerate(spec.owners))
     assert all(expected[r["layer"]] == r["owner"] for r in reads)
     summary["graphs"].append(
         {

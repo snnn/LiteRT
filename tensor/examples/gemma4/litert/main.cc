@@ -37,7 +37,10 @@ limitations under the License.
 #include "tflite/delegates/xnnpack/xnnpack_delegate.h"
 
 ABSL_FLAG(std::string, bundle_dir, "",
-          "Verified E2B bundle (host embedding tables).");
+          "Verified Gemma4 bundle (host embedding tables).");
+ABSL_FLAG(litert::tensor::examples::gemma4::ModelVariant, model_variant,
+          litert::tensor::examples::gemma4::ModelVariant::kE2B,
+          "Gemma4 architecture: e2b or e4b.");
 ABSL_FLAG(std::string, model_path, "", "Exported two-signature .tflite model.");
 ABSL_FLAG(std::string, cases_file, "",
           "TSV: case ID, prompt CSV, forced decode CSV or -.");
@@ -53,6 +56,13 @@ ABSL_FLAG(int, measured_runs, 3, "Measured runs per case.");
 ABSL_FLAG(bool, dump_outputs, false,
           "Dump complete logits and committed KV after each token; do not use "
           "for timing.");
+ABSL_FLAG(bool, experimental_compact_int2, false,
+          "Read host embeddings from the experimental compact INT2 bundle.");
+ABSL_FLAG(bool, experimental_dynamic_prefill, false,
+          "Resize prefill to valid query rows; requires the dynamic export.");
+ABSL_FLAG(bool, experimental_explicit_dynamic_shapes, false,
+          "Use strict input resizing; requires an export with explicit "
+          "dynamic shape signatures.");
 
 namespace litert::tensor::examples::gemma4::cpu {
 namespace {
@@ -69,8 +79,8 @@ absl::StatusOr<std::vector<int32_t>> Tokens(const std::string& csv) {
   for (auto field : absl::StrSplit(csv, ',')) {
     int32_t token;
     if (!absl::SimpleAtoi(field, &token) || token < 0 ||
-        token >= Config::E2B().vocab_size)
-      return absl::InvalidArgumentError("Invalid E2B token ID");
+        token >= Config::From(absl::GetFlag(FLAGS_model_variant)).vocab_size)
+      return absl::InvalidArgumentError("Invalid Gemma4 token ID");
     result.push_back(token);
   }
   return result;
@@ -121,16 +131,19 @@ absl::Status Dump(const std::string& path,
   LRT_TENSOR_RETURN_IF_ERROR(
       DumpBytes(path, logits.data(), logits.size() * sizeof(float)));
   for (const auto& spec : bank.specs()) {
-    LRT_TENSOR_ASSIGN_OR_RETURN(auto k,
-                                bank.Keys(spec.owner, 0, bank.length()));
-    LRT_TENSOR_ASSIGN_OR_RETURN(auto v,
-                                bank.Values(spec.owner, 0, bank.length()));
-    LRT_TENSOR_RETURN_IF_ERROR(
-        DumpBytes(path + absl::StrCat(".owner", spec.owner, ".k.i8"), k.data(),
-                  k.size()));
-    LRT_TENSOR_RETURN_IF_ERROR(
-        DumpBytes(path + absl::StrCat(".owner", spec.owner, ".v.i8"), v.data(),
-                  v.size()));
+    for (int head = 0; head < spec.num_heads; ++head) {
+      const auto suffix = spec.num_heads > 1 ? absl::StrCat(".head", head) : "";
+      LRT_TENSOR_ASSIGN_OR_RETURN(
+          auto k, bank.Keys(spec.owner, 0, bank.length(), head));
+      LRT_TENSOR_ASSIGN_OR_RETURN(
+          auto v, bank.Values(spec.owner, 0, bank.length(), head));
+      LRT_TENSOR_RETURN_IF_ERROR(
+          DumpBytes(path + absl::StrCat(".owner", spec.owner, suffix, ".k.i8"),
+                    k.data(), k.size()));
+      LRT_TENSOR_RETURN_IF_ERROR(
+          DumpBytes(path + absl::StrCat(".owner", spec.owner, suffix, ".v.i8"),
+                    v.data(), v.size()));
+    }
   }
   return absl::OkStatus();
 }
@@ -164,9 +177,14 @@ absl::Status Main() {
       cpu_options.SetXNNPackWeightCachePath(cache_path.c_str()));
   auto at = Clock::now();
   LRT_TENSOR_ASSIGN_OR_RETURN(
-      auto runner, Runner::Create(env, options, absl::GetFlag(FLAGS_model_path),
-                                  absl::GetFlag(FLAGS_bundle_dir),
-                                  absl::GetFlag(FLAGS_cache_capacity)));
+      auto runner,
+      Runner::Create(env, options, absl::GetFlag(FLAGS_model_path),
+                     absl::GetFlag(FLAGS_bundle_dir),
+                     absl::GetFlag(FLAGS_cache_capacity), 32,
+                     absl::GetFlag(FLAGS_experimental_compact_int2),
+                     absl::GetFlag(FLAGS_experimental_dynamic_prefill),
+                     absl::GetFlag(FLAGS_experimental_explicit_dynamic_shapes),
+                     absl::GetFlag(FLAGS_model_variant)));
   const double setup_ms = Elapsed(at);
   std::ofstream results(dir + "/timings.jsonl");
   results << std::setprecision(12);
@@ -184,7 +202,8 @@ absl::Status Main() {
         at = Clock::now();
         LRT_TENSOR_ASSIGN_OR_RETURN(auto logits, runner->Decode(decode[step]));
         double elapsed_ms = Elapsed(at);
-        if (logits.size() != Config::E2B().vocab_size ||
+        if (logits.size() !=
+                Config::From(absl::GetFlag(FLAGS_model_variant)).vocab_size ||
             !std::all_of(logits.data(), logits.data() + logits.size(),
                          [](float v) { return std::isfinite(v); }))
           return absl::InternalError("Invalid logits");

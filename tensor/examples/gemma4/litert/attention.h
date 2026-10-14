@@ -91,28 +91,34 @@ AttentionOutput<Mixins...> Attention(
   const Shape& input_shape = input.GetShape();
   int batch_size = input_shape[0];
   int seq_len = input_shape[1];
+  const int reshape_rows =
+      active_graph_context->dynamic_prefill_rows ? kInferredDim : seq_len;
 
-  q = Reshape(q, {batch_size, seq_len, config.num_heads, head_dim});
+  q = Reshape(q, {batch_size, reshape_rows, config.num_heads, head_dim});
   q = Transpose(q, {0, 2, 1, 3});
   q = PrimitiveRmsNorm(q, q_norm_scale, rmsnorm_eps);
-  q = RoPE(q, cos, sin);
+  q = RoPE(q, cos, sin, active_graph_context->dynamic_prefill_rows);
 
   auto& ctx = *active_graph_context;
   auto& cut = ctx.layers[ctx.layer];
   cut.owner = ctx.owners[ctx.layer];
   cut.dim = head_dim;
   cut.global = is_global;
-  cut.query = Reshape(q, {batch_size, 1, config.num_heads * seq_len, head_dim});
+  cut.query = Reshape(
+      q, {batch_size, 1,
+          ctx.dynamic_prefill_rows ? kInferredDim : config.num_heads * seq_len,
+          head_dim});
   Tensor<Mixins...> nk = TensorHandle::Invalid(), nv = TensorHandle::Invalid();
   if (cut.owner == ctx.layer) {
     auto k = MobileFullyConnected(input, k_proj, &weights);
     k = Transpose(
-        Reshape(k, {batch_size, seq_len, config.num_kv_heads, head_dim}),
+        Reshape(k, {batch_size, reshape_rows, config.num_kv_heads, head_dim}),
         {0, 2, 1, 3});
-    k = RoPE(PrimitiveRmsNorm(k, k_norm_scale, rmsnorm_eps), cos, sin);
+    k = RoPE(PrimitiveRmsNorm(k, k_norm_scale, rmsnorm_eps), cos, sin,
+             ctx.dynamic_prefill_rows);
     auto v = MobileFullyConnected(input, v_proj, &weights);
     v = Transpose(
-        Reshape(v, {batch_size, seq_len, config.num_kv_heads, head_dim}),
+        Reshape(v, {batch_size, reshape_rows, config.num_kv_heads, head_dim}),
         {0, 2, 1, 3});
     v = PrimitiveRmsNorm(v, Tensor<Mixins...>(TensorHandle::Invalid()),
                          rmsnorm_eps);
@@ -160,18 +166,19 @@ AttentionOutput<Mixins...> Attention(
   // them. The KV operand has a singleton batch and is shared by all heads.
   auto scores = BatchMatMul(
       ctx.broadcast_mask ? q : Tensor<Mixins...>(cut.query),
-      Cast(Tensor<Mixins...>(cut.active_key), Type::kFP32), false, true);
+      Dequantize(Tensor<Mixins...>(cut.active_key)), false, true);
   if (config.attn_logits_soft_cap) {
     float cap = *config.attn_logits_soft_cap;
     scores = Mul(Tanh(Mul(scores, 1.0f / cap)), cap);
   }
   auto context = BatchMatMul(
       Softmax(Add(scores, mask)),
-      Cast(Tensor<Mixins...>(cut.active_value), Type::kFP32), false, false);
+      Dequantize(Tensor<Mixins...>(cut.active_value)), false, false);
   cut.context_input = context;
-  context = Reshape(context, {batch_size, config.num_heads, seq_len, head_dim});
+  context =
+      Reshape(context, {batch_size, config.num_heads, reshape_rows, head_dim});
   context = Transpose(context, {0, 2, 1, 3});
-  context = Reshape(context, {batch_size, seq_len, q_out_dim});
+  context = Reshape(context, {batch_size, reshape_rows, q_out_dim});
   return {MobileFullyConnected(context, o_proj, &weights), nk, nv, nk, nv};
 }
 }  // namespace litert::tensor::examples::gemma4::cpu
