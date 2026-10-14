@@ -456,7 +456,7 @@ class QuantizationOverride {
 
 TEST(Int8SdpaTest, RejectsUnsupportedCacheQuantization) {
   for (bool value_cache : {false, true}) {
-    for (int kind = 0; kind < 16; ++kind) {
+    for (int kind = 0; kind < 15; ++kind) {
       SCOPED_TRACE(value_cache);
       SCOPED_TRACE(kind);
       Inputs inputs(1);
@@ -508,9 +508,6 @@ TEST(Int8SdpaTest, RejectsUnsupportedCacheQuantization) {
           break;
         case 14:
           tensor.type = kTfLiteUInt8;
-          break;
-        case 15:
-          tensor.type = kTfLiteFloat32;
           break;
       }
       ASSERT_EQ(model.Delegate(), kTfLiteOk);

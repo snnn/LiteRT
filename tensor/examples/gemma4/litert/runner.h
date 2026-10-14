@@ -123,7 +123,8 @@ class Runner {
         bank_(std::move(bank)),
         alignment_(alignment),
         dynamic_prefill_rows_(dynamic_prefill_rows),
-        strict_shapes_(strict_shapes),
+        resize_mode_(strict_shapes ? ResizeMode::kStrict
+                                   : ResizeMode::kNonStrict),
         model_(std::move(model)) {}
 
   template <class T>
@@ -138,7 +139,7 @@ class Runner {
   absl::Status Bind(Signature& sig, const std::string& name, ElementType type,
                     const Shape& shape, const void* pointer, size_t bytes) {
     LRT_TENSOR_RETURN_IF_ERROR(
-        model_.ResizeInput(sig.name, name, shape, strict_shapes_));
+        model_.ResizeInput(sig.name, name, shape, resize_mode_));
     LITERT_ASSIGN_OR_RETURN(
         auto buffer,
         TensorBuffer::CreateFromHostMemory(
@@ -168,13 +169,13 @@ class Runner {
     if (dynamic_prefill_rows_ && !decode) {
       LRT_TENSOR_RETURN_IF_ERROR(
           model_.ResizeInput(sig.name, "embedded_input",
-                             {1, rows, config_.embed_dim}, strict_shapes_));
+                             {1, rows, config_.embed_dim}, resize_mode_));
       LRT_TENSOR_RETURN_IF_ERROR(model_.ResizeInput(
-          sig.name, "positions", {1, 1, rows, 1}, strict_shapes_));
+          sig.name, "positions", {1, 1, rows, 1}, resize_mode_));
       for (auto [layer, index] : sig.ple_indices) {
         LRT_TENSOR_RETURN_IF_ERROR(model_.ResizeInput(
             sig.name, index, {1, rows, config_.per_layer_input_dim},
-            strict_shapes_));
+            resize_mode_));
       }
     }
     std::vector<int32_t> padded(rows, 0);
@@ -290,7 +291,7 @@ class Runner {
   ActiveKvBank bank_;
   int alignment_;
   bool dynamic_prefill_rows_;
-  bool strict_shapes_;
+  ResizeMode resize_mode_;
   std::array<Signature, 2> signatures_;
   HostBuffer padding_;
   // Destroy the model before buffers it borrows.

@@ -130,7 +130,11 @@ inline LiteRtStatus InitQnnOptions(
   qnn_options.SetEnableJustInTime(qualcomm_options.GetEnableJustInTime());
   qnn_options.SetUseConvHMX(qualcomm_options.GetUseConvHMX());
   qnn_options.SetUseFoldReLU(qualcomm_options.GetUseFoldReLU());
+  qnn_options.SetHtpDlbc(qualcomm_options.GetHtpDlbc());
+  qnn_options.SetHtpDlbcWeights(qualcomm_options.GetHtpDlbcWeights());
   qnn_options.SetHtpPPoint(qualcomm_options.GetHtpPPoint());
+  qnn_options.SetHtpWeightSharingChannelTileSize(
+      qualcomm_options.GetHtpWeightSharingChannelTileSize());
   qnn_options.SetHtpPerformanceMode(static_cast<::qnn::HtpPerformanceMode>(
       qualcomm_options.GetHtpPerformanceMode()));
   qnn_options.SetDspPerformanceMode(static_cast<::qnn::DspPerformanceMode>(
@@ -149,6 +153,7 @@ inline LiteRtStatus InitQnnOptions(
   qnn_options.SetDlcDir(qualcomm_options.GetDlcDir());
   qnn_options.SetGraphTransform(qualcomm_options.GetGraphTransform());
   qnn_options.SetVtcmSize(qualcomm_options.GetVtcmSize());
+  qnn_options.SetHtpDeviceId(qualcomm_options.GetHtpDeviceId());
   qnn_options.SetNumHvxThreads(qualcomm_options.GetNumHvxThreads());
   qnn_options.SetOptimizationLevel(static_cast<::qnn::OptimizationLevel>(
       qualcomm_options.GetOptimizationLevel()));

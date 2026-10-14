@@ -17,7 +17,6 @@
 #ifndef THIRD_PARTY_ODML_LITERT_TENSOR_RUNNERS_LITERT_LITERT_DYNAMIC_RUNNER_H_
 #define THIRD_PARTY_ODML_LITERT_TENSOR_RUNNERS_LITERT_LITERT_DYNAMIC_RUNNER_H_
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -25,17 +24,25 @@
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"  // from @com_google_absl
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
-#include "absl/status/status.h"            // from @com_google_absl
-#include "absl/status/statusor.h"          // from @com_google_absl
-#include "absl/types/span.h"               // from @com_google_absl
+#include "absl/status/status.h"  // from @com_google_absl
+#include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/types/span.h"  // from @com_google_absl
+#include "litert/c/litert_custom_tensor_buffer.h"
 #include "litert/cc/litert_buffer_ref.h"
 #include "litert/cc/litert_compiled_model.h"
 #include "litert/cc/litert_element_type.h"
 #include "litert/cc/litert_environment.h"
+#include "litert/cc/litert_expected.h"
+#include "litert/cc/litert_layout.h"
 #include "litert/cc/litert_macros.h"
+#include "litert/cc/litert_model_types.h"
 #include "litert/cc/litert_options.h"
+#include "litert/cc/litert_ranked_tensor_type.h"
 #include "litert/cc/litert_tensor_buffer.h"
+#include "litert/cc/options/litert_gpu_options.h"
 #include "tensor/buffer.h"
 #include "tensor/datatypes.h"
 #include "tensor/runners/litert/feedback_loop_config.h"
@@ -45,11 +52,18 @@
 namespace litert {
 namespace tensor {
 
+enum class ResizeMode {
+  kStrict,
+  kNonStrict,
+};
+
 class LitertDynamicRunner {
  public:
+  using ResizeMode = ::litert::tensor::ResizeMode;
+
   static absl::StatusOr<LitertDynamicRunner> Create(
       Environment& env, const std::string& model_path, Options& options) {
-    LITERT_ASSIGN_OR_RETURN(auto compiled_model,
+    LITERT_ASSIGN_OR_RETURN(CompiledModel compiled_model,
                             CompiledModel::Create(env, model_path, options));
     LitertDynamicRunner runner(std::move(compiled_model));
     LITERT_RETURN_IF_ERROR(runner.InitializeBuffers());
@@ -60,7 +74,7 @@ class LitertDynamicRunner {
       Environment& env, absl::Span<const uint8_t> model_buffer,
       Options& options) {
     BufferRef<uint8_t> buf_ref(model_buffer.data(), model_buffer.size());
-    LITERT_ASSIGN_OR_RETURN(auto compiled_model,
+    LITERT_ASSIGN_OR_RETURN(CompiledModel compiled_model,
                             CompiledModel::Create(env, buf_ref, options));
     LitertDynamicRunner runner(std::move(compiled_model));
     LITERT_RETURN_IF_ERROR(runner.InitializeBuffers());
@@ -70,10 +84,10 @@ class LitertDynamicRunner {
   static absl::StatusOr<LitertDynamicRunner> Create(
       Environment& env, const std::string& model_path, Options& options,
       const std::vector<FeedbackLoopConfig>& feedback_loops) {
-    auto gpu_options_or = options.GetGpuOptions();
+    Expected<GpuOptions&> gpu_options_or = options.GetGpuOptions();
     if (gpu_options_or.HasValue()) {
       LITERT_RETURN_IF_ERROR(gpu_options_or->EnableExternalTensorsMode(true));
-      for (const auto& loop : feedback_loops) {
+      for (const FeedbackLoopConfig& loop : feedback_loops) {
         LITERT_RETURN_IF_ERROR(
             gpu_options_or->AddExternalTensorPattern(loop.input_name.c_str()));
         LITERT_RETURN_IF_ERROR(
@@ -81,12 +95,12 @@ class LitertDynamicRunner {
       }
     }
 
-    LITERT_ASSIGN_OR_RETURN(auto compiled_model,
+    LITERT_ASSIGN_OR_RETURN(CompiledModel compiled_model,
                             CompiledModel::Create(env, model_path, options));
     LitertDynamicRunner runner(std::move(compiled_model));
     LITERT_RETURN_IF_ERROR(runner.InitializeBuffers());
 
-    for (const auto& loop : feedback_loops) {
+    for (const FeedbackLoopConfig& loop : feedback_loops) {
       LITERT_RETURN_IF_ERROR(
           runner.RegisterFeedbackLoop(loop.input_name, loop.output_name));
     }
@@ -97,10 +111,10 @@ class LitertDynamicRunner {
   static absl::StatusOr<LitertDynamicRunner> Create(
       Environment& env, absl::Span<const uint8_t> model_buffer,
       Options& options, const std::vector<FeedbackLoopConfig>& feedback_loops) {
-    auto gpu_options_or = options.GetGpuOptions();
+    Expected<GpuOptions&> gpu_options_or = options.GetGpuOptions();
     if (gpu_options_or.HasValue()) {
       LITERT_RETURN_IF_ERROR(gpu_options_or->EnableExternalTensorsMode(true));
-      for (const auto& loop : feedback_loops) {
+      for (const FeedbackLoopConfig& loop : feedback_loops) {
         LITERT_RETURN_IF_ERROR(
             gpu_options_or->AddExternalTensorPattern(loop.input_name.c_str()));
         LITERT_RETURN_IF_ERROR(
@@ -109,12 +123,12 @@ class LitertDynamicRunner {
     }
 
     BufferRef<uint8_t> buf_ref(model_buffer.data(), model_buffer.size());
-    LITERT_ASSIGN_OR_RETURN(auto compiled_model,
+    LITERT_ASSIGN_OR_RETURN(CompiledModel compiled_model,
                             CompiledModel::Create(env, buf_ref, options));
     LitertDynamicRunner runner(std::move(compiled_model));
     LITERT_RETURN_IF_ERROR(runner.InitializeBuffers());
 
-    for (const auto& loop : feedback_loops) {
+    for (const FeedbackLoopConfig& loop : feedback_loops) {
       LITERT_RETURN_IF_ERROR(
           runner.RegisterFeedbackLoop(loop.input_name, loop.output_name));
     }
@@ -124,30 +138,35 @@ class LitertDynamicRunner {
 
   // Helper to initialize buffers for all signatures
   absl::Status InitializeBuffers() {
-    LITERT_ASSIGN_OR_RETURN(auto keys, compiled_model_.GetSignatureKeys());
-    if (keys.empty()) return absl::InternalError("No signatures found");
+    LITERT_ASSIGN_OR_RETURN(std::vector<absl::string_view> keys,
+                            compiled_model_.GetSignatureKeys());
+    if (keys.empty()) {
+      return absl::InternalError("No signatures found");
+    }
     default_signature_name_ = std::string(keys[0]);
 
-    for (const auto& key : keys) {
+    for (absl::string_view key : keys) {
       std::string key_str(key);
-      LITERT_ASSIGN_OR_RETURN(auto in_buffers,
+      LITERT_ASSIGN_OR_RETURN(std::vector<TensorBuffer> in_buffers,
                               compiled_model_.CreateInputBuffers(key_str));
       signature_input_buffers_[key_str] = std::move(in_buffers);
 
-      LITERT_ASSIGN_OR_RETURN(auto out_buffers,
+      LITERT_ASSIGN_OR_RETURN(std::vector<TensorBuffer> out_buffers,
                               compiled_model_.CreateOutputBuffers(key_str));
       signature_output_buffers_[key_str] = std::move(out_buffers);
       SignatureMetadata metadata;
-      LITERT_ASSIGN_OR_RETURN(auto input_names,
+      LITERT_ASSIGN_OR_RETURN(std::vector<absl::string_view> input_names,
                               compiled_model_.GetSignatureInputNames(key_str));
-      LITERT_ASSIGN_OR_RETURN(auto output_names,
+      LITERT_ASSIGN_OR_RETURN(std::vector<absl::string_view> output_names,
                               compiled_model_.GetSignatureOutputNames(key_str));
-      for (const auto& name : input_names) {
+      metadata.inputs.reserve(input_names.size());
+      for (absl::string_view name : input_names) {
         metadata.input_indices.emplace(std::string(name),
                                        metadata.inputs.size());
         metadata.inputs.emplace_back(name);
       }
-      for (const auto& name : output_names) {
+      metadata.outputs.reserve(output_names.size());
+      for (absl::string_view name : output_names) {
         metadata.output_indices.emplace(std::string(name),
                                         metadata.outputs.size());
         metadata.outputs.emplace_back(name);
@@ -163,20 +182,19 @@ class LitertDynamicRunner {
   // Feedback loops require fixed shapes and cannot be resized.
   absl::Status ResizeInput(const std::string& signature_name, size_t index,
                            absl::Span<const int> dimensions,
-                           bool strict = true) {
-    LITERT_ASSIGN_OR_RETURN(auto sig_idx,
+                           ResizeMode mode = ResizeMode::kStrict) {
+    LITERT_ASSIGN_OR_RETURN(size_t sig_idx,
                             compiled_model_.GetSignatureIndex(signature_name));
     LITERT_ASSIGN_OR_RETURN(
-        auto layout, compiled_model_.GetInputTensorLayout(sig_idx, index));
-    if (std::equal(dimensions.begin(), dimensions.end(),
-                   layout.Dimensions().begin(), layout.Dimensions().end())) {
+        Layout layout, compiled_model_.GetInputTensorLayout(sig_idx, index));
+    if (absl::c_equal(dimensions, layout.Dimensions())) {
       return absl::OkStatus();
     }
     if (!feedback_loops_[signature_name].empty()) {
       return absl::FailedPreconditionError(
           "Resizing a signature with feedback loops is not supported");
     }
-    if (strict) {
+    if (mode == ResizeMode::kStrict) {
       LITERT_RETURN_IF_ERROR(
           compiled_model_.ResizeInputTensor(sig_idx, index, dimensions));
     } else {
@@ -193,15 +211,15 @@ class LitertDynamicRunner {
   absl::Status ResizeInput(const std::string& signature_name,
                            const std::string& name,
                            absl::Span<const int> dimensions,
-                           bool strict = true) {
-    LITERT_ASSIGN_OR_RETURN(auto index, GetInputIndex(signature_name, name));
-    return ResizeInput(signature_name, index, dimensions, strict);
+                           ResizeMode mode = ResizeMode::kStrict) {
+    LITERT_ASSIGN_OR_RETURN(size_t index, GetInputIndex(signature_name, name));
+    return ResizeInput(signature_name, index, dimensions, mode);
   }
 
   absl::Status ResizeInput(const std::string& name,
                            absl::Span<const int> dimensions,
-                           bool strict = true) {
-    return ResizeInput(default_signature_name_, name, dimensions, strict);
+                           ResizeMode mode = ResizeMode::kStrict) {
+    return ResizeInput(default_signature_name_, name, dimensions, mode);
   }
 
   // Retains a TensorBuffer without copying its contents. Its type and layout
@@ -214,25 +232,27 @@ class LitertDynamicRunner {
     if (it == signature_input_buffers_.end() || index >= it->second.size()) {
       return absl::NotFoundError("Input index or signature not found");
     }
-    LITERT_ASSIGN_OR_RETURN(auto sig_idx,
+    LITERT_ASSIGN_OR_RETURN(size_t sig_idx,
                             compiled_model_.GetSignatureIndex(signature_name));
-    LITERT_ASSIGN_OR_RETURN(auto type,
+    LITERT_ASSIGN_OR_RETURN(RankedTensorType type,
                             compiled_model_.GetInputTensorType(sig_idx, index));
     LITERT_ASSIGN_OR_RETURN(
-        auto layout, compiled_model_.GetInputTensorLayout(sig_idx, index));
-    LITERT_ASSIGN_OR_RETURN(auto actual, buffer.TensorType());
+        Layout layout, compiled_model_.GetInputTensorLayout(sig_idx, index));
+    LITERT_ASSIGN_OR_RETURN(RankedTensorType actual, buffer.TensorType());
     if (actual != RankedTensorType(type.ElementType(), std::move(layout))) {
       return absl::InvalidArgumentError("Input buffer type or shape mismatch");
     }
     it->second[index] = std::move(buffer);
-    auto& resized = resized_inputs_[signature_name];
-    if (!resized.empty()) resized[index] = false;
+    std::vector<bool>& resized = resized_inputs_[signature_name];
+    if (!resized.empty()) {
+      resized[index] = false;
+    }
     return absl::OkStatus();
   }
 
   absl::Status SetInputBuffer(const std::string& signature_name,
                               const std::string& name, TensorBuffer buffer) {
-    LITERT_ASSIGN_OR_RETURN(auto index, GetInputIndex(signature_name, name));
+    LITERT_ASSIGN_OR_RETURN(size_t index, GetInputIndex(signature_name, name));
     return SetInputBuffer(signature_name, index, std::move(buffer));
   }
 
@@ -270,13 +290,15 @@ class LitertDynamicRunner {
     if (first_run_it != first_run_.end()) {
       first_run_it->second = true;
     }
-    auto& signature_swapped = swapped_[signature_name];
+    bool& signature_swapped = swapped_[signature_name];
     if (signature_swapped) {
-      auto& input_buffers = signature_input_buffers_[signature_name];
-      auto& output_buffers = signature_output_buffers_[signature_name];
+      std::vector<TensorBuffer>& input_buffers =
+          signature_input_buffers_[signature_name];
+      std::vector<TensorBuffer>& output_buffers =
+          signature_output_buffers_[signature_name];
       auto loops_it = feedback_loops_.find(signature_name);
       if (loops_it != feedback_loops_.end()) {
-        for (const auto& loop : loops_it->second) {
+        for (const FeedbackLoop& loop : loops_it->second) {
           std::swap(input_buffers[loop.input_index],
                     output_buffers[loop.output_index]);
         }
@@ -293,7 +315,8 @@ class LitertDynamicRunner {
     if (signature == signature_metadata_.end()) {
       return absl::NotFoundError("Signature not found");
     }
-    const auto& indices = signature->second.input_indices;
+    const absl::flat_hash_map<std::string, size_t>& indices =
+        signature->second.input_indices;
     auto found = indices.find(name);
     if (found == indices.end()) {
       return absl::NotFoundError("Input tensor name not found in signature");
@@ -308,7 +331,8 @@ class LitertDynamicRunner {
     if (signature == signature_metadata_.end()) {
       return absl::NotFoundError("Signature not found");
     }
-    const auto& indices = signature->second.output_indices;
+    const absl::flat_hash_map<std::string, size_t>& indices =
+        signature->second.output_indices;
     auto found = indices.find(name);
     if (found == indices.end()) {
       return absl::NotFoundError("Output tensor name not found in signature");
@@ -355,7 +379,7 @@ class LitertDynamicRunner {
   // Set input by signature and name
   absl::Status SetInput(const std::string& signature_name,
                         const std::string& name, const TensorHandle& tensor) {
-    LITERT_ASSIGN_OR_RETURN(auto index, GetInputIndex(signature_name, name));
+    LITERT_ASSIGN_OR_RETURN(size_t index, GetInputIndex(signature_name, name));
     return SetInput(signature_name, index, tensor);
   }
 
@@ -366,22 +390,28 @@ class LitertDynamicRunner {
     if (in_it == signature_input_buffers_.end()) {
       return absl::NotFoundError("Signature not found");
     }
-    auto& input_buffers = in_it->second;
+    std::vector<TensorBuffer>& input_buffers = in_it->second;
 
-    if (index >= input_buffers.size())
+    if (index >= input_buffers.size()) {
       return absl::NotFoundError("Index out of bounds");
+    }
 
     LITERT_ASSIGN_OR_RETURN(Buffer & buffer, tensor.GetBuffer());
-    auto litert_buffer_or = buffer.As<LitertBuffer>();
+    absl::StatusOr<LitertBuffer&> litert_buffer_or = buffer.As<LitertBuffer>();
     if (litert_buffer_or.ok()) {
-      LITERT_ASSIGN_OR_RETURN(auto duplicate,
+      LITERT_ASSIGN_OR_RETURN(TensorBuffer duplicate,
                               litert_buffer_or->tensor_buffer().Duplicate());
       return SetInputBuffer(signature_name, index, std::move(duplicate));
     } else {
       LITERT_RETURN_IF_ERROR(EnsureInputBuffer(signature_name, index));
-      auto locked_span = buffer.Lock().As<const uint8_t>();
+      LockedBufferSpan<const uint8_t> locked_span =
+          buffer.Lock().As<const uint8_t>();
       LITERT_RETURN_IF_ERROR(
           input_buffers[index].Write(absl::Span<const uint8_t>(locked_span)));
+      std::vector<bool>& resized = resized_inputs_[signature_name];
+      if (!resized.empty()) {
+        resized[index] = false;
+      }
     }
     return absl::OkStatus();
   }
@@ -390,7 +420,7 @@ class LitertDynamicRunner {
   absl::Status SetInput(const std::string& signature_name,
                         const std::string& name,
                         absl::Span<const uint8_t> data) {
-    LITERT_ASSIGN_OR_RETURN(auto index, GetInputIndex(signature_name, name));
+    LITERT_ASSIGN_OR_RETURN(size_t index, GetInputIndex(signature_name, name));
     return SetInput(signature_name, index, data);
   }
 
@@ -401,14 +431,19 @@ class LitertDynamicRunner {
     if (in_it == signature_input_buffers_.end()) {
       return absl::NotFoundError("Signature not found");
     }
-    auto& input_buffers = in_it->second;
+    std::vector<TensorBuffer>& input_buffers = in_it->second;
 
-    if (index >= input_buffers.size())
+    if (index >= input_buffers.size()) {
       return absl::NotFoundError("Index out of bounds");
+    }
     LITERT_RETURN_IF_ERROR(EnsureInputBuffer(signature_name, index));
-    auto res = input_buffers[index].Write(data);
+    Expected<void> res = input_buffers[index].Write(data);
     if (!res.HasValue()) {
       return absl::InternalError("Failed to write input buffer");
+    }
+    std::vector<bool>& resized = resized_inputs_[signature_name];
+    if (!resized.empty()) {
+      resized[index] = false;
     }
     return absl::OkStatus();
   }
@@ -420,12 +455,12 @@ class LitertDynamicRunner {
     if (out_it == signature_output_buffers_.end()) {
       return absl::NotFoundError("Signature not found");
     }
-    auto& output_buffers = out_it->second;
+    std::vector<TensorBuffer>& output_buffers = out_it->second;
     if (index >= output_buffers.size()) {
       return absl::NotFoundError("Index out of bounds");
     }
     output_buffers[index] = std::move(buffer);
-    auto& external = external_outputs_[signature_name];
+    std::vector<bool>& external = external_outputs_[signature_name];
     external.resize(output_buffers.size(), false);
     external[index] = true;
     return absl::OkStatus();
@@ -435,7 +470,7 @@ class LitertDynamicRunner {
   absl::Status SetOutputBuffer(const std::string& signature_name,
                                const std::string& name,
                                litert::TensorBuffer buffer) {
-    LITERT_ASSIGN_OR_RETURN(auto index, GetOutputIndex(signature_name, name));
+    LITERT_ASSIGN_OR_RETURN(size_t index, GetOutputIndex(signature_name, name));
     return SetOutputBuffer(signature_name, index, std::move(buffer));
   }
 
@@ -450,11 +485,11 @@ class LitertDynamicRunner {
 
   absl::Status SetOutput(const std::string& name, const TensorHandle& tensor) {
     LITERT_ASSIGN_OR_RETURN(Buffer & buffer, tensor.GetBuffer());
-    auto litert_buffer_or = buffer.As<LitertBuffer>();
+    absl::StatusOr<LitertBuffer&> litert_buffer_or = buffer.As<LitertBuffer>();
     if (!litert_buffer_or.ok()) {
       return absl::InvalidArgumentError("Tensor must be a LitertBuffer");
     }
-    LITERT_ASSIGN_OR_RETURN(auto dup,
+    LITERT_ASSIGN_OR_RETURN(TensorBuffer dup,
                             litert_buffer_or->tensor_buffer().Duplicate());
     return SetOutputBuffer(name, std::move(dup));
   }
@@ -468,16 +503,17 @@ class LitertDynamicRunner {
       return absl::NotFoundError("Signature not found");
     }
 
-    auto sig_index_or = compiled_model_.GetSignatureIndex(signature_name);
+    Expected<size_t> sig_index_or =
+        compiled_model_.GetSignatureIndex(signature_name);
     if (!sig_index_or.HasValue()) {
       return absl::NotFoundError("Signature index not found in model");
     }
 
-    auto& input_buffers = in_it->second;
-    auto& output_buffers = out_it->second;
+    std::vector<TensorBuffer>& input_buffers = in_it->second;
+    std::vector<TensorBuffer>& output_buffers = out_it->second;
 
-    const auto& resized = resized_inputs_[signature_name];
-    if (std::find(resized.begin(), resized.end(), true) != resized.end()) {
+    const std::vector<bool>& resized = resized_inputs_[signature_name];
+    if (absl::c_linear_search(resized, true)) {
       return absl::FailedPreconditionError("Bind resized inputs before Run");
     }
     LITERT_RETURN_IF_ERROR(RefreshOutputBuffers(signature_name));
@@ -489,7 +525,7 @@ class LitertDynamicRunner {
     if (!is_first_run) {
       auto loops_it = feedback_loops_.find(signature_name);
       if (loops_it != feedback_loops_.end()) {
-        for (const auto& loop : loops_it->second) {
+        for (const FeedbackLoop& loop : loops_it->second) {
           std::swap(input_buffers[loop.input_index],
                     output_buffers[loop.output_index]);
         }
@@ -500,8 +536,8 @@ class LitertDynamicRunner {
       first_run_it->second = false;
     }
 
-    auto status = compiled_model_.Run(sig_index_or.Value(), input_buffers,
-                                      output_buffers);
+    Expected<void> status = compiled_model_.Run(sig_index_or.Value(),
+                                                input_buffers, output_buffers);
     if (!status.HasValue()) {
       return absl::InternalError(status.Error().Message());
     }
@@ -511,7 +547,7 @@ class LitertDynamicRunner {
   // Get output by signature and name
   absl::StatusOr<TensorHandle> GetOutput(const std::string& signature_name,
                                          const std::string& name) {
-    LITERT_ASSIGN_OR_RETURN(auto index, GetOutputIndex(signature_name, name));
+    LITERT_ASSIGN_OR_RETURN(size_t index, GetOutputIndex(signature_name, name));
     return GetOutput(signature_name, index);
   }
 
@@ -522,22 +558,25 @@ class LitertDynamicRunner {
     if (out_it == signature_output_buffers_.end()) {
       return absl::NotFoundError("Signature not found");
     }
-    auto& output_buffers = out_it->second;
+    std::vector<TensorBuffer>& output_buffers = out_it->second;
 
-    if (index >= output_buffers.size())
+    if (index >= output_buffers.size()) {
       return absl::NotFoundError("Index out of bounds");
+    }
 
-    const auto& name = signature_metadata_.at(signature_name).outputs[index];
+    const std::string& name =
+        signature_metadata_.at(signature_name).outputs[index];
 
-    LITERT_ASSIGN_OR_RETURN(auto ranked_tensor_type,
+    LITERT_ASSIGN_OR_RETURN(RankedTensorType ranked_tensor_type,
                             output_buffers[index].TensorType());
 
-    auto dup_or = output_buffers[index].Duplicate();
+    Expected<TensorBuffer> dup_or = output_buffers[index].Duplicate();
     if (!dup_or.HasValue()) {
       return absl::InternalError("Failed to duplicate TensorBuffer");
     }
 
-    auto litert_buffer = std::make_shared<LitertBuffer>(std::move(*dup_or));
+    std::shared_ptr<LitertBuffer> litert_buffer =
+        std::make_shared<LitertBuffer>(std::move(*dup_or));
 
     Type type = Type::kUnknown;
     switch (ranked_tensor_type.ElementType()) {
@@ -574,7 +613,7 @@ class LitertDynamicRunner {
   // Get input by signature and name
   absl::StatusOr<TensorHandle> GetInput(const std::string& signature_name,
                                         const std::string& name) {
-    LITERT_ASSIGN_OR_RETURN(auto index, GetInputIndex(signature_name, name));
+    LITERT_ASSIGN_OR_RETURN(size_t index, GetInputIndex(signature_name, name));
     return GetInput(signature_name, index);
   }
 
@@ -585,23 +624,26 @@ class LitertDynamicRunner {
     if (in_it == signature_input_buffers_.end()) {
       return absl::NotFoundError("Signature not found");
     }
-    auto& input_buffers = in_it->second;
+    std::vector<TensorBuffer>& input_buffers = in_it->second;
 
-    if (index >= input_buffers.size())
+    if (index >= input_buffers.size()) {
       return absl::NotFoundError("Index out of bounds");
+    }
 
-    const auto& name = signature_metadata_.at(signature_name).inputs[index];
+    const std::string& name =
+        signature_metadata_.at(signature_name).inputs[index];
 
     LITERT_RETURN_IF_ERROR(EnsureInputBuffer(signature_name, index));
-    LITERT_ASSIGN_OR_RETURN(auto ranked_tensor_type,
+    LITERT_ASSIGN_OR_RETURN(RankedTensorType ranked_tensor_type,
                             input_buffers[index].TensorType());
 
-    auto dup_or = input_buffers[index].Duplicate();
+    Expected<TensorBuffer> dup_or = input_buffers[index].Duplicate();
     if (!dup_or.HasValue()) {
       return absl::InternalError("Failed to duplicate TensorBuffer");
     }
 
-    auto litert_buffer = std::make_shared<LitertBuffer>(std::move(*dup_or));
+    std::shared_ptr<LitertBuffer> litert_buffer =
+        std::make_shared<LitertBuffer>(std::move(*dup_or));
 
     Type type = Type::kUnknown;
     switch (ranked_tensor_type.ElementType()) {
@@ -641,13 +683,14 @@ class LitertDynamicRunner {
     if (out_it == signature_output_buffers_.end()) {
       return absl::NotFoundError("Signature not found");
     }
-    auto& output_buffers = out_it->second;
+    std::vector<TensorBuffer>& output_buffers = out_it->second;
 
-    LITERT_ASSIGN_OR_RETURN(auto signature,
+    LITERT_ASSIGN_OR_RETURN(SimpleSignature signature,
                             compiled_model_.FindSignature(signature_name));
     for (size_t i = 0; i < signature.OutputNames().size(); ++i) {
       if (signature.OutputNames()[i] == name) {
-        auto handle_or = output_buffers[i].GetWebGpuBuffer();
+        Expected<HwMemoryHandle> handle_or =
+            output_buffers[i].GetWebGpuBuffer();
         if (handle_or.HasValue()) {
           return reinterpret_cast<uintptr_t>(*handle_or);
         }
@@ -663,13 +706,13 @@ class LitertDynamicRunner {
     if (in_it == signature_input_buffers_.end()) {
       return absl::NotFoundError("Signature not found");
     }
-    auto& input_buffers = in_it->second;
+    std::vector<TensorBuffer>& input_buffers = in_it->second;
 
-    LITERT_ASSIGN_OR_RETURN(auto signature,
+    LITERT_ASSIGN_OR_RETURN(SimpleSignature signature,
                             compiled_model_.FindSignature(signature_name));
     for (size_t i = 0; i < signature.InputNames().size(); ++i) {
       if (signature.InputNames()[i] == name) {
-        auto handle_or = input_buffers[i].GetWebGpuBuffer();
+        Expected<HwMemoryHandle> handle_or = input_buffers[i].GetWebGpuBuffer();
         if (handle_or.HasValue()) {
           return reinterpret_cast<uintptr_t>(*handle_or);
         }
@@ -682,29 +725,48 @@ class LitertDynamicRunner {
  private:
   absl::Status EnsureInputBuffer(const std::string& signature_name,
                                  size_t index) {
-    auto& resized = resized_inputs_[signature_name];
-    if (!resized.empty() && resized[index]) {
-      const auto& name = signature_metadata_.at(signature_name).inputs[index];
-      LITERT_ASSIGN_OR_RETURN(
-          auto buffer, compiled_model_.CreateInputBuffer(signature_name, name));
-      signature_input_buffers_.at(signature_name)[index] = std::move(buffer);
-      resized[index] = false;
+    const std::vector<bool>& resized = resized_inputs_[signature_name];
+    if (resized.empty() || !resized[index]) {
+      return absl::OkStatus();
     }
+    LITERT_ASSIGN_OR_RETURN(size_t sig_idx,
+                            compiled_model_.GetSignatureIndex(signature_name));
+    LITERT_ASSIGN_OR_RETURN(
+        Layout layout, compiled_model_.GetInputTensorLayout(sig_idx, index));
+    TensorBuffer& current_buffer =
+        signature_input_buffers_.at(signature_name)[index];
+    LITERT_ASSIGN_OR_RETURN(RankedTensorType type, current_buffer.TensorType());
+    if (type.Layout() == layout) {
+      return absl::OkStatus();
+    }
+    const std::string& name =
+        signature_metadata_.at(signature_name).inputs[index];
+    LITERT_ASSIGN_OR_RETURN(
+        TensorBuffer buffer,
+        compiled_model_.CreateInputBuffer(signature_name, name));
+    current_buffer = std::move(buffer);
     return absl::OkStatus();
   }
 
   absl::Status RefreshOutputBuffers(const std::string& signature_name) {
-    if (!resized_outputs_[signature_name]) return absl::OkStatus();
-    LITERT_ASSIGN_OR_RETURN(auto sig_idx,
+    bool& is_resized = resized_outputs_[signature_name];
+    if (!is_resized) {
+      return absl::OkStatus();
+    }
+    LITERT_ASSIGN_OR_RETURN(size_t sig_idx,
                             compiled_model_.GetSignatureIndex(signature_name));
-    LITERT_ASSIGN_OR_RETURN(auto layouts,
+    LITERT_ASSIGN_OR_RETURN(std::vector<Layout> layouts,
                             compiled_model_.GetOutputTensorLayouts(sig_idx));
-    const auto& names = signature_metadata_.at(signature_name).outputs;
-    auto& buffers = signature_output_buffers_.at(signature_name);
-    const auto& external = external_outputs_[signature_name];
+    const std::vector<std::string>& names =
+        signature_metadata_.at(signature_name).outputs;
+    std::vector<TensorBuffer>& buffers =
+        signature_output_buffers_.at(signature_name);
+    const std::vector<bool>& external = external_outputs_[signature_name];
     for (size_t i = 0; i < buffers.size(); ++i) {
-      LITERT_ASSIGN_OR_RETURN(auto type, buffers[i].TensorType());
-      if (type.Layout() == layouts[i]) continue;
+      LITERT_ASSIGN_OR_RETURN(RankedTensorType type, buffers[i].TensorType());
+      if (type.Layout() == layouts[i]) {
+        continue;
+      }
       if (!external.empty() && external[i]) {
         return absl::FailedPreconditionError(
             "Rebind external output buffer after its shape changes");
@@ -712,7 +774,7 @@ class LitertDynamicRunner {
       LITERT_ASSIGN_OR_RETURN(buffers[i], compiled_model_.CreateOutputBuffer(
                                               signature_name, names[i]));
     }
-    resized_outputs_[signature_name] = false;
+    is_resized = false;
     return absl::OkStatus();
   }
 

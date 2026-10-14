@@ -27,7 +27,6 @@ limitations under the License.
 #include "tflite/builtin_ops.h"
 #include "tflite/core/c/builtin_op_data.h"
 #include "tflite/core/c/common.h"
-#include "tflite/delegates/ynnpack/dot.h"
 #include "tflite/delegates/ynnpack/utils.h"
 
 namespace tflite {
@@ -88,6 +87,66 @@ SdpaInputs GetSdpaInputs(TfLiteContext* context, const NodeInfo& node) {
   return inputs;
 }
 
+// Computes `output = a @ b` where `a` is float [..., M, K] and `b` is float or
+// per-tensor quantized int8 [..., K, N]. When `b` is quantized, `a` is
+// dynamically quantized to int8 along its reduction axis (-1).
+TfLiteStatus DefineSdpaDot(TfLiteContext* context, ynn_subgraph_t subgraph,
+                           uint32_t a_id, uint32_t b_id,
+                           const TfLiteTensor& b_tensor, ynn_type output_type,
+                           uint32_t* output_id) {
+  if (!IsQuantized(b_tensor)) {
+    if (*output_id == YNN_INVALID_VALUE_ID) {
+      TF_LITE_ENSURE_YNN_STATUS(ynn_define_tensor(
+          subgraph, output_type, 0, nullptr, nullptr, 0, output_id));
+    }
+    TF_LITE_ENSURE_YNN_STATUS(ynn_define_dot(subgraph, /*num_k_dims=*/1, a_id,
+                                             b_id, YNN_INVALID_VALUE_ID,
+                                             output_id, 0));
+    return kTfLiteOk;
+  }
+
+  uint32_t b_scale_id = YNN_INVALID_VALUE_ID;
+  uint32_t b_zp_id = YNN_INVALID_VALUE_ID;
+  TF_LITE_ENSURE_STATUS(DefineQuantizationParams(context, subgraph, b_tensor,
+                                                 &b_scale_id, &b_zp_id));
+
+  int32_t reduce_axis = -1;
+  uint32_t min_max_id = YNN_INVALID_VALUE_ID;
+  TF_LITE_ENSURE_YNN_STATUS(ynn_define_reduce(
+      subgraph, ynn_reduce_min_max, 1, &reduce_axis, a_id, YNN_INVALID_VALUE_ID,
+      &min_max_id, YNN_NODE_FLAG_KEEP_DIMS));
+
+  uint32_t a_zp_id = YNN_INVALID_VALUE_ID;
+  uint32_t a_scale_id = YNN_INVALID_VALUE_ID;
+  TF_LITE_ENSURE_YNN_STATUS(ynn_define_dynamic_quantization(
+      subgraph, min_max_id, ynn_type_int8, &a_zp_id, &a_scale_id, 0));
+
+  uint32_t q_a_id = YNN_INVALID_VALUE_ID;
+  TF_LITE_ENSURE_YNN_STATUS(ynn_define_quantize(
+      subgraph, a_id, ynn_type_int8, a_zp_id, a_scale_id, &q_a_id, 0));
+
+  uint32_t dot_zp_id = YNN_INVALID_VALUE_ID;
+  uint32_t dot_scale_id = YNN_INVALID_VALUE_ID;
+  TF_LITE_ENSURE_YNN_STATUS(ynn::define_dot_quantization(
+      subgraph, /*num_k_dims=*/1, q_a_id, a_zp_id, a_scale_id, b_id, b_zp_id,
+      b_scale_id, dot_zp_id, dot_scale_id));
+
+  uint32_t accum_init_id = YNN_INVALID_VALUE_ID;
+  if (dot_zp_id != YNN_INVALID_VALUE_ID) {
+    TF_LITE_ENSURE_YNN_STATUS(ynn_define_unary(subgraph, ynn_unary_negate,
+                                               dot_zp_id, &accum_init_id, 0));
+  }
+
+  uint32_t accum_id = YNN_INVALID_VALUE_ID;
+  TF_LITE_ENSURE_YNN_STATUS(ynn_define_dot(subgraph, /*num_k_dims=*/1, q_a_id,
+                                           b_id, accum_init_id, &accum_id, 0));
+
+  TF_LITE_ENSURE_YNN_STATUS(
+      ynn_define_dequantize(subgraph, accum_id, YNN_INVALID_VALUE_ID,
+                            dot_scale_id, output_type, output_id, 0));
+  return kTfLiteOk;
+}
+
 }  // namespace
 
 bool IsSdpa(const TfLiteRegistration* registration, const TfLiteNode* node) {
@@ -132,25 +191,18 @@ TfLiteStatus IsSdpaSupported(const TfLiteRegistration* registration,
     return type == kTfLiteFloat32 || type == kTfLiteFloat16 ||
            type == kTfLiteBFloat16;
   };
+  auto is_quantized_int8 = [](const TfLiteTensor& tensor) {
+    return IsPerTensorInt8Cache(tensor);
+  };
 
   TF_LITE_ENSURE(context, IsTensorSupported(q));
   TF_LITE_ENSURE(context, is_float_type(q.type));
   TF_LITE_ENSURE(context, IsTensorSupported(k));
+  TF_LITE_ENSURE(context, k.type == q.type || is_quantized_int8(k));
   TF_LITE_ENSURE(context, IsTensorSupported(v));
+  TF_LITE_ENSURE(context, is_float_type(v.type) || is_quantized_int8(v));
   TF_LITE_ENSURE(context, IsTensorSupported(output));
   TF_LITE_ENSURE(context, is_float_type(output.type));
-
-  if (k.type == kTfLiteInt8 || v.type == kTfLiteInt8) {
-    // The mixed matmul lowering dynamically quantizes FP32 Q/P and produces
-    // FP32 outputs. Keep the existing all-floating path unchanged.
-    TF_LITE_ENSURE_EQ(context, q.type, kTfLiteFloat32);
-    TF_LITE_ENSURE_EQ(context, output.type, kTfLiteFloat32);
-    TF_LITE_ENSURE(context, IsPerTensorInt8Cache(k));
-    TF_LITE_ENSURE(context, IsPerTensorInt8Cache(v));
-  } else {
-    TF_LITE_ENSURE(context, is_float_type(k.type));
-    TF_LITE_ENSURE(context, is_float_type(v.type));
-  }
 
   TF_LITE_ENSURE_EQ(context, q.dims->size, 4);
   TF_LITE_ENSURE_EQ(context, k.dims->size, 4);
@@ -217,7 +269,6 @@ TfLiteStatus DefineSdpaNode(TfLiteContext* context, ynn_subgraph_t subgraph,
   const TfLiteTensor& k_tensor = context->tensors[sdpa_inputs.k_index];
   const TfLiteTensor& v_tensor = context->tensors[sdpa_inputs.v_index];
   const TfLiteTensor& output_tensor = context->tensors[node.outputs[0]];
-  const bool int8_kv = k_tensor.type == kTfLiteInt8;
 
   uint32_t q_val_id = GetOrCreateValueId(context, subgraph, tensor_to_value_id,
                                          sdpa_inputs.q_index);
@@ -360,11 +411,6 @@ TfLiteStatus DefineSdpaNode(TfLiteContext* context, ynn_subgraph_t subgraph,
     k_trans_id = current_k_val_id;
   }
 
-  uint32_t scale_const_id = YNN_INVALID_VALUE_ID;
-  TF_LITE_ENSURE_YNN_STATUS(
-      ynn_define_tensor(subgraph, ynn_type_fp32, 0, nullptr, &scale_val,
-                        YNN_VALUE_FLAG_COPY_DATA_FP32, &scale_const_id));
-
   const int q_head_dim = is_seq_major ? 2 : 1;
   const int k_head_dim = is_seq_major ? 2 : 1;
   const int n_q = q_tensor.dims->data[q_head_dim];
@@ -374,15 +420,13 @@ TfLiteStatus DefineSdpaNode(TfLiteContext* context, ynn_subgraph_t subgraph,
 
   const int q_seq_dim = is_seq_major ? 1 : 2;
   const int q_seq = q_tensor.dims->data[q_seq_dim];
-  // Mixed matmul needs FP32 activations on the left and INT8 KV on the right.
-  // Keep its existing 4D folded-head path; the new 5D broadcast path below
-  // applies to floating-point attention.
+  const bool is_small_q =
+      !is_seq_major && (q_seq * static_cast<int>(g_heads_per_kv) <= 8);
   const bool use_decode1 =
-      !int8_kv && !is_seq_major && (q_seq * static_cast<int>(g_heads_per_kv) <= 8);
+      is_small_q && !IsQuantized(k_tensor) && !IsQuantized(v_tensor);
   // Prefill with grouped heads: keep the head axis as [n_kv, g] and let the dot
   // broadcast K/V over g, instead of folding g into the row axis.
-  const bool gqa_batch =
-      !int8_kv && g_heads_per_kv > 1 && !is_seq_major && !use_decode1;
+  const bool gqa_batch = g_heads_per_kv > 1 && !is_seq_major && !is_small_q;
   const bool gqa_fold = g_heads_per_kv > 1 && !gqa_batch;
 
   if (g_heads_per_kv > 1) {
@@ -415,19 +459,22 @@ TfLiteStatus DefineSdpaNode(TfLiteContext* context, ynn_subgraph_t subgraph,
   }
 
   // Scale Q.
-  uint32_t q_scaled_id = YNN_INVALID_VALUE_ID;
-  TF_LITE_ENSURE_YNN_STATUS(ynn_define_binary(subgraph, ynn_binary_multiply,
-                                              q_trans_id, scale_const_id,
-                                              &q_scaled_id, 0));
+  uint32_t q_scaled_id = q_trans_id;
+  if (scale_val != 1.0f) {
+    uint32_t scale_const_id = YNN_INVALID_VALUE_ID;
+    TF_LITE_ENSURE_YNN_STATUS(ynn_define_tensor(
+        subgraph, GetYnnType(q_tensor.type), 0, nullptr, &scale_val,
+        YNN_VALUE_FLAG_COPY_DATA_FP32, &scale_const_id));
+    q_scaled_id = YNN_INVALID_VALUE_ID;
+    TF_LITE_ENSURE_YNN_STATUS(ynn_define_binary(subgraph, ynn_binary_multiply,
+                                                q_trans_id, scale_const_id,
+                                                &q_scaled_id, 0));
+  }
 
   // Scores: S = Q @ K^T, [B, H, Q, S].
   const int32_t swap_last_two_perm[] = {-1, -2};
   uint32_t scores_id = YNN_INVALID_VALUE_ID;
-  if (int8_kv) {
-    TF_LITE_ENSURE_STATUS(DefineDynamicallyQuantizedMatMul(
-        context, subgraph, 4, 4, q_scaled_id, k_trans_id, k_tensor,
-        /*adj_y=*/true, &scores_id));
-  } else if (use_decode1) {
+  if (use_decode1) {
     // Compute S^T = K @ Q^T and transpose the (small) result.
     uint32_t q_scaled_t_id = YNN_INVALID_VALUE_ID;
     TF_LITE_ENSURE_YNN_STATUS(ynn_define_static_transpose(
@@ -448,9 +495,9 @@ TfLiteStatus DefineSdpaNode(TfLiteContext* context, ynn_subgraph_t subgraph,
         ynn_define_static_transpose(subgraph, 2, swap_last_two_perm, k_trans_id,
                                     &k_trans_t_id, YNN_NODE_FLAG_KEEP_DIMS));
 
-    TF_LITE_ENSURE_YNN_STATUS(
-        ynn_define_dot(subgraph, /*num_k_dims=*/1, q_scaled_id, k_trans_t_id,
-                       YNN_INVALID_VALUE_ID, &scores_id, 0));
+    TF_LITE_ENSURE_STATUS(DefineSdpaDot(context, subgraph, q_scaled_id,
+                                        k_trans_t_id, k_tensor, ynn_type_fp32,
+                                        &scores_id));
   }
 
   uint32_t logits_id = scores_id;
@@ -528,6 +575,11 @@ TfLiteStatus DefineSdpaNode(TfLiteContext* context, ynn_subgraph_t subgraph,
   }
 
   uint32_t probs_id = YNN_INVALID_VALUE_ID;
+  if (!IsQuantized(v_tensor)) {
+    TF_LITE_ENSURE_YNN_STATUS(
+        ynn_define_tensor(subgraph, GetYnnType(v_tensor.type), 0, nullptr,
+                          nullptr, 0, &probs_id));
+  }
   TF_LITE_ENSURE_YNN_STATUS(
       ynn::define_softmax(subgraph, masked_logits_id, 1.0f, probs_id));
 
@@ -567,6 +619,9 @@ TfLiteStatus DefineSdpaNode(TfLiteContext* context, ynn_subgraph_t subgraph,
 
     uint32_t post_bmm_t_id = YNN_INVALID_VALUE_ID;
     TF_LITE_ENSURE_YNN_STATUS(
+        ynn_define_tensor(subgraph, GetYnnType(output_tensor.type), 0, nullptr,
+                          nullptr, 0, &post_bmm_t_id));
+    TF_LITE_ENSURE_YNN_STATUS(
         ynn_define_dot(subgraph, /*num_k_dims=*/1, current_v_val_id, probs_t_id,
                        YNN_INVALID_VALUE_ID, &post_bmm_t_id, 0));
 
@@ -581,15 +636,9 @@ TfLiteStatus DefineSdpaNode(TfLiteContext* context, ynn_subgraph_t subgraph,
         subgraph, 2, is_seq_major ? seq_major_v_perm : swap_last_two_perm,
         current_v_val_id, &v_trans_id, YNN_NODE_FLAG_KEEP_DIMS));
 
-    if (int8_kv) {
-      TF_LITE_ENSURE_STATUS(DefineDynamicallyQuantizedMatMul(
-          context, subgraph, 4, 4, probs_id, v_trans_id, v_tensor,
-          /*adj_y=*/false, post_bmm_ptr));
-    } else {
-      TF_LITE_ENSURE_YNN_STATUS(
-          ynn_define_dot(subgraph, /*num_k_dims=*/1, probs_id, v_trans_id,
-                         YNN_INVALID_VALUE_ID, post_bmm_ptr, 0));
-    }
+    TF_LITE_ENSURE_STATUS(
+        DefineSdpaDot(context, subgraph, probs_id, v_trans_id, v_tensor,
+                      GetYnnType(output_tensor.type), post_bmm_ptr));
   }
 
   uint32_t post_trans_id = *post_bmm_ptr;

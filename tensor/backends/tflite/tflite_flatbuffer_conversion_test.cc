@@ -21,10 +21,12 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/algorithm/container.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/match.h"  // from @com_google_absl
@@ -422,15 +424,15 @@ TEST(SerializationTest, AddingAnEmptySubgraphFails) {
 TEST(SerializationTest, ShapeSignaturePreservesConcreteShapeAndStrictResize) {
   const auto path = testing::TempDir() + "/explicit_shape_signature.tflite";
   TensorTf input({.name = "input", .type = Type::kFP32, .shape = {1, 3, 4}});
-  auto output = Reshape(input, {1, kInferredDim, 2});
+  auto output = Add(input, 1.0f);
   ModelFactory factory;
   ASSERT_THAT(factory.SetShapeSignature(input, {1, -1, 4}), IsOk());
-  ASSERT_THAT(factory.SetShapeSignature(output, {1, -1, 2}), IsOk());
+  ASSERT_THAT(factory.SetShapeSignature(output, {1, -1, 4}), IsOk());
   ASSERT_THAT(factory.AddSignature({output}, "main"), IsOk());
   ASSERT_THAT(factory.Save(path), IsOk());
   // Export annotations don't mutate the authoring graph's concrete shapes.
   EXPECT_THAT(input.GetShape(), ElementsAre(1, 3, 4));
-  EXPECT_THAT(output.GetShape(), ElementsAre(1, 6, 2));
+  EXPECT_THAT(output.GetShape(), ElementsAre(1, 3, 4));
   auto model = tflite::FlatBufferModel::BuildFromFile(path.c_str());
   ASSERT_NE(model, nullptr);
   const auto* subgraph = model->GetModel()->subgraphs()->Get(0);
@@ -441,9 +443,9 @@ TEST(SerializationTest, ShapeSignaturePreservesConcreteShapeAndStrictResize) {
   EXPECT_THAT(*serialized_input->shape_signature(), ElementsAre(1, -1, 4));
   const auto* serialized_output =
       subgraph->tensors()->Get(subgraph->outputs()->Get(0));
-  EXPECT_THAT(*serialized_output->shape(), ElementsAre(1, 6, 2));
+  EXPECT_THAT(*serialized_output->shape(), ElementsAre(1, 3, 4));
   ASSERT_NE(serialized_output->shape_signature(), nullptr);
-  EXPECT_THAT(*serialized_output->shape_signature(), ElementsAre(1, -1, 2));
+  EXPECT_THAT(*serialized_output->shape_signature(), ElementsAre(1, -1, 4));
 
   std::unique_ptr<tflite::Interpreter> interpreter;
   tflite::ops::builtin::BuiltinOpResolverWithoutDefaultDelegates resolver;
@@ -455,12 +457,13 @@ TEST(SerializationTest, ShapeSignaturePreservesConcreteShapeAndStrictResize) {
               kTfLiteOk);
     ASSERT_EQ(interpreter->AllocateTensors(), kTfLiteOk);
     for (int i = 0; i < rows * 4; ++i)
-      interpreter->typed_input_tensor<float>(0)[i] = float(i + rows);
+      interpreter->typed_input_tensor<float>(0)[i] =
+          static_cast<float>(i + rows);
     ASSERT_EQ(interpreter->Invoke(), kTfLiteOk);
     const auto* result = interpreter->output_tensor(0);
-    EXPECT_EQ(result->dims->data[1], rows * 2);
+    EXPECT_EQ(result->dims->data[1], rows);
     for (int i = 0; i < rows * 4; ++i)
-      EXPECT_EQ(result->data.f[i], float(i + rows));
+      EXPECT_EQ(result->data.f[i], static_cast<float>(i + rows + 1));
   }
   EXPECT_EQ(interpreter->ResizeInputTensorStrict(input_index, {2, 5, 4}),
             kTfLiteError);
@@ -470,8 +473,9 @@ TEST(SerializationTest, ShapeSignaturePreservesConcreteShapeAndStrictResize) {
 
 TEST(SerializationTest, ShapeSignatureRejectsInvalidAnnotations) {
   TensorTf input({.name = "input", .type = Type::kFP32, .shape = {1, 3, 4}});
-  TensorTf constant({.name = "constant", .shape = {2},
-                      .buffer = std::vector<float>{1.0f, 2.0f}});
+  TensorTf constant({.name = "constant",
+                     .shape = {2},
+                     .buffer = std::vector<float>{1.0f, 2.0f}});
   ModelFactory factory;
   EXPECT_THAT(factory.SetShapeSignature(input, {-1, 4}), Not(IsOk()));
   EXPECT_THAT(factory.SetShapeSignature(input, {1, -2, 4}), Not(IsOk()));
@@ -1653,6 +1657,28 @@ TEST(SerializationTest, CanSerializeLess) {
   EXPECT_EQ(node_and_reg->second.builtin_code, tflite::BuiltinOperator_LESS);
 }
 
+TEST(SerializationTest, CanSerializeLessEqual) {
+  const std::string model_path = testing::TempDir() + "/less_equal.tflite";
+  TensorTf a({.type = Type::kFP32, .shape = {2, 5}});
+  TensorTf b({.type = Type::kFP32, .shape = {2, 5}});
+  TensorTf c = LessEqual(a, b);
+  ASSERT_THAT(Save({c}, model_path), IsOk());
+
+  auto model = tflite::FlatBufferModel::BuildFromFile(model_path.c_str());
+  ASSERT_NE(model, nullptr);
+  std::unique_ptr<tflite::Interpreter> interpreter;
+  tflite::ops::builtin::BuiltinOpResolverWithoutDefaultDelegates resolver;
+  ASSERT_EQ(tflite::InterpreterBuilder(*model, resolver)(&interpreter),
+            kTfLiteOk);
+  ASSERT_EQ(interpreter->AllocateTensors(), kTfLiteOk);
+
+  ASSERT_EQ(interpreter->nodes_size(), 1);
+  const auto* node_and_reg = interpreter->node_and_registration(0);
+  ASSERT_NE(node_and_reg, nullptr);
+  EXPECT_EQ(node_and_reg->second.builtin_code,
+            tflite::BuiltinOperator_LESS_EQUAL);
+}
+
 TEST(SerializationTest, CanSerializeGreater) {
   const std::string model_path = testing::TempDir() + "/greater.tflite";
   TensorTf a({.type = Type::kFP32, .shape = {2, 5}});
@@ -1795,6 +1821,36 @@ TEST(SerializationTest, CanSerializeCast) {
   EXPECT_EQ(node_and_reg->second.builtin_code, tflite::BuiltinOperator_CAST);
 }
 
+TEST(SerializationTest, ExpandsSharedZeroPointWithoutMutatingGraph) {
+  const std::string path = testing::TempDir() + "/shared_zero_point.tflite";
+  auto quantization = std::make_shared<PerChannelAffineQuantization>(
+      std::vector<float>{0.5f, 0.25f}, std::vector<int64_t>{0}, 0);
+  TensorTf input({.name = "input",
+                  .type = Type::kI8,
+                  .shape = {2, 2},
+                  .quantization = quantization});
+  TensorTf output = Dequantize(input);
+
+  ASSERT_THAT(Save({output}, path), IsOk());
+  EXPECT_THAT(quantization->zero_points, ElementsAre(0));
+
+  std::unique_ptr<tflite::FlatBufferModel> model =
+      tflite::FlatBufferModel::BuildFromFile(path.c_str());
+  ASSERT_NE(model, nullptr);
+  std::unique_ptr<tflite::Interpreter> interpreter;
+  tflite::ops::builtin::BuiltinOpResolverWithoutDefaultDelegates resolver;
+  ASSERT_EQ(tflite::InterpreterBuilder(*model, resolver)(&interpreter),
+            kTfLiteOk);
+  ASSERT_EQ(interpreter->AllocateTensors(), kTfLiteOk);
+
+  const std::vector<int8_t> codes{2, 4, 8, 12};
+  absl::c_copy(codes, interpreter->typed_input_tensor<int8_t>(0));
+  ASSERT_EQ(interpreter->Invoke(), kTfLiteOk);
+
+  EXPECT_THAT(absl::MakeSpan(interpreter->typed_output_tensor<float>(0), 4),
+              ElementsAre(1.0f, 2.0f, 2.0f, 3.0f));
+}
+
 TEST(SerializationTest, ExplicitQuantizeRoundTripUsesScalesAndZeroPoints) {
   const auto path = testing::TempDir() + "/quantize_round_trip.tflite";
   TensorTf input({.name = "input", .type = Type::kFP32, .shape = {4}});
@@ -1925,12 +1981,13 @@ TEST(SerializationTest, CanSerializeReshape) {
 }
 
 TEST(SerializationTest, InferredReshapeSurvivesSerializationAndResize) {
-  const auto path = testing::TempDir() + "/inferred_reshape.tflite";
+  const std::string path = testing::TempDir() + "/inferred_reshape.tflite";
   TensorTf input({.name = "input", .type = Type::kFP32, .shape = {1, 3, 4}});
-  auto output = Reshape(input, {1, kInferredDim, 2});
+  TensorTf output = Reshape(input, {1, kInferredDim, 2});
   ASSERT_THAT(Save({output}, path), IsOk());
   EXPECT_THAT(output.GetShape(), ElementsAre(1, 6, 2));
-  auto model = tflite::FlatBufferModel::BuildFromFile(path.c_str());
+  std::unique_ptr<tflite::FlatBufferModel> model =
+      tflite::FlatBufferModel::BuildFromFile(path.c_str());
   ASSERT_NE(model, nullptr);
   std::unique_ptr<tflite::Interpreter> interpreter;
   tflite::ops::builtin::BuiltinOpResolverWithoutDefaultDelegates resolver;
@@ -1941,19 +1998,24 @@ TEST(SerializationTest, InferredReshapeSurvivesSerializationAndResize) {
         interpreter->ResizeInputTensor(interpreter->inputs()[0], {1, rows, 4}),
         kTfLiteOk);
     ASSERT_EQ(interpreter->AllocateTensors(), kTfLiteOk);
-    const auto* reshape = interpreter->node_and_registration(0);
+    const std::pair<TfLiteNode, TfLiteRegistration>* reshape =
+        interpreter->node_and_registration(0);
     const auto* options = reinterpret_cast<const TfLiteReshapeParams*>(
         reshape->first.builtin_data);
     EXPECT_EQ(options->shape[1], -1);
-    const auto* shape = interpreter->tensor(reshape->first.inputs->data[1]);
+    const TfLiteTensor* shape =
+        interpreter->tensor(reshape->first.inputs->data[1]);
     EXPECT_EQ(shape->data.i32[1], -1);
-    for (int i = 0; i < rows * 4; ++i)
-      interpreter->typed_input_tensor<float>(0)[i] = float(i + rows);
+    for (int i = 0; i < rows * 4; ++i) {
+      interpreter->typed_input_tensor<float>(0)[i] =
+          static_cast<float>(i + rows);
+    }
     ASSERT_EQ(interpreter->Invoke(), kTfLiteOk);
-    const auto* result = interpreter->output_tensor(0);
+    const TfLiteTensor* result = interpreter->output_tensor(0);
     EXPECT_EQ(result->dims->data[1], rows * 2);
-    for (int i = 0; i < rows * 4; ++i)
-      EXPECT_EQ(result->data.f[i], float(i + rows));
+    for (int i = 0; i < rows * 4; ++i) {
+      EXPECT_EQ(result->data.f[i], static_cast<float>(i + rows));
+    }
   }
 }
 

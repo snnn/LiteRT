@@ -58,6 +58,9 @@
 #include "litert/vendors/nvidia/cache_layout.h"
 #include "litert/vendors/nvidia/compiler/cache_update_plugin.h"
 #include "litert/vendors/nvidia/compiler/decode_attention_plugin.h"
+#include "litert/vendors/nvidia/compiler/int8_cache_write_plugin.h"
+#include "litert/vendors/nvidia/compiler/moe_plugin.h"
+#include "litert/vendors/nvidia/compiler/qkv_norm_rope_plugin.h"
 #include "litert/vendors/nvidia/compiler/subbyte_gemv_plugin.h"
 #include "litert/vendors/nvidia/dispatch/aot_artifact.h"
 #include "litert/vendors/nvidia/dispatch/dispatch_profiler.h"
@@ -66,6 +69,7 @@
 #include "litert/vendors/nvidia/dispatch/runtime_cache.h"
 #include "litert/vendors/nvidia/dispatch/tensor_buffer_layout.h"
 #include "litert/vendors/nvidia/dispatch/tensor_buffer_view.h"
+#include "litert/vendors/nvidia/dispatch/weight_store.h"
 #include "litert/vendors/nvidia/memory_profile.h"
 #include "litert/vendors/nvidia/tensorrt_logger.h"
 #include "NvInfer.h"
@@ -1413,6 +1417,8 @@ class LiteRtDispatchInvocationContextT {
       layer_profiler_->Dump(bytecode_.function_name);
     }
     SaveRuntimeCache();
+    LogOwnGraphUse();
+    DestroyOwnGraphs();
     DestroyExternalHeadResources();
     for (cudaStream_t aux_stream : aux_streams_) {
       cudaStreamDestroy(aux_stream);
@@ -1420,6 +1426,24 @@ class LiteRtDispatchInvocationContextT {
     if (stream_ != nullptr) {
       cudaStreamDestroy(stream_);
     }
+  }
+
+  void LogOwnGraphUse() const {
+    if (own_graph_captures_ == 0 && own_graph_direct_ == 0) {
+      return;
+    }
+    int64_t replays = 0;
+    for (const auto& graph : own_graphs_) {
+      replays += graph.replays;
+    }
+    LITERT_LOG(LITERT_INFO,
+               "NVIDIA dispatch %s step graphs: %lld captures, %lld replays, "
+               "%lld direct steps%s",
+               bytecode_.function_name.c_str(),
+               static_cast<long long>(own_graph_captures_),
+               static_cast<long long>(replays),
+               static_cast<long long>(own_graph_direct_),
+               own_graph_enabled_ ? "" : " (capture gave up)");
   }
 
   Expected<LiteRtTensorBufferRequirements> GetInputRequirements(
@@ -1672,11 +1696,7 @@ class LiteRtDispatchInvocationContextT {
       execution_context_->setAuxStreams(
           aux_streams_.data(), static_cast<int32_t>(aux_streams_.size()));
     }
-    if (!execution_context_->enqueueV3(stream_)) {
-      return Error(kLiteRtStatusErrorRuntimeFailure,
-                   "TensorRT enqueueV3 failed");
-    }
-    LITERT_RETURN_IF_ERROR(LaunchExternalHead());
+    LITERT_RETURN_IF_ERROR(EnqueueStep());
     profile_metrics.cpu_enqueue_call_ms = enqueue_call_timer.ElapsedMs();
     if (profile) {
       LITERT_RETURN_IF_ERROR(invocation_profiler_.RecordEnqueued(stream_));
@@ -1778,6 +1798,7 @@ class LiteRtDispatchInvocationContextT {
     bytecode_.engine_data = nullptr;
     bytecode_.engine_size = 0;
     bytecode_.refit_weights.clear();
+    bytecode_.weight_store.reset();
     if (bytecode_.trtllm_head.has_value()) {
       bytecode_.trtllm_head->packed_weights = nullptr;
       bytecode_.trtllm_head->packed_weights_size = 0;
@@ -1832,6 +1853,8 @@ class LiteRtDispatchInvocationContextT {
     if (save_runtime_cache) {
       SaveRuntimeCache();
     }
+    LogOwnGraphUse();
+    DestroyOwnGraphs();
     execution_context_.reset();
     runtime_config_.reset();
     runtime_cache_.reset();
@@ -1844,8 +1867,10 @@ class LiteRtDispatchInvocationContextT {
       cudaStreamDestroy(stream_);
       stream_ = nullptr;
     }
+    weight_mapping_.reset();
     engine_.reset();
     runtime_.reset();
+    weight_memory_.reset();
     std::fill(bound_input_ptrs_.begin(), bound_input_ptrs_.end(), nullptr);
     std::fill(bound_output_ptrs_.begin(), bound_output_ptrs_.end(), nullptr);
     bound_arena_ptr_ = nullptr;
@@ -1914,6 +1939,11 @@ class LiteRtDispatchInvocationContextT {
     litert::nvidia::EnsureSubbyteGemvPluginRegistered();
     litert::nvidia::EnsureDecodeAttentionPluginRegistered();
     litert::nvidia::EnsureCacheUpdatePluginRegistered();
+    litert::nvidia::EnsureInt8CacheWritePluginRegistered();
+    litert::nvidia::EnsureMoePluginRegistered();
+    litert::nvidia::EnsureQkvNormRopePluginRegistered();
+    // Execution contexts of this process load their expert arenas.
+    litert::nvidia::SetMoeArenaLoadingEnabled(true);
     LITERT_LOG(LITERT_INFO,
                "NVIDIA dispatch creating TensorRT runtime for function %s "
                "(inputs=%zu outputs=%zu engine_bytes=%zu)",
@@ -1945,12 +1975,15 @@ class LiteRtDispatchInvocationContextT {
     memory_profiler_.Log("stream_created", bytecode_.function_name.c_str());
     LITERT_RETURN_IF_ERROR(DeserializeEngine());
     LITERT_RETURN_IF_ERROR(RecordAliasedOutputs());
+    LITERT_RETURN_IF_ERROR(MapEngineWeights());
     LITERT_RETURN_IF_ERROR(RefitEngine());
     DumpEngineInfo();
-    if (UseCudaGraph()) {
+    const bool own_graph = OwnCudaGraph(&own_graph_mode_);
+    if (UseCudaGraph() || own_graph) {
       // TensorRT-RTX owns whole-graph CUDA-graph capture/replay through the
       // runtime config; this collapses per-kernel launch overhead, which
-      // dominates decode-step time on WSL.
+      // dominates decode-step time on WSL. With OwnCudaGraph the context
+      // captures the step itself instead (EnqueueStep).
       runtime_config_.reset(engine_->createRuntimeConfig());
       if (runtime_config_) {
         if (UseSharedActivationArena()) {
@@ -1958,7 +1991,8 @@ class LiteRtDispatchInvocationContextT {
               nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED);
         }
         runtime_config_->setCudaGraphStrategy(
-            nvinfer1::CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE);
+            own_graph ? nvinfer1::CudaGraphStrategy::kDISABLED
+                      : nvinfer1::CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE);
         LITERT_RETURN_IF_ERROR(ConfigureRuntimeCache());
         execution_context_.reset(
             engine_->createExecutionContext(runtime_config_.get()));
@@ -1966,10 +2000,12 @@ class LiteRtDispatchInvocationContextT {
           if (UseSharedActivationArena()) {
             device_memory_bytes_ = engine_->getDeviceMemorySizeV2();
           }
+          own_graph_enabled_ = own_graph;
           LITERT_LOG(LITERT_INFO,
-                     "NVIDIA dispatch context %s uses CUDA graph capture "
+                     "NVIDIA dispatch context %s uses %s "
                      "(device_memory_bytes=%lld)",
                      bytecode_.function_name.c_str(),
+                     own_graph ? "its own step graph" : "CUDA graph capture",
                      static_cast<long long>(device_memory_bytes_));
         }
       }
@@ -2041,6 +2077,40 @@ class LiteRtDispatchInvocationContextT {
                  "their input buffers",
                  bytecode_.function_name.c_str(), aliased);
     }
+    return {};
+  }
+
+  // A plan built without its packed plugin weights (bytecode.h,
+  // TensorRtWeightStore) gets them mapped in from device memory that is filled
+  // from the model file and shared by the engines of the process.
+  Expected<void> MapEngineWeights() {
+    if (!bytecode_.weight_store.has_value()) {
+      return {};
+    }
+    DispatchCpuTimer map_timer(/*enabled=*/true);
+    memory_profiler_.Log("engine_weights_map_begin",
+                         bytecode_.function_name.c_str());
+    LITERT_ASSIGN_OR_RETURN(weight_memory_,
+                            litert::nvidia::EngineWeightMemory::Create(
+                                *bytecode_.weight_store, stream_));
+    memory_profiler_.Log("engine_weights_on_device",
+                         bytecode_.function_name.c_str());
+    LITERT_ASSIGN_OR_RETURN(weight_mapping_,
+                            litert::nvidia::EngineWeightMapping::Create(
+                                *engine_, *weight_memory_, stream_));
+    LITERT_LOG(
+        LITERT_INFO,
+        "NVIDIA dispatch mapped the weights of %s "
+        "(weight_data_bytes=%llu segment_bytes=%llu "
+        "shared_segment_bytes=%llu private_bytes=%llu elapsed_ms=%.3f)",
+        bytecode_.function_name.c_str(),
+        static_cast<unsigned long long>(weight_memory_->weight_data_size()),
+        static_cast<unsigned long long>(weight_memory_->segment_bytes()),
+        static_cast<unsigned long long>(weight_memory_->shared_segment_bytes()),
+        static_cast<unsigned long long>(weight_memory_->private_bytes()),
+        map_timer.ElapsedMs());
+    memory_profiler_.Log("engine_weights_map_end",
+                         bytecode_.function_name.c_str());
     return {};
   }
 
@@ -2351,9 +2421,378 @@ class LiteRtDispatchInvocationContextT {
     }
     const char* value = std::getenv("LITERT_NVIDIA_DISPATCH_CUDA_GRAPH");
     if (value != nullptr && value[0] != '\0') {
-      return std::strcmp(value, "0") != 0;
+      return std::strcmp(value, "0") != 0 && std::strncmp(value, "own", 3) != 0;
     }
     return true;
+  }
+
+  // LITERT_NVIDIA_DISPATCH_CUDA_GRAPH=own|own-relaxed: TensorRT-RTX's graph
+  // strategy stays off and this context captures its own step graph around
+  // enqueueV3 and the external head (EnqueueStep). TensorRT-RTX's whole-graph
+  // capture leaves plugin layers out, so each of their launches pays WSL's
+  // launch latency every step; a capture around the whole enqueue takes them
+  // all. `own` captures in thread-local mode (an unsafe CUDA call during the
+  // capture fails it, loudly); `own-relaxed` lets such calls through.
+  static bool OwnCudaGraph(cudaStreamCaptureMode* mode) {
+    if (litert::nvidia::DispatchLayerProfilingEnabled()) {
+      return false;
+    }
+    const char* value = std::getenv("LITERT_NVIDIA_DISPATCH_CUDA_GRAPH");
+    if (value == nullptr) {
+      return false;
+    }
+    if (std::strcmp(value, "own") == 0) {
+      *mode = cudaStreamCaptureModeThreadLocal;
+      return true;
+    }
+    if (std::strcmp(value, "own-relaxed") == 0) {
+      *mode = cudaStreamCaptureModeRelaxed;
+      return true;
+    }
+    return false;
+  }
+
+  // The step graphs of this context's own (OwnCudaGraph): the bindings they
+  // were captured for, or seen once without a graph yet (exec null).
+  struct OwnGraph {
+    std::vector<void*> inputs;
+    std::vector<void*> outputs;
+    void* arena = nullptr;
+    cudaGraphExec_t exec = nullptr;
+    int64_t replays = 0;
+  };
+
+  bool SameBindings(const OwnGraph& graph) const {
+    return graph.inputs == bound_input_ptrs_ &&
+           graph.outputs == bound_output_ptrs_ &&
+           graph.arena == bound_arena_ptr_;
+  }
+
+  void DestroyOwnGraphs() {
+    for (auto& graph : own_graphs_) {
+      if (graph.exec != nullptr) {
+        cudaGraphExecDestroy(graph.exec);
+      }
+    }
+    own_graphs_.clear();
+  }
+
+  // The engine, then the external head, on stream_.
+  Expected<void> EnqueueDirect() {
+    if (!execution_context_->enqueueV3(stream_)) {
+      return Error(kLiteRtStatusErrorRuntimeFailure,
+                   "TensorRT enqueueV3 failed");
+    }
+    return LaunchExternalHead();
+  }
+
+  // The step's work: enqueued directly, or (OwnCudaGraph) replayed from the
+  // graph captured for the current bindings. Bindings seen for the first
+  // time run directly, so that lazy work (expert arenas, kernel
+  // specialization) stays out of the graph; their second step captures.
+  Expected<void> EnqueueStep() {
+    if (!own_graph_enabled_) {
+      return EnqueueDirect();
+    }
+    for (auto& graph : own_graphs_) {
+      if (!SameBindings(graph)) {
+        continue;
+      }
+      if (graph.exec == nullptr) {
+        return CaptureOwnGraph(&graph);
+      }
+      LITERT_RETURN_IF_ERROR(CudaOk(cudaGraphLaunch(graph.exec, stream_),
+                                    "cudaGraphLaunch step graph"));
+      ++graph.replays;
+      return {};
+    }
+    constexpr size_t kMaxOwnGraphs = 4;
+    if (own_graphs_.size() >= kMaxOwnGraphs) {
+      if (own_graphs_.front().exec != nullptr) {
+        cudaGraphExecDestroy(own_graphs_.front().exec);
+      }
+      own_graphs_.erase(own_graphs_.begin());
+    }
+    own_graphs_.push_back(OwnGraph{bound_input_ptrs_, bound_output_ptrs_,
+                                   bound_arena_ptr_, nullptr, 0});
+    ++own_graph_direct_;
+    return EnqueueDirect();
+  }
+
+  Expected<void> CaptureOwnGraph(OwnGraph* graph) {
+    const char* name = bytecode_.function_name.c_str();
+    cudaError_t status = cudaStreamBeginCapture(stream_, own_graph_mode_);
+    if (status != cudaSuccess) {
+      LITERT_LOG(LITERT_WARNING,
+                 "NVIDIA dispatch %s: cudaStreamBeginCapture: %s; the step "
+                 "runs without its own graph",
+                 name, cudaGetErrorString(status));
+      static_cast<void>(cudaGetLastError());
+      own_graph_enabled_ = false;
+      return EnqueueDirect();
+    }
+    const auto enqueued = EnqueueDirect();
+    cudaGraph_t captured = nullptr;
+    status = cudaStreamEndCapture(stream_, &captured);
+    if (!enqueued || status != cudaSuccess || captured == nullptr) {
+      LITERT_LOG(LITERT_WARNING,
+                 "NVIDIA dispatch %s: capturing the step failed (%s%s); the "
+                 "step runs without its own graph",
+                 name, enqueued ? "" : "enqueue failed, ",
+                 cudaGetErrorString(status));
+      if (captured != nullptr) {
+        cudaGraphDestroy(captured);
+      }
+      static_cast<void>(cudaGetLastError());
+      own_graph_enabled_ = false;
+      // Captured work never ran: enqueue the step for real.
+      return EnqueueDirect();
+    }
+    ++own_graph_captures_;
+    LogOwnGraph(captured);
+    AutopsyOwnGraph(captured);
+    cudaGraphExec_t exec = nullptr;
+    status = cudaGraphInstantiate(&exec, captured, 0);
+    cudaGraphDestroy(captured);
+    if (status != cudaSuccess || exec == nullptr) {
+      LITERT_LOG(LITERT_WARNING,
+                 "NVIDIA dispatch %s: cudaGraphInstantiate: %s; the step runs "
+                 "without its own graph",
+                 name, cudaGetErrorString(status));
+      static_cast<void>(cudaGetLastError());
+      own_graph_enabled_ = false;
+      return EnqueueDirect();
+    }
+    graph->exec = exec;
+    LITERT_RETURN_IF_ERROR(
+        CudaOk(cudaGraphLaunch(exec, stream_), "cudaGraphLaunch step graph"));
+    ++graph->replays;
+    return {};
+  }
+
+  // LITERT_NVIDIA_DISPATCH_CUDA_GRAPH_AUTOPSY=path: every kernel node of the
+  // first captured step graph timed on its own (a clone of the graph with the
+  // other nodes removed), warm and cold (two passes of a kernel that rewrites
+  // 128 MB ahead of it flush L2; their own time is subtracted). A graph launch
+  // costs 10-16 us here, more than most kernels, so each measurement captures
+  // several launches of the node's graph into one graph and divides. One line
+  // per node: index (the DOT's ID), grid, block, cold us, warm us. The CUPTI
+  // tools do not see kernels on this host; this is the step's per-kernel
+  // profile.
+  void AutopsyOwnGraph(cudaGraph_t graph) {
+    const char* path = std::getenv("LITERT_NVIDIA_DISPATCH_CUDA_GRAPH_AUTOPSY");
+    if (path == nullptr || path[0] == '\0' || autopsy_done_) {
+      return;
+    }
+    autopsy_done_ = true;
+    size_t count = 0;
+    if (cudaGraphGetNodes(graph, nullptr, &count) != cudaSuccess ||
+        count == 0) {
+      return;
+    }
+    std::vector<cudaGraphNode_t> nodes(count);
+    if (cudaGraphGetNodes(graph, nodes.data(), &count) != cudaSuccess) {
+      return;
+    }
+    constexpr size_t kFlushBytes = size_t{128} << 20;
+    void* flush = nullptr;
+    if (cudaMalloc(&flush, kFlushBytes) != cudaSuccess) {
+      static_cast<void>(cudaGetLastError());
+      return;
+    }
+    FILE* out = std::fopen(path, "w");
+    if (out == nullptr) {
+      cudaFree(flush);
+      return;
+    }
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    constexpr int kIters = 10;
+    auto time_graph = [&](cudaGraph_t g) -> double {
+      cudaGraphExec_t exec = nullptr;
+      if (cudaGraphInstantiate(&exec, g, 0) != cudaSuccess) {
+        static_cast<void>(cudaGetLastError());
+        return -1.0;
+      }
+      for (int i = 0; i < 2; ++i) {
+        cudaGraphLaunch(exec, stream_);
+      }
+      cudaEventRecord(start, stream_);
+      for (int i = 0; i < kIters; ++i) {
+        cudaGraphLaunch(exec, stream_);
+      }
+      cudaEventRecord(stop, stream_);
+      cudaEventSynchronize(stop);
+      float ms = 0.0f;
+      cudaEventElapsedTime(&ms, start, stop);
+      cudaGraphExecDestroy(exec);
+      return ms * 1000.0 / kIters;
+    };
+    constexpr int kRepeatWarm = 10;
+    constexpr int kRepeatCold = 4;
+    // Two passes of the flush, captured once as a graph.
+    cudaGraph_t flush_graph = nullptr;
+    if (cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal) ==
+        cudaSuccess) {
+      LiteRtNvidiaLaunchL2Flush(flush, kFlushBytes, stream_);
+      LiteRtNvidiaLaunchL2Flush(flush, kFlushBytes, stream_);
+      cudaStreamEndCapture(stream_, &flush_graph);
+    }
+    if (flush_graph == nullptr) {
+      static_cast<void>(cudaGetLastError());
+      std::fclose(out);
+      cudaEventDestroy(start);
+      cudaEventDestroy(stop);
+      cudaFree(flush);
+      return;
+    }
+    // `repeat` rounds of [flush,] node graph, chained as child graph nodes
+    // of one graph; its time per round.
+    auto time_sequence = [&](cudaGraph_t node_graph, bool with_flush,
+                             int repeat) -> double {
+      cudaGraph_t g = nullptr;
+      if (cudaGraphCreate(&g, 0) != cudaSuccess) {
+        static_cast<void>(cudaGetLastError());
+        return -1.0;
+      }
+      cudaGraphNode_t previous = nullptr;
+      bool ok = true;
+      auto append = [&](cudaGraph_t child) {
+        cudaGraphNode_t node = nullptr;
+        ok = ok && cudaGraphAddChildGraphNode(
+                       &node, g, previous == nullptr ? nullptr : &previous,
+                       previous == nullptr ? 0 : 1, child) == cudaSuccess;
+        previous = node;
+      };
+      for (int i = 0; i < repeat && ok; ++i) {
+        if (with_flush) {
+          append(flush_graph);
+        }
+        if (node_graph != nullptr) {
+          append(node_graph);
+        }
+      }
+      double us = -1.0;
+      if (ok) {
+        us = time_graph(g);
+      } else {
+        static_cast<void>(cudaGetLastError());
+      }
+      cudaGraphDestroy(g);
+      return us < 0.0 ? us : us / repeat;
+    };
+    const double flush_us = time_sequence(nullptr, true, kRepeatCold);
+    std::fprintf(out, "# flush_us %.1f\n", flush_us);
+    std::fprintf(out, "# node grid_x grid_y grid_z block_x cold_us warm_us\n");
+    size_t timed = 0;
+    for (size_t i = 0; i < count; ++i) {
+      cudaGraphNodeType type;
+      if (cudaGraphNodeGetType(nodes[i], &type) != cudaSuccess ||
+          type != cudaGraphNodeTypeKernel) {
+        continue;
+      }
+      cudaGraph_t clone = nullptr;
+      if (cudaGraphClone(&clone, graph) != cudaSuccess) {
+        static_cast<void>(cudaGetLastError());
+        break;
+      }
+      cudaGraphNode_t keep = nullptr;
+      if (cudaGraphNodeFindInClone(&keep, nodes[i], clone) != cudaSuccess) {
+        static_cast<void>(cudaGetLastError());
+        cudaGraphDestroy(clone);
+        break;
+      }
+      size_t clone_count = 0;
+      cudaGraphGetNodes(clone, nullptr, &clone_count);
+      std::vector<cudaGraphNode_t> clone_nodes(clone_count);
+      cudaGraphGetNodes(clone, clone_nodes.data(), &clone_count);
+      for (cudaGraphNode_t n : clone_nodes) {
+        if (n != keep) {
+          cudaGraphDestroyNode(n);
+        }
+      }
+      const double warm = time_sequence(clone, false, kRepeatWarm);
+      const double cold = time_sequence(clone, true, kRepeatCold) - flush_us;
+      cudaKernelNodeParams params{};
+      dim3 grid(0, 0, 0);
+      dim3 block(0, 0, 0);
+      if (cudaGraphKernelNodeGetParams(keep, &params) == cudaSuccess) {
+        grid = params.gridDim;
+        block = params.blockDim;
+      } else {
+        static_cast<void>(cudaGetLastError());
+      }
+      std::fprintf(out, "%zu %u %u %u %u %.2f %.2f\n", i, grid.x, grid.y,
+                   grid.z, block.x, cold, warm);
+      cudaGraphDestroy(clone);
+      ++timed;
+    }
+    std::fclose(out);
+    cudaGraphDestroy(flush_graph);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    cudaFree(flush);
+    static_cast<void>(cudaGetLastError());
+    LITERT_LOG(LITERT_INFO,
+               "NVIDIA dispatch %s: autopsy of %zu kernel nodes written to %s "
+               "(flush %.1f us)",
+               bytecode_.function_name.c_str(), timed, path, flush_us);
+  }
+
+  // What the captured step holds; LITERT_NVIDIA_DISPATCH_CUDA_GRAPH_DOT=dir
+  // also writes it as a DOT file (kernel names, grids and arguments).
+  void LogOwnGraph(cudaGraph_t graph) {
+    const char* name = bytecode_.function_name.c_str();
+    size_t count = 0;
+    if (cudaGraphGetNodes(graph, nullptr, &count) != cudaSuccess) {
+      return;
+    }
+    std::vector<cudaGraphNode_t> nodes(count);
+    if (count > 0 &&
+        cudaGraphGetNodes(graph, nodes.data(), &count) != cudaSuccess) {
+      return;
+    }
+    int kernels = 0, copies = 0, memsets = 0, events = 0, others = 0;
+    for (cudaGraphNode_t node : nodes) {
+      cudaGraphNodeType type;
+      if (cudaGraphNodeGetType(node, &type) != cudaSuccess) {
+        continue;
+      }
+      switch (type) {
+        case cudaGraphNodeTypeKernel:
+          ++kernels;
+          break;
+        case cudaGraphNodeTypeMemcpy:
+          ++copies;
+          break;
+        case cudaGraphNodeTypeMemset:
+          ++memsets;
+          break;
+        case cudaGraphNodeTypeWaitEvent:
+        case cudaGraphNodeTypeEventRecord:
+          ++events;
+          break;
+        default:
+          ++others;
+          break;
+      }
+    }
+    LITERT_LOG(LITERT_INFO,
+               "NVIDIA dispatch %s captured its step: %zu graph nodes (%d "
+               "kernels, %d copies, %d memsets, %d events, %d other)",
+               name, count, kernels, copies, memsets, events, others);
+    const char* dot_dir = std::getenv("LITERT_NVIDIA_DISPATCH_CUDA_GRAPH_DOT");
+    if (dot_dir != nullptr && dot_dir[0] != '\0') {
+      const std::string path = JoinPath(
+          dot_dir, SanitizeCacheComponent(bytecode_.function_name) + "_" +
+                       std::to_string(own_graph_captures_) + ".dot");
+      const cudaError_t status = cudaGraphDebugDotPrint(
+          graph, path.c_str(), cudaGraphDebugDotFlagsVerbose);
+      LITERT_LOG(LITERT_INFO, "NVIDIA dispatch %s step graph to %s: %s", name,
+                 path.c_str(), cudaGetErrorString(status));
+    }
   }
 
   std::string RuntimeCachePath(const std::string& dir) const {
@@ -2600,8 +3039,12 @@ class LiteRtDispatchInvocationContextT {
   litert::nvidia::TensorRtBytecode bytecode_;
   litert::nvidia::MemoryProfiler memory_profiler_;
   litert::nvidia::TensorRtLogger logger_;
+  // The device memory of the engine's weight store outlives the engine, and
+  // its mapping into the engine goes before the engine.
+  std::unique_ptr<litert::nvidia::EngineWeightMemory> weight_memory_;
   TrtPtr<nvinfer1::IRuntime> runtime_;
   TrtPtr<nvinfer1::ICudaEngine> engine_;
+  std::unique_ptr<litert::nvidia::EngineWeightMapping> weight_mapping_;
   TrtPtr<nvinfer1::IRuntimeCache> runtime_cache_;
   TrtPtr<nvinfer1::IRuntimeConfig> runtime_config_;
   TrtPtr<nvinfer1::IExecutionContext> execution_context_;
@@ -2609,6 +3052,12 @@ class LiteRtDispatchInvocationContextT {
   litert::nvidia::DispatchInvocationProfiler invocation_profiler_;
   cudaStream_t stream_ = nullptr;
   std::vector<cudaStream_t> aux_streams_;
+  bool own_graph_enabled_ = false;
+  cudaStreamCaptureMode own_graph_mode_ = cudaStreamCaptureModeThreadLocal;
+  std::vector<OwnGraph> own_graphs_;
+  int64_t own_graph_captures_ = 0;
+  int64_t own_graph_direct_ = 0;
+  bool autopsy_done_ = false;
   std::vector<LiteRtTensorBufferHandle> input_handles_;
   std::vector<LiteRtTensorBufferHandle> output_handles_;
   std::vector<void*> bound_input_ptrs_;

@@ -71,6 +71,12 @@ absl::Status AddValuesToCacheIsSupported(
       return absl::InvalidArgumentError(
           "odml.cache_update is missing head_size.");
     }
+    ::litert::ml_drift::AddValuesToCacheAttributes layout;
+    if (absl::Status status = ::litert::ml_drift::ReadAddValuesToCacheLayout(
+            flexbuffer_map, layout);
+        !status.ok()) {
+      return status;
+    }
   }
 
   return absl::OkStatus();
@@ -109,9 +115,16 @@ void AddValuesToCacheConvert(
   if (!flexbuffer_map["is_ring_buffer"].IsNull()) {
     attr.is_ring_buffer = flexbuffer_map["is_ring_buffer"].AsBool();
   }
+  // AddValuesToCacheIsSupported() has already rejected unsupported layouts.
+  ::litert::ml_drift::ReadAddValuesToCacheLayout(flexbuffer_map, attr)
+      .IgnoreError();
   add_values_op->attr = std::move(attr);
 
-  if (context.tensors[tflite_node.outputs->data[0]].type == kTfLiteInt8) {
+  const TfLiteType out_type =
+      context.tensors[tflite_node.outputs->data[0]].type;
+  if (out_type == kTfLiteInt8 || out_type == kTfLiteUInt8 ||
+      out_type == kTfLiteInt4 || out_type == kTfLiteUInt4 ||
+      out_type == kTfLiteInt2) {
     auto output_1_id = tensor_map[tflite_node.outputs->data[0]];
     auto output_2_id = tensor_map[tflite_node.outputs->data[1]];
     ir_model.ResetQuantParams(output_1_id);

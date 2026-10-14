@@ -231,7 +231,7 @@ cc_library(
         ":litert_expected",
         ":litert_macros",
         "//litert/c:litert_common",
-        "//litert/c:litert_opaque_options",
+        "//litert/c:litert_opaque_options_header",
         "//litert/cc/internal:litert_handle",
         "@com_google_absl//absl/strings:string_view",
     ],
@@ -308,17 +308,17 @@ cc_library(
         ":litert_model_types",
         ":litert_options",
         ":litert_ranked_tensor_type",
-        ":litert_tensor_buffer",
         ":litert_tensor_buffer_requirements",
         ":litert_tensor_buffer_types",
         "//litert/c:litert_common",
         "//litert/c:litert_layout",
-        "//litert/c:litert_metrics",
+        "//litert/c:litert_metrics_header",
         "//litert/c:litert_model_types",
         "//litert/c:litert_tensor_buffer_types",
         "//litert/c/internal:litert_scheduling_info",
         "//litert/cc/internal:litert_consts",
         "//litert/cc/internal:litert_handle",
+        "//litert/cc/internal:litert_tensor_buffer_without_registry",
     ],
 )
 
@@ -410,6 +410,7 @@ litert_device_test(
 #         ":litert_tensor_buffer_requirements",
 #         ":litert_tensor_buffer_types",
 #         "@com_google_googletest//:gtest_main",
+#         "@com_google_absl//absl/algorithm:container",
 #         "@com_google_absl//absl/container:flat_hash_map",
 #         "@com_google_absl//absl/log:absl_log",
 #         "@com_google_absl//absl/strings:string_view",
@@ -420,10 +421,12 @@ litert_device_test(
 #         "//litert/c:litert_tensor_buffer_types",
 #         "//litert/cc/internal:litert_platform_support",
 #         "//litert/cc/options:litert_gpu_options",
+#         "//litert/runtime:compiled_model",
 #         "//litert/test:common",
 #         "//litert/test:matchers",
 #         "//litert/test:simple_model",
 #         "@opencl_headers",
+#         "//tflite:framework",
 #     ] + select({
 #         "//litert:android": [
 #             "//litert/runtime/accelerators/gpu:ml_drift_cl_gl_accelerator",  # buildcleaner: keep
@@ -438,16 +441,97 @@ litert_device_test(
 #     }),
 # )
 #
+# _LITERT_COMPILED_MODEL_GPU_TEST_DATA = [
+#     "//litert/test:testdata/constant_output_tensor.tflite",
+#     "//litert/test:testdata/simple_add3d_cst_int32.tflite",
+#     "//litert/test:testdata/simple_cast_and_add_op.tflite",
+#     "//litert/test:testdata/simple_model.tflite",
+# ]
+#
 # litert_device_exec(
 #     name = "litert_compiled_model_gpu_device_test",
 #     backend_id = "gpu",
-#     data = [
-#         "//litert/test:testdata/constant_output_tensor.tflite",
-#         "//litert/test:testdata/simple_add3d_cst_int32.tflite",
-#         "//litert/test:testdata/simple_cast_and_add_op.tflite",
-#         "//litert/test:testdata/simple_model.tflite",
-#     ],
+#     data = _LITERT_COMPILED_MODEL_GPU_TEST_DATA,
 #     target = "//litert/cc:litert_compiled_model_gpu_test",
+# )
+#
+# # Real-device Mobile Harness targets for litert_compiled_model_gpu_test across
+# # Android GPU families: Mali (where OpenCL imports AHardwareBuffer via
+# # cl_arm_import_memory_android_hardware_buffer), PowerVR, Adreno, and Xclipse.
+# _LITERT_GPU_DEVICE_TEST_DIMENSIONS = {
+#     # Mali (AHWB -> OpenCL zero-copy path)
+#     "pixel6": {
+#         "pool": "shared",
+#         "model": "pixel 6",
+#         "sdk_version": "33",
+#     },  # Pixel 6, Tensor G1 / Mali-G78
+#     "pixel7": {
+#         "pool": "shared",
+#         "model": "pixel 7",
+#         "sdk_version": "34",
+#     },  # Pixel 7, Tensor G2 / Mali-G710
+#     "pixel8": {
+#         "pool": "shared",
+#         "model": "pixel 8",
+#         "sdk_version": "36",
+#     },  # Pixel 8, Tensor G3 / Mali-G715
+#     "pixel9": {
+#         "pool": "shared",
+#         "model": "pixel 9",
+#         "sdk_version": "36",
+#     },  # Pixel 9, Tensor G4 / Mali-G715
+#     "a346n": {
+#         "pool": "shared",
+#         "model": "sm-a346n",
+#     },  # Galaxy A34, Dimensity 1080 / Mali-G68
+#     "a146u1": {
+#         "pool": "shared",
+#         "model": "sm-a146u1",
+#     },  # Galaxy A14 5G, Exynos 1330 / Mali-G68
+#     # PowerVR (non-AHWB OpenCL buffer path)
+#     "pixel10": {
+#         "pool": "shared",
+#         "model": "pixel 10",
+#         "sdk_version": "36",
+#     },  # Pixel 10, Tensor G5 / PowerVR DXT-48-1536
+#     # Adreno (non-AHWB OpenCL buffer path)
+#     "s928b": {
+#         "pool": "shared",
+#         "model": "sm-s928b",
+#     },  # Galaxy S24 Ultra, Snapdragon 8 Gen 3 / Adreno 750
+#     # Xclipse (non-AHWB OpenCL buffer path)
+#     "s926b": {
+#         "pool": "shared",
+#         "model": "sm-s926b",
+#     },  # Galaxy S24+, Exynos 2400 / Xclipse 940
+# }
+#
+# [
+#     litert_device_exec(
+#         name = "litert_compiled_model_gpu_device_test_" + suffix,
+#         backend_id = "gpu",
+#         data = _LITERT_COMPILED_MODEL_GPU_TEST_DATA,
+#         dimensions = dims,
+#         local_suffix = None,
+#         target = "//litert/cc:litert_compiled_model_gpu_test",
+#     )
+#     for suffix, dims in _LITERT_GPU_DEVICE_TEST_DIMENSIONS.items()
+# ]
+#
+# test_suite(
+#     name = "litert_compiled_model_gpu_device_tests",
+#     tags = [
+#         "local",
+#         "manual",
+#         "no-remote-exec",
+#         "no_oss",
+#         "nobuilder",
+#         "notap",
+#     ],
+#     tests = [
+#         ":litert_compiled_model_gpu_device_test_" + suffix
+#         for suffix in _LITERT_GPU_DEVICE_TEST_DIMENSIONS
+#     ],
 # )
 #
 # cc_test(
@@ -808,7 +892,7 @@ cc_library_with_testonly_vis(
         ":litert_macros",
         "//litert/c:litert_any",
         "//litert/c:litert_common",
-        "//litert/c:litert_environment_options",
+        "//litert/c:litert_environment_options_header",
         "//litert/c/internal:litert_logging",
         "//litert/cc/internal:litert_handle",
         "//litert/cc/internal:litert_runtime_proxy_api",
@@ -1103,7 +1187,6 @@ cc_library(
         ":litert_tensor_buffer_types",
         "//litert/c:litert_common",
         "//litert/c:litert_custom_tensor_buffer",
-        "//litert/c:litert_event",
         "//litert/c:litert_gl_types",
         "//litert/c:litert_model_types",
         "//litert/c:litert_opencl_types",
@@ -1216,8 +1299,6 @@ cc_library_with_testonly_vis(
         ":litert_opaque_options",
         "//litert/c:litert_common",
         "//litert/c:litert_custom_op_kernel",
-        "//litert/c:litert_opaque_options",
-        "//litert/c:litert_options",
         "//litert/c/internal:litert_logging",
         "//litert/c/options:litert_compiler_options",
         "//litert/c/options:litert_cpu_options",

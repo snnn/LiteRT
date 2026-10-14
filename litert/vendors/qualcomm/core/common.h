@@ -186,6 +186,10 @@ class Options {
   void SetHtpPPoint(std::int32_t htp_p_point);
   std::int32_t GetHtpPPoint() const;
 
+  void SetHtpWeightSharingChannelTileSize(
+      std::int32_t htp_weight_sharing_channel_tile_size);
+  std::int32_t GetHtpWeightSharingChannelTileSize() const;
+
   void SetHtpDlbc(bool htp_dlbc);
   bool GetHtpDlbc() const;
 
@@ -228,6 +232,9 @@ class Options {
 
   std::uint32_t GetVtcmSize() const;
   void SetVtcmSize(std::uint32_t vtcm_size);
+
+  std::uint32_t GetHtpDeviceId() const;
+  void SetHtpDeviceId(std::uint32_t htp_device_id);
 
   std::uint32_t GetNumHvxThreads() const;
   void SetNumHvxThreads(std::uint32_t num_hvx_threads);
@@ -301,6 +308,7 @@ class Options {
   bool use_conv_hmx_ = true;
   bool use_fold_relu_ = true;
   std::int32_t htp_p_point_ = 0;
+  std::int32_t htp_weight_sharing_channel_tile_size_ = 0;
   bool htp_dlbc_ = false;
   bool htp_dlbc_weights_ = false;
   HtpPerformanceMode htp_performance_mode_ = HtpPerformanceMode::kDefault;
@@ -315,6 +323,7 @@ class Options {
   std::string dlc_dir_;
   std::string graph_transform_;
   std::uint32_t vtcm_size_ = 0;
+  std::uint32_t htp_device_id_ = 0;
   std::uint32_t num_hvx_threads_ = 0;
   OptimizationLevel optimization_level_ =
       OptimizationLevel::kHtpOptimizeForInferenceO3;
@@ -323,7 +332,7 @@ class Options {
   GpuPerformanceMode gpu_performance_mode_ = GpuPerformanceMode::kHigh;
   std::string saver_output_dir_;
   GraphIOTensorMemType graph_io_tensor_mem_type_ =
-      GraphIOTensorMemType::kRaw;
+      GraphIOTensorMemType::kMemHandle;
   std::string schematic_dir_;
   // Currently we only support one custom op package.
   CustomOpPackage custom_op_package_;

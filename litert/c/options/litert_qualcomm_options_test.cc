@@ -154,6 +154,53 @@ TEST(LiteRtQualcommOptionsTest, UseFoldReLU) {
   LrtDestroyQualcommOptions(qualcomm_options);
 }
 
+TEST(LiteRtQualcommOptionsTest, HtpWeightSharingChannelTileSize) {
+  LrtQualcommOptions qualcomm_options;
+  LITERT_ASSERT_OK(LrtCreateQualcommOptions(&qualcomm_options));
+
+  std::int32_t default_value;
+  LITERT_ASSERT_OK(LrtQualcommOptionsGetHtpWeightSharingChannelTileSize(
+      qualcomm_options, &default_value));
+  EXPECT_EQ(default_value, 0);
+
+  LITERT_ASSERT_OK(LrtQualcommOptionsSetHtpWeightSharingChannelTileSize(
+      qualcomm_options, 64));
+
+  auto parsed = SerializeAndParse(qualcomm_options);
+  EXPECT_EQ(parsed.GetHtpWeightSharingChannelTileSize(), 64);
+
+  LITERT_ASSERT_OK(LrtQualcommOptionsSetHtpWeightSharingChannelTileSize(
+      qualcomm_options, 0));
+  auto parsed_zero = SerializeAndParse(qualcomm_options);
+  EXPECT_EQ(parsed_zero.GetHtpWeightSharingChannelTileSize(), 0);
+
+  LrtDestroyQualcommOptions(qualcomm_options);
+}
+
+TEST(LiteRtQualcommOptionsTest, HtpDlbc) {
+  LrtQualcommOptions qualcomm_options;
+  LITERT_ASSERT_OK(LrtCreateQualcommOptions(&qualcomm_options));
+
+  LITERT_ASSERT_OK(LrtQualcommOptionsSetHtpDlbc(qualcomm_options, true));
+
+  auto parsed = SerializeAndParse(qualcomm_options);
+  EXPECT_TRUE(parsed.GetHtpDlbc());
+
+  LrtDestroyQualcommOptions(qualcomm_options);
+}
+
+TEST(LiteRtQualcommOptionsTest, HtpDlbcWeights) {
+  LrtQualcommOptions qualcomm_options;
+  LITERT_ASSERT_OK(LrtCreateQualcommOptions(&qualcomm_options));
+
+  LITERT_ASSERT_OK(LrtQualcommOptionsSetHtpDlbcWeights(qualcomm_options, true));
+
+  auto parsed = SerializeAndParse(qualcomm_options);
+  EXPECT_TRUE(parsed.GetHtpDlbcWeights());
+
+  LrtDestroyQualcommOptions(qualcomm_options);
+}
+
 TEST(LiteRtQualcommOptionsTest, HtpPerformanceMode) {
   LrtQualcommOptions qualcomm_options;
   LITERT_ASSERT_OK(LrtCreateQualcommOptions(&qualcomm_options));
@@ -331,6 +378,18 @@ TEST(LiteRtQualcommOptionsTest, VtcmSize) {
   LrtDestroyQualcommOptions(qualcomm_options);
 }
 
+TEST(LiteRtQualcommOptionsTest, HtpDeviceId) {
+  LrtQualcommOptions qualcomm_options;
+  LITERT_ASSERT_OK(LrtCreateQualcommOptions(&qualcomm_options));
+
+  LITERT_ASSERT_OK(LrtQualcommOptionsSetHtpDeviceId(qualcomm_options, 1));
+
+  auto parsed = SerializeAndParse(qualcomm_options);
+  EXPECT_EQ(parsed.GetHtpDeviceId(), 1);
+
+  LrtDestroyQualcommOptions(qualcomm_options);
+}
+
 TEST(LiteRtQualcommOptionsTest, NumHvxThreads) {
   LrtQualcommOptions qualcomm_options;
   LITERT_ASSERT_OK(LrtCreateQualcommOptions(&qualcomm_options));
@@ -400,17 +459,12 @@ TEST(LiteRtQualcommOptionsTest, GraphIOTensorMemType) {
   LrtQualcommOptions qualcomm_options;
   LITERT_ASSERT_OK(LrtCreateQualcommOptions(&qualcomm_options));
 
-  LrtQualcommOptionsGraphIOTensorMemType default_mem_type;
-  LITERT_ASSERT_OK(LrtQualcommOptionsGetGraphIOTensorMemType(
-      qualcomm_options, &default_mem_type));
-  EXPECT_EQ(default_mem_type, kLiteRtQualcommGraphIOTensorMemTypeRaw);
-
   LITERT_ASSERT_OK(LrtQualcommOptionsSetGraphIOTensorMemType(
-      qualcomm_options, kLiteRtQualcommGraphIOTensorMemTypeMemHandle));
+      qualcomm_options, kLiteRtQualcommGraphIOTensorMemTypeRaw));
 
   auto parsed = SerializeAndParse(qualcomm_options);
   EXPECT_EQ(parsed.GetGraphIOTensorMemType(),
-            QualcommOptions::GraphIOTensorMemType::kMemHandle);
+            QualcommOptions::GraphIOTensorMemType::kRaw);
 
   LrtDestroyQualcommOptions(qualcomm_options);
 }
@@ -563,6 +617,10 @@ TEST(QualcommOptionsTest, CppWrapper) {
   options->SetVtcmSize(4);
   EXPECT_EQ(options->GetVtcmSize(), 4);
 
+  EXPECT_EQ(options->GetHtpDeviceId(), 0);
+  options->SetHtpDeviceId(1);
+  EXPECT_EQ(options->GetHtpDeviceId(), 1);
+
   EXPECT_EQ(options->GetNumHvxThreads(), 0);
   options->SetNumHvxThreads(4);
   EXPECT_EQ(options->GetNumHvxThreads(), 4);
@@ -587,6 +645,24 @@ TEST(QualcommOptionsTest, CppWrapper) {
   options->SetUseFoldReLU(false);
   EXPECT_FALSE(options->GetUseFoldReLU());
 
+  EXPECT_EQ(options->GetHtpWeightSharingChannelTileSize(), 0);
+  options->SetHtpWeightSharingChannelTileSize(64);
+  EXPECT_EQ(options->GetHtpWeightSharingChannelTileSize(), 64);
+  options->SetHtpWeightSharingChannelTileSize(0);
+  EXPECT_EQ(options->GetHtpWeightSharingChannelTileSize(), 0);
+
+  EXPECT_FALSE(options->GetHtpDlbc());
+  options->SetHtpDlbc(true);
+  EXPECT_TRUE(options->GetHtpDlbc());
+  options->SetHtpDlbc(false);
+  EXPECT_FALSE(options->GetHtpDlbc());
+
+  EXPECT_FALSE(options->GetHtpDlbcWeights());
+  options->SetHtpDlbcWeights(true);
+  EXPECT_TRUE(options->GetHtpDlbcWeights());
+  options->SetHtpDlbcWeights(false);
+  EXPECT_FALSE(options->GetHtpDlbcWeights());
+
   EXPECT_EQ(options->GetBackend(), QualcommOptions::Backend::kHtp);
   options->SetBackend(QualcommOptions::Backend::kDsp);
   EXPECT_EQ(options->GetBackend(), QualcommOptions::Backend::kDsp);
@@ -600,14 +676,14 @@ TEST(QualcommOptionsTest, CppWrapper) {
   EXPECT_EQ(options->GetSchematicDir(), "tmp");
 
   EXPECT_EQ(options->GetGraphIOTensorMemType(),
+            QualcommOptions::GraphIOTensorMemType::kMemHandle);
+  options->SetGraphIOTensorMemType(QualcommOptions::GraphIOTensorMemType::kRaw);
+  EXPECT_EQ(options->GetGraphIOTensorMemType(),
             QualcommOptions::GraphIOTensorMemType::kRaw);
   options->SetGraphIOTensorMemType(
       QualcommOptions::GraphIOTensorMemType::kMemHandle);
   EXPECT_EQ(options->GetGraphIOTensorMemType(),
             QualcommOptions::GraphIOTensorMemType::kMemHandle);
-  options->SetGraphIOTensorMemType(QualcommOptions::GraphIOTensorMemType::kRaw);
-  EXPECT_EQ(options->GetGraphIOTensorMemType(),
-            QualcommOptions::GraphIOTensorMemType::kRaw);
 
   QualcommOptions::CustomOpPackage pkg;
   pkg.name = "pkg";

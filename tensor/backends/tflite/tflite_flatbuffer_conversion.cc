@@ -88,7 +88,8 @@ absl::Status ValidateShapeSignature(const graph::Tensor& tensor,
     }
     if (signature[axis] == -1 && producer == nullptr && info.buffer) {
       return absl::InvalidArgumentError(absl::StrCat(
-          "Constant tensor cannot have a dynamic shape signature: ", info.name));
+          "Constant tensor cannot have a dynamic shape signature: ",
+          info.name));
     }
   }
   return absl::OkStatus();
@@ -345,6 +346,10 @@ absl::Status ModelFactory::Build() {
         t.quantization = std::make_unique<tflite::QuantizationParametersT>();
         t.quantization->scale = pcq->scales;
         t.quantization->zero_point = pcq->zero_points;
+        if (pcq->zero_points.size() == 1 && pcq->scales.size() > 1) {
+          t.quantization->zero_point.resize(pcq->scales.size(),
+                                            pcq->zero_points.front());
+        }
         t.quantization->quantized_dimension = pcq->quantized_dimension;
       } else if (auto bwq = tensor_info.quantization
                                 ->As<const BlockwiseQuantization>();
@@ -681,7 +686,8 @@ absl::Status ModelFactory::SetShapeSignature(const TensorHandle& tensor,
                                              Shape shape_signature) {
   LRT_TENSOR_RETURN_IF_ERROR(
       ValidateShapeSignature(tensor.GetRaw(), shape_signature));
-  shape_signatures_.insert_or_assign(tensor.GetRaw(), std::move(shape_signature));
+  shape_signatures_.insert_or_assign(tensor.GetRaw(),
+                                     std::move(shape_signature));
   return absl::OkStatus();
 }
 
@@ -870,12 +876,13 @@ using TfLiteOps = std::tuple<
     graph::TransposeConvOperation, graph::TransposeConv2DOperation,
     graph::LstmOperation, graph::ArgMaxOperation, graph::LogisticOperation,
     graph::DynamicUpdateSliceOperation, graph::TanhOperation,
-    graph::LessOperation, graph::GreaterOperation, graph::GreaterEqualOperation,
-    graph::NotEqualOperation, graph::EqualOperation, graph::MinimumOperation,
-    graph::MaximumOperation, graph::LogicalAndOperation,
-    graph::LogicalOrOperation, graph::LogicalNotOperation,
-    graph::BitwiseXorOperation, graph::RightShiftOperation, graph::CosOperation,
-    graph::SinOperation, graph::ReshapeOperation, graph::SqueezeOperation,
+    graph::LessOperation, graph::LessEqualOperation, graph::GreaterOperation,
+    graph::GreaterEqualOperation, graph::NotEqualOperation,
+    graph::EqualOperation, graph::MinimumOperation, graph::MaximumOperation,
+    graph::LogicalAndOperation, graph::LogicalOrOperation,
+    graph::LogicalNotOperation, graph::BitwiseXorOperation,
+    graph::RightShiftOperation, graph::CosOperation, graph::SinOperation,
+    graph::ReshapeOperation, graph::SqueezeOperation,
     graph::ExpandDimsOperation, graph::QuantizeOperation,
     graph::ReduceMaxOperation, graph::MeanOperation, graph::ProbeOperation,
     graph::ResizeBilinearOperation, graph::ResizeNearestNeighborOperation,
