@@ -342,11 +342,9 @@ absl::Status DelegateKernel::InitializeGraphFloat32(
         }
       }
       if (force_fp32) {
-        auto inputs = graph.FindInputs(node->id);
-        if (inputs.size() >= 6 &&
-            inputs[5]->tensor.type == ::ml_drift::DataType::kFloat32) {
-          preserved_fp32_values.insert(inputs[5]->id);
-        }
+        // recurrent_state is updated in-place via outputs[1]
+        // (recurrent_state_in is omitted from the GPU graph node inputs by the
+        // parser).
         auto outputs = graph.FindOutputs(node->id);
         if (outputs.size() >= 2 &&
             outputs[1]->tensor.type == ::ml_drift::DataType::kFloat32) {
@@ -1055,16 +1053,22 @@ DelegateKernel::TryInitializingExternalTensorsSerialization(
   }
 
   // Create a unique identifier for this subgraph.
+  ::ml_drift::ModelIdentifierOptions identifier_options;
+  identifier_options.precision = delegate_data_->options->precision;
+  identifier_options.prefer_texture_weights =
+      delegate_data_->options->prefer_texture_weights;
+  identifier_options.allow_src_quantized_fc_conv_ops =
+      delegate_data_->options->allow_src_quantized_fc_conv_ops;
+  identifier_options.prepare_weights_in_batches = prepare_weights_in_batches;
+  identifier_options.serialize_external_tensors =
+      delegate_data_->options->serialize_external_tensors;
+  identifier_options.ordered_by_size = true;
+  identifier_options.use_ir_model = delegate_data_->options->use_ir_model;
+
   uint64_t unique_model_identifier =
       ::ml_drift::SerializationWeightCache::GenerateUniqueModelIdentifier(
           delegate_data_->model_token, context, delegate_params,
-          backend_->GetSerializedDataPrefix(),
-          delegate_data_->options->precision,
-          delegate_data_->options->prefer_texture_weights,
-          delegate_data_->options->allow_src_quantized_fc_conv_ops,
-          prepare_weights_in_batches,
-          delegate_data_->options->serialize_external_tensors,
-          /*ordered_by_size=*/true);
+          backend_->GetSerializedDataPrefix(), identifier_options);
 
   // Try loading from the cache.
   absl::Status load_status;
@@ -1282,13 +1286,8 @@ absl::Status DelegateKernel::InitializeIrModel(
         }
       }
       if (force_fp32) {
-        if (op->inputs.size() >= 6) {
-          const auto* in_tensor = ir_model->tensor(op->inputs[5]);
-          if (in_tensor &&
-              in_tensor->desc.GetDataType() == ::ml_drift::DataType::kFloat32) {
-            preserved_fp32_values.insert(op->inputs[5]);
-          }
-        }
+        // recurrent_state is updated in-place via outputs[1]
+        // (recurrent_state_in is omitted from the IR op inputs by the parser).
         if (op->outputs.size() >= 2) {
           const auto* out_tensor = ir_model->tensor(op->outputs[1]);
           if (out_tensor && out_tensor->desc.GetDataType() ==

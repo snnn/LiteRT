@@ -32,8 +32,10 @@
 
 #include "QnnCommon.h"  // from @qairt
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
+#include "absl/strings/ascii.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/str_format.h"  // from @com_google_absl
+#include "absl/strings/str_split.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "litert/c/internal/litert_logging.h"
 #include "litert/c/internal/litert_logging_helper_with_compiler_context.h"
@@ -49,14 +51,20 @@
 #include "litert/cc/options/litert_qualcomm_options.h"
 #include "litert/compiler/cc/litert_model.h"
 #include "litert/vendors/c/litert_compiler_plugin.h"
+#include "litert/vendors/c/litert_compiler_plugin_api.h"
 #include "litert/vendors/qualcomm/common.h"
 #include "litert/vendors/qualcomm/compiler/qnn_compose_graph.h"
+#include "litert/vendors/qualcomm/compiler/transformations/attention_chunk_transformation.h"
+#include "litert/vendors/qualcomm/compiler/transformations/entry_embedding_transformation.h"
+#include "litert/vendors/qualcomm/compiler/transformations/legalize_int32_ops_transformation.h"
+#include "litert/vendors/qualcomm/compiler/transformations/mlp_quant_transformation.h"
+#include "litert/vendors/qualcomm/compiler/transformations/orphan_cleanup_transformation.h"
+#include "litert/vendors/qualcomm/compiler/transformations/rope_transformation.h"
 #include "litert/vendors/qualcomm/core/backends/backend_factory.h"
 #include "litert/vendors/qualcomm/core/backends/qnn_backend.h"
 #include "litert/vendors/qualcomm/core/common.h"
 #include "litert/vendors/qualcomm/core/schema/soc_table.h"
 #include "litert/vendors/qualcomm/core/tensor_pool.h"
-#include "litert/vendors/qualcomm/core/utils/miscs.h"
 #include "litert/vendors/qualcomm/core/wrappers/op_wrapper.h"
 #include "litert/vendors/qualcomm/core/wrappers/tensor_wrapper.h"
 #include "litert/vendors/qualcomm/qnn_manager.h"
@@ -402,6 +410,10 @@ class LiteRtCompilerPluginT {
 
   const LiteRtCompilerContext* ctx() const { return ctx_; }
 
+  std::vector<LiteRtTransformation>& Transformations() {
+    return transformations_;
+  }
+
  private:
   const LiteRtCompilerContext* ctx_;
   litert::Expected<litert::internal::OptionsWrapper> opts_ =
@@ -412,6 +424,7 @@ class LiteRtCompilerPluginT {
   std::optional<std::string> shared_library_dir_;
   QnnManager::Ptr qnn_manager_ = nullptr;
   std::unique_ptr<::qnn::QnnBackend> qnn_backend_ = nullptr;
+  std::vector<LiteRtTransformation> transformations_;
 };
 
 LiteRtStatus LiteRtCreateCompilerPlugin(
@@ -772,10 +785,138 @@ LiteRtStatus LiteRtCompilerPluginCompile(
   return kLiteRtStatusOk;
 }
 
+namespace {
+
+// Experimental graph transformations (disabled by default; enabled manually
+// via comma-separated tokens in QualcommOptions::GetGraphTransform()).
+struct GraphTransformFilter {
+  bool legalize_int32_sign = false;
+  bool legalize_int32_reduce_max = false;
+  bool entry_embedding = false;
+  bool mlp_quant = false;
+  bool attention_chunk = false;
+  bool rope = false;
+
+  static GraphTransformFilter FromOptions(absl::string_view graph_transform) {
+    GraphTransformFilter filter;
+    if (graph_transform.empty()) {
+      return filter;
+    }
+    const auto tokens = absl::StrSplit(graph_transform, ',', absl::SkipEmpty());
+    for (absl::string_view raw_token : tokens) {
+      absl::string_view token = absl::StripAsciiWhitespace(raw_token);
+      bool enable = true;
+      if (!token.empty() && token.front() == '-') {
+        enable = false;
+        token.remove_prefix(1);
+      }
+      if (token == "experimental_all") {
+        filter.legalize_int32_sign = enable;
+        filter.legalize_int32_reduce_max = enable;
+        filter.entry_embedding = enable;
+        filter.mlp_quant = enable;
+        filter.attention_chunk = enable;
+        filter.rope = enable;
+      } else if (token == "experimental_legalize") {
+        filter.legalize_int32_sign = enable;
+        filter.legalize_int32_reduce_max = enable;
+      } else if (token == "experimental_model") {
+        filter.entry_embedding = enable;
+        filter.mlp_quant = enable;
+        filter.attention_chunk = enable;
+        filter.rope = enable;
+      } else if (token == "int32_sign") {
+        filter.legalize_int32_sign = enable;
+      } else if (token == "int32_reduce_max") {
+        filter.legalize_int32_reduce_max = enable;
+      } else if (token == "entry_embedding") {
+        filter.entry_embedding = enable;
+      } else if (token == "mlp_quant") {
+        filter.mlp_quant = enable;
+      } else if (token == "attention_chunk") {
+        filter.attention_chunk = enable;
+      } else if (token == "rope") {
+        filter.rope = enable;
+      }
+    }
+    return filter;
+  }
+};
+
+}  // namespace
+
 LiteRtStatus LiteRtCompilerPluginRegisterAllTransformations(
     LiteRtCompilerPlugin compiler_plugin,
     LiteRtTransformation** transformations, LiteRtParamIndex* num_patterns) {
-  *num_patterns = 0;
+  if (!compiler_plugin || !transformations || !num_patterns) {
+    return kLiteRtStatusErrorInvalidArgument;
+  }
+  ResetOrphanRegistry();
+  ResetRopeTransformationState();
+  ResetAttentionChunkTransformationState();
+  ResetEntryEmbeddingTransformationState();
+  compiler_plugin->Transformations().clear();
+
+  const auto filter = GraphTransformFilter::FromOptions(
+      compiler_plugin->Options().GetGraphTransform());
+
+  if (filter.legalize_int32_sign) {
+    compiler_plugin->Transformations().push_back({
+        &LegalizeInt32SignTransformation,
+        "LegalizeInt32SignTransformation",
+        100,
+    });
+  }
+  if (filter.legalize_int32_reduce_max) {
+    compiler_plugin->Transformations().push_back({
+        &LegalizeInt32ReduceMaxTransformation,
+        "LegalizeInt32ReduceMaxTransformation",
+        100,
+    });
+  }
+  if (filter.entry_embedding) {
+    compiler_plugin->Transformations().push_back({
+        &EntryEmbeddingTransformation,
+        "EntryEmbeddingTransformation",
+        100,
+    });
+    compiler_plugin->Transformations().push_back({
+        &EntryEmbeddingTrigFoldTransformation,
+        "EntryEmbeddingTrigFoldTransformation",
+        95,
+    });
+  }
+  if (filter.mlp_quant) {
+    compiler_plugin->Transformations().push_back({
+        &MLPInt8QuantTransformation,
+        "MLPInt8QuantTransformation",
+        100,
+    });
+  }
+  if (filter.attention_chunk) {
+    compiler_plugin->Transformations().push_back({
+        &AttentionChunkTransformation,
+        "AttentionChunkTransformation",
+        100,
+    });
+  }
+  if (filter.rope) {
+    compiler_plugin->Transformations().push_back({
+        &RopeTransformation,
+        "RopeTransformation",
+        90,
+    });
+  }
+  if (filter.entry_embedding || filter.rope || filter.attention_chunk) {
+    compiler_plugin->Transformations().push_back({
+        &OrphanCleanupTransformation,
+        "OrphanCleanupTransformation",
+        80,
+    });
+  }
+
+  *num_patterns = compiler_plugin->Transformations().size();
+  *transformations = compiler_plugin->Transformations().data();
   return kLiteRtStatusOk;
 }
 
@@ -827,4 +968,57 @@ LiteRtStatus LiteRtCompilerPluginCheckCompilerCompatibility(
     return kLiteRtStatusErrorUnsupportedCompilerVersion;
   }
   return kLiteRtStatusOk;
+}
+
+namespace {
+
+static const LiteRtCompilerPluginInterface_V1 QnnCompilerPluginInterface = {
+    .abi_header =
+        {
+            .struct_size = sizeof(LiteRtCompilerPluginInterface_V1),
+            .major_version = 1,
+            .minor_version = 0,
+            .reserved = 0,
+        },
+    .get_compiler_plugin_version = LiteRtGetCompilerPluginVersion,
+    .get_compiler_plugin_soc_manufacturer =
+        LiteRtGetCompilerPluginSocManufacturer,
+    .create_compiler_plugin = LiteRtCreateCompilerPlugin,
+    .destroy_compiler_plugin = LiteRtDestroyCompilerPlugin,
+    .get_compiler_plugin_supported_hardware =
+        LiteRtGetCompilerPluginSupportedHardware,
+    .get_num_compiler_plugin_supported_models =
+        LiteRtGetNumCompilerPluginSupportedSocModels,
+    .get_compiler_plugin_supported_soc_model =
+        LiteRtGetCompilerPluginSupportedSocModel,
+    .compiler_plugin_partition = LiteRtCompilerPluginPartition,
+    .compiler_plugin_compile = LiteRtCompilerPluginCompile,
+    .destroy_compiled_result = LiteRtDestroyCompiledResult,
+    .get_compiled_result_byte_code = LiteRtGetCompiledResultByteCode,
+    .get_compiled_result_num_byte_code = LiteRtCompiledResultNumByteCodeModules,
+    .get_compiled_result_call_info = LiteRtGetCompiledResultCallInfo,
+    .get_num_compiled_result_calls = LiteRtGetNumCompiledResultCalls,
+    .register_all_transformations =
+        LiteRtCompilerPluginRegisterAllTransformations,
+    .get_compiler_plugin_sdk_version = LiteRtGetCompilerPluginSDKVersion,
+    .get_compiled_result_handle = LiteRtGetCompiledResultHandle,
+    .check_compiler_compatibility =
+        LiteRtCompilerPluginCheckCompilerCompatibility,
+};
+
+}  // namespace
+
+extern "C" LITERT_CAPI_EXPORT LiteRtStatus LiteRtCompilerPluginQueryInterface(
+    LiteRtCompilerPluginInterfaceId interface_id,
+    LiteRtApiVersion litert_runtime_version, LiteRtInterface* out_interface) {
+  if (out_interface == nullptr) {
+    return kLiteRtStatusErrorInvalidArgument;
+  }
+  if (litert_runtime_version.major >= 1) {
+    if (interface_id == kLiteRtCompilerPluginInterfaceBasic) {
+      *out_interface = &QnnCompilerPluginInterface;
+      return kLiteRtStatusOk;
+    }
+  }
+  return kLiteRtStatusErrorUnsupported;
 }

@@ -20,7 +20,7 @@ load("//litert/ats:ats.bzl", "litert_define_ats")
 # copybara:uncomment load("//litert/ats:models.bzl", "CLASSICAL_ALL_MODELS")
 load("//litert/build_common:litert_build_defs.bzl", "commandline_flag_copts", "if_oss", "litert_test")
 load("//litert/integration_test:litert_device.bzl", "litert_device_test")
-# copybara:uncomment load("//litert/integration_test/google:litert_device_guitar.bzl", "litert_macos_mh_guitar_test", "litert_mediatek_mh_guitar_test", "litert_npu_aot_guitar_test", "litert_pixel_9_mh_guitar_test", "litert_qualcomm_mh_guitar_test")
+# copybara:uncomment load("//litert/integration_test/google:litert_device_guitar.bzl", "litert_exynos_mh_guitar_test", "litert_macos_mh_guitar_test", "litert_mediatek_mh_guitar_test", "litert_npu_aot_guitar_test", "litert_perfgate_upload_guitar_test", "litert_pixel_9_mh_guitar_test", "litert_pixel_mh_guitar_test", "litert_qualcomm_mh_guitar_test")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["@org_tensorflow//tensorflow:license"],
@@ -35,7 +35,6 @@ package(
 # using the underlying base `ats` binary compiled further down in this file.
 
 XNNPACK_MODELS_DONT_REGISTER = [
-    "simple_add_dynamic_shape",
     "depth_anything_v2",
     "hf_all_minilm_l6_v2",
     "hf_deberta_large_mnli",
@@ -103,9 +102,12 @@ XNNPACK_DONT_REGISTER = [
     "OneHot",  # XNNPACK does not support OneHot
     "Transformer",  # XNNPACK does not support TransformerLayer flex/custom ops
     "GroupNorm",  # XNNPACK does not support GroupNorm composite op
+    "LayerNorm",  # XNNPACK does not support LayerNorm composite op
+    "MoeExperts",  # XNNPACK does not support MoeExperts composite op
     "SdpaTransposed",  # XNNPACK does not support SdpaTransposed composite op
     "QkvNormRope",  # XNNPACK does not support QkvNormRope composite op
     "RmsNorm",  # XNNPACK does not support RmsNorm composite op
+    "RuntimeBmm",  # XNNPACK does not support RuntimeBmm composite op
     "Swiglu",  # XNNPACK does not support SwiGLU op
     "SelectV2",  # XNNPACK does not support SelectV2
     "tfl\\.floor_div",  # XNNPACK does not support FloorDiv
@@ -127,7 +129,6 @@ XNNPACK_DONT_REGISTER = [
 ]
 
 YNNPACK_MODELS_DONT_REGISTER = [
-    "simple_add_dynamic_shape",
     "depth_anything_v2",
     "hf_all_minilm_l6_v2",
     "hf_deberta_large_mnli",
@@ -164,7 +165,6 @@ YNNPACK_MODELS_DONT_REGISTER = [
     "torchvision_deeplabv3_resnet50",
     "torchvision_fcn_resnet50",
     "torchvision_lraspp_mobilenet_v3_large",
-    "torchvision_resnet18",
     "torchvision_swin_tiny",
     "torchvision_video_resnet2plus1d_18",
     "torchvision_video_resnet3d_18",
@@ -189,18 +189,20 @@ YNNPACK_DONT_REGISTER = [
     "tfl\\.reduce_prod",  # YNNPACK does not support ReduceProd
     "tfl\\.tile",  # YNNPACK does not support Tile (used in MQA TransformerLayer)
     "Pad.*<([0-9]+x)*1(x[0-9]+)*>",  # YNNPACK does not support padding on extent-1 dimensions
+    "RuntimeBmm.*(f16|i4)",  # YNNPACK does not support mixed fp32_fp16_fp32 dot in f16 RuntimeBmm or int4 Dequantize in decomposition subgraph
     "SdpaTransposed",  # SdpaTransposed generator does not yet set logit_cap attribute for YNNPACK
     "FullyConnected.*(i4|u8)",  # YNNPACK delegate requires even output dims for INT4 weights and does not support UINT8 FullyConnected
     "Transpose.*[(][1-8]d_(i1|i16|u16|u32|i64|u64)<",  # YNNPACK Transpose supports FP32, FP16, INT4, INT8, UINT8, and INT32 types
 ]
 
 BUILTIN_MODELS_DONT_REGISTER = [
-    "simple_add_dynamic_shape",
-    "torchaudio_conformer",
+]
+
+YNNPACK_FALLBACK_MODELS_DONT_REGISTER = [
+    "torchvision_video_swin3d_tiny",
 ]
 
 GPU_MODELS_DONT_REGISTER = [
-    "simple_add_dynamic_shape",
     "depth_anything_v2",
     "hf_all_minilm_l6_v2",
     "hf_deberta_large_mnli",
@@ -226,10 +228,7 @@ GPU_MODELS_DONT_REGISTER = [
     "qai_hub_resnet101",
     "qai_hub_xlsr",
     "snapml_StyleTransferNet",
-    "timm_pvt_v2_b1",
-    "timm_pvt_v2_b3",
     "timm_resnest14d",
-    "timm_vit_small_path16_224",
     "torchaudio_conformer",
     "torchaudio_wav2vec2_base",
     "torchvision_convnext_tiny",
@@ -247,7 +246,6 @@ GPU_MODELS_DONT_REGISTER = [
     "torchvision_video_resnet3d_18",
     "torchvision_video_resnetmc3_18",
     "torchvision_video_swin3d_tiny",
-    "torchvision_vit_base_patch16",
     "torchvision_wide_resnet101_2",
     "torchvision_wide_resnet50_2",
     "whisper_tiny_decoder",
@@ -310,6 +308,10 @@ litert_define_ats(
     compile_only_suffix = None,
     do_register = ["ExtraModel"],
     dont_register = XNNPACK_MODELS_DONT_REGISTER,
+    extra_flags = [
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
+    ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
 )
@@ -322,6 +324,8 @@ litert_define_ats(
     dont_register = YNNPACK_MODELS_DONT_REGISTER,
     extra_flags = [
         "--enable_ynnpack=true",
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
     ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
@@ -332,10 +336,12 @@ litert_define_ats(
     backend = "cpu",
     compile_only_suffix = None,
     do_register = ["ExtraModel"],
-    dont_register = BUILTIN_MODELS_DONT_REGISTER,
+    dont_register = YNNPACK_FALLBACK_MODELS_DONT_REGISTER,
     extra_flags = [
         "--enable_ynnpack=true",
         "--cpu_hint_fully_delegated=false",
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
     ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
@@ -349,6 +355,8 @@ litert_define_ats(
     dont_register = BUILTIN_MODELS_DONT_REGISTER,
     extra_flags = [
         "--cpu_kernel_mode=builtin",
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
     ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
@@ -360,6 +368,10 @@ litert_define_ats(
     compile_only_suffix = None,
     do_register = ["ExtraModel"],
     dont_register = GPU_MODELS_DONT_REGISTER,
+    extra_flags = [
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
+    ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
 )
@@ -380,10 +392,6 @@ litert_define_ats(
 litert_define_ats(
     name = "qualcomm_ats",
     aot_shard_count = 32,
-    aot_tags = [
-        "manual",
-        "notap",
-    ],
     backend = "qualcomm",
     compile_only_suffix = "_aot",
     dont_register = [
@@ -412,6 +420,7 @@ litert_define_ats(
         "FullyConnected.*_cst.*,1d_f32[^c]",  # Qualcomm QNN does not support dynamic bias for FP32 FC
     ],
     extra_flags = [
+        "--soc_model=SM8650",
         "--data_seed=42",
         "--qualcomm_optimization_level=O3",
         "--qualcomm_htp_performance_mode=burst",
@@ -457,10 +466,6 @@ litert_define_ats(
 litert_define_ats(
     name = "mediatek_ats",
     aot_shard_count = 32,
-    aot_tags = [
-        "manual",
-        "notap",
-    ],
     backend = "mediatek",
     compile_only_suffix = "_aot",
     dont_register = [
@@ -539,8 +544,10 @@ litert_define_ats(
         "QkvNormRope.*4d_f(16|32)<(?!1x)",  # GPU accelerator does not support QkvNormRope with batch > 1
         "SelectV2",  # OpenCL SelectV2 rejects multidimensional if/else broadcasting and uses kExact on FP16-rounded f32
         "Slice",  # OpenCL Slice uses kExact byte comparison on FP16-rounded f32 buffers
-        "CacheUpdateSdpaTransposed",  # Requires intermediate odml.cache_update output buffer storage promotion
-        "simple_add_dynamic_shape",
+        "RuntimeBmm.*(i4|i8)",  # GPU odml.runtime_bmm quantized external_weights expects RHS pre-swizzled by odml.cache_update
+        "MoeExperts",  # ML Drift GPU delegate expects tfl.custom "moe" with 4D OHWI weights rather than shlo.composite "odml.moe_experts"
+        # TODO(b/576190160): Investigate GroupNorm numerical mismatch and SIGKILL on Qualcomm S26 (Adreno 840).
+        "GroupNorm",
         "hf_all_minilm_l6_v2",
         "whisper_tiny_decoder",
         "torchvision_resnet18",
@@ -607,9 +614,12 @@ litert_define_ats(
         "OneHot",  # XNNPACK does not support OneHot
         "Transformer",  # XNNPACK does not support TransformerLayer flex/custom ops
         "GroupNorm",  # XNNPACK does not support GroupNorm composite op
+        "LayerNorm",  # XNNPACK does not support LayerNorm composite op
+        "MoeExperts",  # XNNPACK does not support MoeExperts composite op
         "SdpaTransposed",  # XNNPACK does not support SdpaTransposed composite op
         "QkvNormRope",  # XNNPACK does not support QkvNormRope composite op
         "RmsNorm",  # XNNPACK does not support RmsNorm composite op
+        "RuntimeBmm",  # XNNPACK does not support RuntimeBmm composite op
         "Swiglu",  # XNNPACK does not support SwiGLU op
         "SelectV2",  # XNNPACK does not support SelectV2
         "tfl\\.floor_div",  # XNNPACK does not support FloorDiv
@@ -631,7 +641,6 @@ litert_define_ats(
         "FullyConnected.*,1d_f32<[^>]+>(?!_cst)",
         "Transpose.*([(][78]d|[(][1-8]d_(i1|i4|i16|u16|i32|u32|i64|u64)<)",  # XNNPACK Transpose supports FP32, FP16, INT8, and UINT8 types up to rank 6
         # Explicit ExtraModel exclusions (unsupported by XNNPACK):
-        "simple_add_dynamic_shape",
         "hf_all_minilm_l6_v2",
         "u2net_lite",
         "whisper_tiny_decoder",
@@ -685,6 +694,8 @@ litert_define_ats(
         "QkvNormRope.*4d_f(16|32)<(?!1x)",  # Metal accelerator does not support QkvNormRope with batch > 1
         "SelectV2",
         "Slice",
+        "RuntimeBmm.*(i4|i8)",  # Metal odml.runtime_bmm quantized external_weights expects RHS pre-swizzled by odml.cache_update
+        "MoeExperts",  # ML Drift Metal delegate expects tfl.custom "moe" with 4D OHWI weights rather than shlo.composite "odml.moe_experts"
         "scaled_dot_product_attention",
     ],
     extra_flags = [
@@ -723,6 +734,8 @@ litert_define_ats(
         "QkvNormRope.*4d_f(16|32)<(?!1x)",  # WebGPU accelerator does not support QkvNormRope with batch > 1
         "SelectV2",
         "Slice",
+        "RuntimeBmm.*(i4|i8)",  # WebGPU odml.runtime_bmm quantized external_weights expects RHS pre-swizzled by odml.cache_update
+        "MoeExperts",  # ML Drift WebGPU delegate expects tfl.custom "moe" with 4D OHWI weights rather than shlo.composite "odml.moe_experts"
         "scaled_dot_product_attention",
     ],
     extra_flags = [
@@ -738,6 +751,10 @@ litert_define_ats(
     compile_only_suffix = None,
     do_register = ["ExtraModel"],
     dont_register = XNNPACK_MODELS_DONT_REGISTER,
+    extra_flags = [
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
+    ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
     platform = "macos",
@@ -751,6 +768,8 @@ litert_define_ats(
     dont_register = YNNPACK_MODELS_DONT_REGISTER,
     extra_flags = [
         "--enable_ynnpack=true",
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
     ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
@@ -762,10 +781,12 @@ litert_define_ats(
     backend = "cpu",
     compile_only_suffix = None,
     do_register = ["ExtraModel"],
-    dont_register = BUILTIN_MODELS_DONT_REGISTER,
+    dont_register = YNNPACK_FALLBACK_MODELS_DONT_REGISTER,
     extra_flags = [
         "--enable_ynnpack=true",
         "--cpu_hint_fully_delegated=false",
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
     ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
@@ -780,6 +801,8 @@ litert_define_ats(
     dont_register = BUILTIN_MODELS_DONT_REGISTER,
     extra_flags = [
         "--cpu_kernel_mode=builtin",
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
     ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
@@ -792,6 +815,10 @@ litert_define_ats(
     compile_only_suffix = None,
     do_register = ["ExtraModel"],
     dont_register = GPU_MODELS_DONT_REGISTER,
+    extra_flags = [
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
+    ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
     platform = "macos",
@@ -803,6 +830,10 @@ litert_define_ats(
     compile_only_suffix = None,
     do_register = ["ExtraModel"],
     dont_register = GPU_MODELS_DONT_REGISTER,
+    extra_flags = [
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
+    ],
     extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
     jit_suffix = "",
     platform = "macos",
@@ -960,8 +991,11 @@ cc_library(
         ":inference_fixture",
         ":register_cache_update_sdpa_transposed",
         ":register_group_norm",
+        ":register_layer_norm",
+        ":register_moe_experts",
         ":register_qkv_norm_rope",
         ":register_rms_norm",
+        ":register_runtime_bmm",
         ":register_sdpa",
         ":register_sdpa_transposed",
         ":register_swiglu",
@@ -1250,6 +1284,41 @@ cc_library(
 )
 
 cc_library(
+    name = "register_layer_norm",
+    testonly = True,
+    srcs = ["register_layer_norm.cc"],
+    hdrs = ["register_layer_norm.h"],
+    copts = commandline_flag_copts(),
+    deps = [
+        ":compile_fixture",
+        ":configure",
+        ":inference_fixture",
+        ":register",
+        "//litert/cc/internal:litert_detail",
+        "//litert/test/generators:layer_norm",
+        "//tflite/types:half",
+    ],
+)
+
+cc_library(
+    name = "register_moe_experts",
+    testonly = True,
+    srcs = ["register_moe_experts.cc"],
+    hdrs = ["register_moe_experts.h"],
+    copts = commandline_flag_copts(),
+    deps = [
+        ":compile_fixture",
+        ":configure",
+        ":inference_fixture",
+        ":register",
+        "//litert/cc/internal:litert_detail",
+        "//litert/test/generators:moe_experts",
+        "//tensor:datatypes",
+        "//tflite/types:half",
+    ],
+)
+
+cc_library(
     name = "register_qkv_norm_rope",
     testonly = True,
     srcs = ["register_qkv_norm_rope.cc"],
@@ -1279,6 +1348,24 @@ cc_library(
         ":register",
         "//litert/cc/internal:litert_detail",
         "//litert/test/generators:rms_norm",
+        "//tflite/types:half",
+    ],
+)
+
+cc_library(
+    name = "register_runtime_bmm",
+    testonly = True,
+    srcs = ["register_runtime_bmm.cc"],
+    hdrs = ["register_runtime_bmm.h"],
+    copts = commandline_flag_copts(),
+    deps = [
+        ":compile_fixture",
+        ":configure",
+        ":inference_fixture",
+        ":register",
+        "//litert/cc/internal:litert_detail",
+        "//litert/test/generators:runtime_bmm",
+        "//tensor:datatypes",
         "//tflite/types:half",
     ],
 )
@@ -1484,6 +1571,7 @@ cc_library(
         "//litert/cc:litert_macros",
         "//litert/cc:litert_options",
         "//litert/cc/internal:litert_rng",
+        "//litert/cc/options:litert_gpu_options",
         "//litert/cc/options:litert_mediatek_options",
         "//litert/cc/options:litert_qualcomm_options",
         "//litert/cc/options:litert_samsung_options",
@@ -1514,6 +1602,7 @@ cc_library(
         "//litert/cc:litert_macros",
         "//litert/cc:litert_model",
         "//litert/cc:litert_options",
+        "//litert/cc:litert_tensor_buffer",
         "//litert/cc/internal:litert_compiled_model_next",
         "//litert/test:simple_buffer",
         "@com_google_absl//absl/strings:str_format",
@@ -1646,6 +1735,7 @@ cc_test(
     ],
     copts = commandline_flag_copts(),
     data = [
+        "//litert/test:testdata/simple_add_dynamic_shape.tflite",
         "//litert/test:testdata/simple_model.tflite",
         "//litert/vendors/examples:example_dispatch_so",
         "//litert/vendors/examples:example_plugin_so_data",
@@ -1812,12 +1902,36 @@ cc_library(
 # copybara:uncomment_begin(google-only)
 # # GUITAR WORKFLOWS #################################################################################
 #
-# PIXEL_9_ATS_GUITAR_TARGETS = [
+# ANDROID_ATS_GUITAR_TARGETS = [
 #     ":gpu_ats_remote",
 #     ":cpu_ats_remote",
 #     ":ynnpack_cpu_ats_remote",
 #     ":builtin_cpu_ats_remote",
 # ]
+#
+# guitar_workflow_test(
+#     name = "litert_ats_guitar_pixel_6",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             # TODO(b/576190662): Investigate how to move forward with Pixel 6 ML Drift compatibility allowlist requiring SDK >= 35.
+#             litert_pixel_mh_guitar_test(
+#                 dimension_model = "pixel 6",
+#                 sdk_version = "regex:3[5-9]",
+#                 targets = ANDROID_ATS_GUITAR_TARGETS,
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# PIXEL_9_ATS_GUITAR_TARGETS = ANDROID_ATS_GUITAR_TARGETS
 #
 # guitar_workflow_test(
 #     name = "litert_ats_guitar_pixel_9",
@@ -1838,12 +1952,67 @@ cc_library(
 #     ],
 # )
 #
-# QUALCOMM_S24_ATS_GUITAR_TARGETS = [
-#     ":gpu_ats_remote",
-#     ":cpu_ats_remote",
-#     ":ynnpack_cpu_ats_remote",
-#     ":builtin_cpu_ats_remote",
-# ]
+# guitar_workflow_test(
+#     name = "litert_ats_guitar_pixel_10",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_pixel_mh_guitar_test(
+#                 dimension_model = "pixel 10",
+#                 targets = ANDROID_ATS_GUITAR_TARGETS,
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_guitar_pixel_11",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_pixel_mh_guitar_test(
+#                 dimension_model = "pixel 11",
+#                 targets = ANDROID_ATS_GUITAR_TARGETS,
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_guitar_qualcomm_s22",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_qualcomm_mh_guitar_test(
+#                 dimension_model = "regex:sm-s901u|sm-s901u1|sm-s906u1|sm-s908u1",
+#                 targets = ANDROID_ATS_GUITAR_TARGETS,
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# QUALCOMM_S24_ATS_GUITAR_TARGETS = ANDROID_ATS_GUITAR_TARGETS
 #
 # guitar_workflow_test(
 #     name = "litert_ats_guitar_qualcomm_s24",
@@ -1864,12 +2033,47 @@ cc_library(
 #     ],
 # )
 #
-# MEDIATEK_MT6989_ATS_GUITAR_TARGETS = [
-#     ":gpu_ats_remote",
-#     ":cpu_ats_remote",
-#     ":ynnpack_cpu_ats_remote",
-#     ":builtin_cpu_ats_remote",
-# ]
+# guitar_workflow_test(
+#     name = "litert_ats_guitar_qualcomm_s26",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_qualcomm_mh_guitar_test(
+#                 dimension_model = "regex:sm-s942u1|sm-s947u1|sm-s948u1",
+#                 targets = ANDROID_ATS_GUITAR_TARGETS,
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_guitar_exynos_s24",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_exynos_mh_guitar_test(
+#                 dimension_hardware = "s5e9945",
+#                 targets = ANDROID_ATS_GUITAR_TARGETS,
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# MEDIATEK_MT6989_ATS_GUITAR_TARGETS = ANDROID_ATS_GUITAR_TARGETS
 #
 # guitar_workflow_test(
 #     name = "litert_ats_guitar_mediatek_mt6989",
@@ -1880,6 +2084,51 @@ cc_library(
 #             litert_mediatek_mh_guitar_test(
 #                 dimension_hardware = "mt6989",
 #                 targets = MEDIATEK_MT6989_ATS_GUITAR_TARGETS,
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_guitar_mediatek_mt6877",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_mediatek_mh_guitar_test(
+#                 dimension_hardware = "mt6877",
+#                 targets = ANDROID_ATS_GUITAR_TARGETS,
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_guitar_mediatek_mt6855",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_mediatek_mh_guitar_test(
+#                 dimension_hardware = "mt6855",
+#                 targets = [
+#                     # TODO(b/576191432): Re-enable :gpu_ats_remote on MediaTek MT6855 (PowerVR BXM-8-256) once OpenCL driver workarounds land.
+#                     ":cpu_ats_remote",
+#                     ":ynnpack_cpu_ats_remote",
+#                     ":builtin_cpu_ats_remote",
+#                 ],
 #             ),
 #         ],
 #     ),
@@ -1917,13 +2166,41 @@ cc_library(
 #     ],
 # )
 #
-# PIXEL_9_ATS_MODELS_GUITAR_TARGETS = [
+# ANDROID_ATS_MODELS_GUITAR_TARGETS = [
 #     ":gpu_models_ats_remote",
 #     ":cpu_models_ats_remote",
 #     ":ynnpack_cpu_models_ats_remote",
 #     ":ynnpack_fallback_cpu_models_ats_remote",
 #     ":builtin_cpu_models_ats_remote",
 # ]
+#
+# guitar_workflow_test(
+#     name = "litert_ats_models_guitar_pixel_6",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             # TODO(b/576190662): Investigate how to move forward with Pixel 6 ML Drift compatibility allowlist requiring SDK >= 35.
+#             litert_pixel_mh_guitar_test(
+#                 name = "model_tests",
+#                 dimension_model = "pixel 6",
+#                 sdk_version = "regex:3[5-9]",
+#                 targets = ANDROID_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "pixel_6",
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# PIXEL_9_ATS_MODELS_GUITAR_TARGETS = ANDROID_ATS_MODELS_GUITAR_TARGETS
 #
 # guitar_workflow_test(
 #     name = "litert_ats_models_guitar_pixel_9",
@@ -1932,7 +2209,11 @@ cc_library(
 #     integration_test = guitar.IntegrationTest(
 #         tests = [
 #             litert_pixel_9_mh_guitar_test(
+#                 name = "model_tests",
 #                 targets = PIXEL_9_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "pixel_9",
 #             ),
 #         ],
 #     ),
@@ -1944,13 +2225,79 @@ cc_library(
 #     ],
 # )
 #
-# QUALCOMM_S24_ATS_MODELS_GUITAR_TARGETS = [
-#     ":gpu_models_ats_remote",
-#     ":cpu_models_ats_remote",
-#     ":ynnpack_cpu_models_ats_remote",
-#     ":ynnpack_fallback_cpu_models_ats_remote",
-#     ":builtin_cpu_models_ats_remote",
-# ]
+# guitar_workflow_test(
+#     name = "litert_ats_models_guitar_pixel_10",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_pixel_mh_guitar_test(
+#                 name = "model_tests",
+#                 dimension_model = "pixel 10",
+#                 targets = ANDROID_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "pixel_10",
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_models_guitar_pixel_11",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_pixel_mh_guitar_test(
+#                 name = "model_tests",
+#                 dimension_model = "pixel 11",
+#                 targets = ANDROID_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "pixel_11",
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_models_guitar_qualcomm_s22",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_qualcomm_mh_guitar_test(
+#                 name = "model_tests",
+#                 dimension_model = "regex:sm-s901u|sm-s901u1|sm-s906u1|sm-s908u1",
+#                 targets = ANDROID_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "qualcomm_s22",
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# QUALCOMM_S24_ATS_MODELS_GUITAR_TARGETS = ANDROID_ATS_MODELS_GUITAR_TARGETS
 #
 # guitar_workflow_test(
 #     name = "litert_ats_models_guitar_qualcomm_s24",
@@ -1959,7 +2306,11 @@ cc_library(
 #     integration_test = guitar.IntegrationTest(
 #         tests = [
 #             litert_qualcomm_mh_guitar_test(
+#                 name = "model_tests",
 #                 targets = QUALCOMM_S24_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "qualcomm_s24",
 #             ),
 #         ],
 #     ),
@@ -1971,13 +2322,55 @@ cc_library(
 #     ],
 # )
 #
-# MEDIATEK_MT6989_ATS_MODELS_GUITAR_TARGETS = [
-#     ":gpu_models_ats_remote",
-#     ":cpu_models_ats_remote",
-#     ":ynnpack_cpu_models_ats_remote",
-#     ":ynnpack_fallback_cpu_models_ats_remote",
-#     ":builtin_cpu_models_ats_remote",
-# ]
+# guitar_workflow_test(
+#     name = "litert_ats_models_guitar_qualcomm_s26",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_qualcomm_mh_guitar_test(
+#                 name = "model_tests",
+#                 dimension_model = "regex:sm-s942u1|sm-s947u1|sm-s948u1",
+#                 targets = ANDROID_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "qualcomm_s26",
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_models_guitar_exynos_s24",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_exynos_mh_guitar_test(
+#                 name = "model_tests",
+#                 dimension_hardware = "s5e9945",
+#                 targets = ANDROID_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "exynos_s24",
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# MEDIATEK_MT6989_ATS_MODELS_GUITAR_TARGETS = ANDROID_ATS_MODELS_GUITAR_TARGETS
 #
 # guitar_workflow_test(
 #     name = "litert_ats_models_guitar_mediatek_mt6989",
@@ -1986,8 +2379,66 @@ cc_library(
 #     integration_test = guitar.IntegrationTest(
 #         tests = [
 #             litert_mediatek_mh_guitar_test(
+#                 name = "model_tests",
 #                 dimension_hardware = "mt6989",
 #                 targets = MEDIATEK_MT6989_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "mediatek_mt6989",
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_models_guitar_mediatek_mt6877",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_mediatek_mh_guitar_test(
+#                 name = "model_tests",
+#                 dimension_hardware = "mt6877",
+#                 targets = ANDROID_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "mediatek_mt6877",
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# guitar_workflow_test(
+#     name = "litert_ats_models_guitar_mediatek_mt6855",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_mediatek_mh_guitar_test(
+#                 name = "model_tests",
+#                 dimension_hardware = "mt6855",
+#                 targets = [
+#                     # TODO(b/576191432): Re-enable :gpu_models_ats_remote on MediaTek MT6855 (PowerVR BXM-8-256) once OpenCL driver workarounds land.
+#                     ":cpu_models_ats_remote",
+#                     ":ynnpack_cpu_models_ats_remote",
+#                     ":ynnpack_fallback_cpu_models_ats_remote",
+#                     ":builtin_cpu_models_ats_remote",
+#                 ],
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "mediatek_mt6855",
 #             ),
 #         ],
 #     ),
@@ -2015,7 +2466,11 @@ cc_library(
 #     integration_test = guitar.IntegrationTest(
 #         tests = [
 #             litert_macos_mh_guitar_test(
+#                 name = "model_tests",
 #                 targets = MACOS_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "macos",
 #             ),
 #         ],
 #     ),
@@ -2029,6 +2484,8 @@ cc_library(
 #
 # NPU_AOT_ATS_GUITAR_TARGETS = [
 #     ":google_tensor_ats_aot",
+#     ":qualcomm_ats_aot",
+#     ":mediatek_ats_aot",
 #     ":example_ats_aot",
 # ]
 #

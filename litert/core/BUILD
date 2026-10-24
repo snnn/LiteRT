@@ -90,19 +90,19 @@ cc_library(
     visibility = ["//litert:litert_public"],
     deps = [
         "//litert/c:litert_common",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
     ] + select({
         "//litert:windows": [
             ":filesystem",
             "//litert/c/internal:litert_logging",
-            "@com_google_absl//absl/strings",
             "@com_google_absl//absl/strings:str_format",
         ],
         "//conditions:default": [
             ":filesystem",
             "//litert/c/internal:litert_logging",  # buildcleaner: keep
             "//litert/cc:litert_macros",
-            "@com_google_absl//absl/strings",
         ],
     }),
 )
@@ -268,7 +268,18 @@ cc_library(
     hdrs = ["version.h"],
     deps = [
         "//litert/c:litert_common",
-        "//litert/c/internal:litert_logging",
+        "//litert/c/internal:litert_abi_header",
+    ],
+)
+
+cc_test(
+    name = "version_test",
+    srcs = ["version_test.cc"],
+    deps = [
+        ":version",
+        "//litert/c:litert_common",
+        "//litert/c/internal:litert_abi_header",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 

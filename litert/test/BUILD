@@ -17,7 +17,7 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_cc//cc:objc_library.bzl", "objc_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//litert/build_common:litert_build_defs.bzl", "litert_cc_binary", "litert_configured_target")
+load("//litert/build_common:litert_build_defs.bzl", "litert_cc_binary", "litert_configured_target", "litert_size_tracking_target")
 load("//litert/build_common:special_rule.bzl", "litert_linkopts", "litert_linkopts_unstripped")
 load("//litert/build_common:symlink_files.bzl", "symlink_files")  # @unused
 load("//litert/build_common:tfl_model_gen.bzl", "tfl_model_gen")  # @unused
@@ -338,7 +338,6 @@ cc_library(
     deps = [
         ":tflite_half_traits",
         "//litert/c:litert_common",
-        "//litert/c:litert_tensor_buffer",
         "//litert/c:litert_tensor_buffer_types",
         "//litert/cc:litert_buffer_ref",
         "//litert/cc:litert_element_type",
@@ -365,7 +364,7 @@ cc_test(
         ":rng_fixture",
         ":simple_buffer",
         "//litert/cc:litert_element_type",
-        "//litert/cc:litert_model",
+        "//litert/cc:litert_ranked_tensor_type",
         "//litert/cc/internal:litert_rng",
         "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest_main",
@@ -432,6 +431,14 @@ cc_binary(
         ],
         "//conditions:default": [],
     }),
+)
+
+# Size-tracking variant of minimal_compiled_model for WeightWatcher
+# (litert.android.arm.mini and litert.android.arm.mini.selective in
+# litert.blueprint). See litert_size_tracking_target.
+litert_size_tracking_target(
+    name = "minimal_compiled_model_ww",
+    target = ":minimal_compiled_model",
 )
 
 # Unstripped variant of minimal_compiled_model used for symbol leak testing.
@@ -517,6 +524,7 @@ exports_files(
         "litert_c_api_dependency_test.sh",
         "litert_compiler_plugin_symbol_test.sh",
         "litert_jni_symbol_test.sh",
+        "litert_runtime_symbol_test.sh",
         "minimal_compiled_model_symbol_test.sh",
     ] + glob([
         "testdata/**",

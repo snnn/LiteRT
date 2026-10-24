@@ -47,8 +47,9 @@
 
 namespace litert::internal {
 
-using ::flatbuffers::Verifier;
+#if !defined(LITERT_SKIP_FLATBUFFER_VERIFICATION)
 using ::tflite::VerifyModelBuffer;
+#endif  // !defined(LITERT_SKIP_FLATBUFFER_VERIFICATION)
 static constexpr size_t kMaxModelSize = std::numeric_limits<size_t>::max();
 
 namespace {
@@ -94,6 +95,17 @@ bool VerifyFlatbuffer(absl::Span<const uint8_t> buf) {
 }
 
 bool VerifyFlatbuffer(const uint8_t* buf, size_t buf_size) {
+#if defined(LITERT_SKIP_FLATBUFFER_VERIFICATION)
+  // Minimal builds skip the full schema verifier. `VerifyModelBuffer`
+  // instantiates `Verify()` for every table in the TFLite schema (~58 KB),
+  // regardless of which ops the model uses. Keep the cheap structural checks
+  // so obviously malformed buffers are still rejected.
+  if (buf == nullptr || buf_size < sizeof(::flatbuffers::uoffset_t) +
+                                       ::flatbuffers::kFileIdentifierLength) {
+    return false;
+  }
+  return ::tflite::ModelBufferHasIdentifier(buf);
+#else
   flatbuffers::Verifier::Options options;
   // Flatbuffers::Verifier::Options::max_size defaults to 2GB. But LiteRT models
   // can contain external buffers, so the total size can be larger. We increase
@@ -104,6 +116,7 @@ bool VerifyFlatbuffer(const uint8_t* buf, size_t buf_size) {
 #endif
   flatbuffers::Verifier verifier(buf, buf_size, options);
   return VerifyModelBuffer(verifier);
+#endif  // defined(LITERT_SKIP_FLATBUFFER_VERIFICATION)
 }
 
 Expected<MutableBufferRef<uint8_t>> GetMetadata(absl::string_view key,
@@ -328,8 +341,15 @@ Expected<FlatbufferWrapper::Ptr> FlatbufferWrapper::CreateFromTflFile(
   return FlatbufferWrapper::CreateFromAllocation(std::move(allocation));
 }
 
-OwningBufferRef<uint8_t> SerializeFlatbuffer(const TflModel& tfl_model) {
+OwningBufferRef<uint8_t> SerializeFlatbuffer(const TflModel& tfl_model,
+                                             size_t tail_padding) {
   flatbuffers::FlatBufferBuilder b;
+  if (tail_padding > 0) {
+    // FlatBufferBuilder grows downward from the end of its buffer, so padding
+    // before packing places trailing zeros at the end of the serialized buffer
+    // without an extra copy.
+    b.Pad(tail_padding);
+  }
   auto model_offset = tflite::Model::Pack(b, &tfl_model);
   tflite::FinishModelBuffer(b, model_offset);
 
@@ -341,9 +361,9 @@ OwningBufferRef<uint8_t> SerializeFlatbuffer(const TflModel& tfl_model) {
 }
 
 OwningBufferRef<uint8_t> SerializeFlatbuffer(
-    const FlatbufferWrapper& flatbuffer) {
+    const FlatbufferWrapper& flatbuffer, size_t tail_padding) {
   auto tfl_model = flatbuffer.Unpack();
-  return SerializeFlatbuffer(*tfl_model);
+  return SerializeFlatbuffer(*tfl_model, tail_padding);
 }
 
 }  // namespace litert::internal

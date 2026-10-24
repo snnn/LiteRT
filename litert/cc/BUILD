@@ -350,7 +350,8 @@ cc_library(
 #         "//litert/test:simple_model",
 #     ] + select({
 #         "//litert:android": [
-#             "//tflite/delegates/gpu/gl:egl_environment",
+#             "@ml_drift//ml_drift/gl:egl_environment",
+#             "@ml_drift//ml_drift/gl:portable",
 #         ],
 #         "//conditions:default": [],
 #     }),
@@ -429,11 +430,12 @@ litert_device_test(
 #         "//tflite:framework",
 #     ] + select({
 #         "//litert:android": [
+#             "@ml_drift//ml_drift/cl:cl_device",
+#             "@ml_drift//ml_drift/cl:gl_interop",
+#             "@ml_drift//ml_drift/cl:opencl_wrapper",
+#             "@ml_drift//ml_drift/gl:egl_environment",
+#             "@ml_drift//ml_drift/gl:portable",
 #             "//litert/runtime/accelerators/gpu:ml_drift_cl_gl_accelerator",  # buildcleaner: keep
-#             "//tflite/delegates/gpu/cl:cl_device",
-#             "//tflite/delegates/gpu/cl:gl_interop",
-#             "//tflite/delegates/gpu/cl:opencl_wrapper",
-#             "//tflite/delegates/gpu/gl:egl_environment",
 #         ],
 #         "//conditions:default": [
 #             "//litert/runtime/accelerators/gpu:ml_drift_cl_accelerator",  # buildcleaner: keep
@@ -712,10 +714,6 @@ litert_device_test(
 #     ] + select({
 #         "//litert:android": [
 #             "//litert/runtime/accelerators/gpu/google:jet_gpu_accelerator",  # buildcleaner: keep
-#             "//tflite/delegates/gpu/cl:cl_device",
-#             "//tflite/delegates/gpu/cl:gl_interop",
-#             "//tflite/delegates/gpu/cl:opencl_wrapper",
-#             "//tflite/delegates/gpu/gl:egl_environment",
 #         ],
 #         "//conditions:default": [],
 #     }),
@@ -801,6 +799,7 @@ cc_test(
         ":litert_compiled_model",
         ":litert_element_type",
         ":litert_environment",
+        ":litert_environment_options",
         ":litert_expected",
         ":litert_layout",
         ":litert_model",
@@ -945,10 +944,14 @@ cc_test(
         ":litert_environment_options",
         ":litert_expected",
         "//litert/c:litert_common",
+        "//litert/c:litert_environment",
         "//litert/c/internal:litert_accelerator_def",
         "//litert/c/internal:litert_runtime_builtin_header",
         "//litert/c/internal:litert_runtime_builtin_static",
+        "//litert/c/internal:litert_runtime_c_api",
         "//litert/c/internal:litert_runtime_context_header",
+        "//litert/cc/internal:litert_handle",
+        "//litert/cc/internal:litert_runtime_proxy_api",
         "//litert/test:common",
         "//litert/test:matchers",
         "//litert/test:simple_model",
@@ -1193,14 +1196,23 @@ cc_library(
         "//litert/c:litert_tensor_buffer_header",
         "//litert/c:litert_tensor_buffer_types",
         "//litert/c:litert_webgpu_types",
-        "//litert/c/internal:litert_tensor_buffer_registry",  # buildcleaner: keep
         "//litert/cc/internal:litert_handle",
         "//litert/cc/internal:litert_tensor_buffer_without_registry",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:span",
-    ],
+    ] + select({
+        # In dynamic/none mode, the registry implementation comes from the
+        # LiteRT runtime shared library. Linking it statically would duplicate
+        # LiteRtRegisterTensorBufferHandlers in the binary, which can interpose
+        # the runtime's own calls.
+        "//litert:litert_runtime_link_mode_dynamic": [],
+        "//litert:litert_runtime_link_mode_none": [],
+        "//conditions:default": [
+            "//litert/c/internal:litert_tensor_buffer_registry",  # buildcleaner: keep
+        ],
+    }),
 )
 
 cc_test(
@@ -1247,25 +1259,28 @@ cc_test(
 #         "@com_google_absl//absl/log:absl_check",
 #         "@com_google_absl//absl/status",
 #         "@com_google_absl//absl/types:span",
+#         "@ml_drift//ml_drift/cl:buffer",
+#         "@ml_drift//ml_drift/cl:cl_command_queue",
+#         "@ml_drift//ml_drift/cl:cl_context",
+#         "@ml_drift//ml_drift/cl:cl_device",
+#         "@ml_drift//ml_drift/cl:opencl_wrapper",
 #         "//litert/c:litert_common",
+#         "//litert/c:litert_custom_tensor_buffer",
 #         "//litert/c:litert_environment",
+#         "//litert/c:litert_environment_options",
 #         "//litert/c:litert_model_types",
 #         "//litert/c:litert_tensor_buffer",
 #         "//litert/c:litert_tensor_buffer_types",
+#         "//litert/c/internal:litert_tensor_buffer_registry",
 #         "//litert/cc/internal:litert_handle",
 #         "//litert/cc/internal:litert_platform_support",
 #         "//litert/runtime:tensor_buffer",
 #         "//litert/test:matchers",
 #         "@opencl_headers",
-#         "//tflite/delegates/gpu/cl:buffer",
-#         "//tflite/delegates/gpu/cl:cl_command_queue",
-#         "//tflite/delegates/gpu/cl:cl_context",
-#         "//tflite/delegates/gpu/cl:cl_device",
-#         "//tflite/delegates/gpu/cl:opencl_wrapper",
 #     ] + select({
 #         "//litert:android": [
-#             "//tflite/delegates/gpu/cl:gl_interop",
-#             "//tflite/delegates/gpu/gl:egl_environment",
+#             "@ml_drift//ml_drift/cl:gl_interop",
+#             "@ml_drift//ml_drift/gl:egl_environment",
 #         ],
 #         "//conditions:default": [],
 #     }),
@@ -1391,7 +1406,6 @@ objc_library(
         "//litert/test:matchers",
         "//litert/test:metal_test_helper",
         "//litert/test:simple_model",
-        "//tflite/delegates/gpu/metal:metal_device",
         # Dependency placeholder: apple_frameworks Metal,
         # Dependency placeholder: apple_frameworks XCTest,
     ],

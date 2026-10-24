@@ -39,6 +39,7 @@ cc_library(
         "//litert/c/internal:litert_options_helper",
         "//litert/cc:litert_macros",
         "//litert/core:litert_toml_parser",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
     ],
     alwayslink = True,
@@ -77,6 +78,8 @@ cc_library(
     deps = [
         "//litert/c:litert_common",
         "//litert/c/internal:litert_options_helper",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )
 
@@ -272,6 +275,7 @@ cc_library(
         "//litert/c/internal:litert_options_helper",
         "//litert/cc:litert_macros",
         "//litert/core:litert_toml_parser",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
     ],
     # Keep the symbols in libLiteRt.dylib.
@@ -403,6 +407,8 @@ filegroup(
         "litert_runtime_options.h",
         "litert_samsung_options.cc",
         "litert_samsung_options.h",
+        "litert_webnn_options.cc",
+        "litert_webnn_options.h",
     ],
     visibility = ["//litert/cc_sdk:__pkg__"],
 )

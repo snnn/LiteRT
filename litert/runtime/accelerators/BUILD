@@ -55,7 +55,9 @@ cc_library(
     srcs = ["registration_helper.cc"],
     hdrs = ["registration_helper.h"],
     deps = [
+        ":accelerator_implementation_helper",
         "//litert/c:litert_common",
+        "//litert/c:litert_environment_options",
         "//litert/c/internal:litert_abi_header",
         "//litert/c/internal:litert_accelerator_def",
         "//litert/c/internal:litert_accelerator_registration",

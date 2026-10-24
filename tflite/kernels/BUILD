@@ -2230,6 +2230,7 @@ cc_test(
     deps = [
         ":test_main",
         ":test_util",
+        "//tflite:array",
         "//tflite:framework_stable",
         "//tflite/core:framework_stable",
         "//tflite/kernels/internal:tensor",
@@ -2395,6 +2396,7 @@ cc_test(
         "//tflite:string",
         "//tflite:string_util",
         "//tflite/core:framework_stable",
+        "//tflite/core/c:common",
         "//tflite/kernels/internal:tensor",
         "//tflite/schema:schema_fbs",
         "@com_google_googletest//:gtest",

@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"  // from @com_google_absl
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
 #include "absl/container/flat_hash_set.h"  // from @com_google_absl
 #include "litert/c/options/litert_cpu_options.h"
@@ -41,9 +42,6 @@
 #endif  // !defined(LITERT_WINDOWS_OS)
 
 #include "absl/functional/any_invocable.h"  // from @com_google_absl
-#if !defined(LITERT_DISABLE_EXTERNAL_WEIGHTS)
-#include "absl/status/status.h"  // from @com_google_absl
-#endif  // !defined(LITERT_DISABLE_EXTERNAL_WEIGHTS)
 #include "litert/c/litert_layout.h"
 #include "litert/cc/internal/litert_consts.h"
 #include "litert/core/filesystem.h"
@@ -52,7 +50,6 @@
 #include <android/hardware_buffer.h>
 #endif
 
-#include "absl/cleanup/cleanup.h"  // from @com_google_absl
 #include "absl/log/absl_check.h"  // from @com_google_absl
 #include "absl/strings/match.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
@@ -86,6 +83,7 @@
 #include "litert/core/util/perfetto_profiling.h"
 #include "tflite/model_builder.h"
 #if !defined(LITERT_DISABLE_NPU)
+#include "litert/cc/internal/litert_dispatch_delegate_vendor_options.h"
 #include "litert/compiler/plugin/compiler_plugin.h"
 #include "litert/core/cache/compilation_cache.h"
 #include "litert/core/model/model_serialize.h"
@@ -753,6 +751,79 @@ Expected<void> LiteRtCompiledModelT::InitializeRuntime(
 }
 
 #if !defined(LITERT_DISABLE_EXTERNAL_WEIGHTS)
+Expected<void> LiteRtCompiledModelT::ResolveExternalWeightsForCompilation(
+    LiteRtModelT& model, LiteRtOptions jit_compilation_options,
+    LiteRtEnvironmentT& env) {
+  auto* buffers = model.Buffers();
+  std::vector<LiteRtModelT::BufferId> external_ids;
+  for (LiteRtModelT::BufferId id = 1; id < buffers->NumBuffers(); ++id) {
+    auto context = buffers->GetContext(id);
+    if (context && context->get().external.has_value()) {
+      external_ids.push_back(id);
+    }
+  }
+  if (external_ids.empty()) {
+    return {};
+  }
+
+  const auto& tfl_wrapper = litert::internal::GetTflFlatbuffer(model);
+  if (tfl_wrapper.PackedModel() == nullptr) {
+    return litert::Unexpected(
+        kLiteRtStatusErrorRuntimeFailure,
+        "External weights need the model's original flatbuffer");
+  }
+  if (jit_compilation_options->weight_loader != nullptr) {
+    weight_loader_ = jit_compilation_options->weight_loader;
+  } else {
+    weight_loader_owned_ = weight_loader::CreateLiteRtWeightLoader(
+        LrtGetRuntimeContext(), tfl_wrapper.PackedModel(), model_directory_,
+        std::move(jit_compilation_options->scoped_weight_source),
+        static_cast<const weight_loader::WeightInMemoryMap*>(
+            jit_compilation_options->weight_in_memory_map));
+    weight_loader_ = weight_loader_owned_.get();
+  }
+  weight_loader::WeightAccessRequest request;
+  request.cpu = true;
+  request.opencl = false;
+  if (LiteRtStatus status = weight_loader_->PrepareAccess(request, &env);
+      status != kLiteRtStatusOk) {
+    return litert::Unexpected(
+        status,
+        "External weight loader: failed to map the external weights for "
+        "compilation");
+  }
+
+  for (const auto id : external_ids) {
+    auto context = buffers->GetContext(id);
+    const auto& external = context->get().external;
+    const weight_loader::WeightAccess* access =
+        weight_loader_->GetExternalWeightByBuffer(external->id);
+    LiteRtTensorBuffer host_buffer =
+        access != nullptr ? access->GetHostBuffer() : nullptr;
+    void* host_memory = nullptr;
+    if (host_buffer == nullptr ||
+        LiteRtGetTensorBufferHostMemory(host_buffer, &host_memory) !=
+            kLiteRtStatusOk ||
+        host_memory == nullptr) {
+      return litert::Unexpected(
+          kLiteRtStatusErrorRuntimeFailure,
+          absl::StrCat("External weight loader: no host mapping for external "
+                       "buffer id ",
+                       external->id));
+    }
+    LITERT_RETURN_IF_ERROR(buffers->SetNonOwnedBuffer(
+        id, litert::BufferRef<uint8_t>(host_memory, external->length)));
+  }
+  // The runtime initialization keeps using this loader: the serialized model
+  // refers to the same external buffer ids.
+  jit_compilation_options->weight_loader = weight_loader_;
+  LITERT_LOG(LITERT_INFO,
+             "External weight loader: %zu external constants mapped for "
+             "compilation",
+             external_ids.size());
+  return {};
+}
+
 Expected<void> LiteRtCompiledModelT::RestoreExternalWeightsForCpu() {
   if (!weight_loader_) {
     return {};
@@ -958,18 +1029,36 @@ Expected<void> LiteRtCompiledModelT::InitializeModel(
     model_directory_.reset();
   }
 
-  // If hardware acceleration is requested then apply the plugins to the model
-  // and initialize the compiled model from the translated LiteRt model.
-  if (hw_accelerators != kLiteRtHwAcceleratorNone) {
+  // A compiler plugin is applied only if its supported hardware overlaps the
+  // requested accelerators (see LiteRtGetCompilerPluginSupportedHardware): NPU
+  // for all plugins, and GPU for some (e.g. NVIDIA). A CPU-only request can
+  // never use one, so it skips loading the plugins, which would otherwise cost
+  // initialization time and log errors when a plugin's vendor SDK is not
+  // installed.
+  const bool maybe_using_compiler_plugin =
+      (hw_accelerators & (kLiteRtHwAcceleratorNpu | kLiteRtHwAcceleratorGpu)) !=
+      0;
+
+  // If a compiler plugin may be used then apply the plugins to the model and
+  // initialize the compiled model from the translated LiteRt model.
+  if (maybe_using_compiler_plugin) {
 #if !defined(LITERT_DISABLE_NPU)
     // Check if the model is pre-compiled by looking for LiteRt build stamp.
     // Fall through to the next step if it's pre-compiled, else try to apply
     // plugins to the model.
     if (!IsCompiled(model)) {
+#if !defined(LITERT_DISABLE_EXTERNAL_WEIGHTS)
+      if (hw_accelerators & kLiteRtHwAcceleratorNpu) {
+        LITERT_RETURN_IF_ERROR(
+            ResolveExternalWeightsForCompilation(model, options, env));
+      }
+#endif  // !defined(LITERT_DISABLE_EXTERNAL_WEIGHTS)
       Expected<bool> maybe_initialized_model =
           ApplyPluginsWithCaching(model, hw_accelerators, *options, env);
-      if (maybe_initialized_model.HasValue() &&
-          maybe_initialized_model.Value() == true) {
+      if (!maybe_initialized_model.HasValue()) {
+        return maybe_initialized_model.Error();
+      }
+      if (maybe_initialized_model.Value() == true) {
         // The compiled model's flatbuffer has initialized by applying the
         // plugins.
         return {};
@@ -1117,6 +1206,29 @@ LiteRtCompiledModelT::Create(LiteRtEnvironmentT* env, LiteRtModel model,
       LITERT_RETURN_IF_ERROR(
           dispatch_options.SetAllocBaseSize(compiled_model->fb_model_size_));
     }
+#if !defined(LITERT_DISABLE_NPU)
+    // Only needed when delegating to NPU.
+    LITERT_ASSIGN_OR_RETURN(
+        litert::internal::DispatchDelegateVendorOptions vendor_options,
+        litert::internal::BuildDispatchDelegateVendorOptions(*model));
+    if (!vendor_options.FunctionMappings().empty()) {
+      const char* identifier = nullptr;
+      void* payload = nullptr;
+      void (*payload_deleter)(void*) = nullptr;
+      LITERT_RETURN_IF_ERROR(vendor_options.GetOpaqueOptionsData(
+          &identifier, &payload, &payload_deleter));
+      auto cleaner = absl::MakeCleanup([&] {
+        if (payload_deleter != nullptr && payload != nullptr) {
+          payload_deleter(payload);
+        }
+      });
+      LITERT_ASSIGN_OR_RETURN(
+          litert::OpaqueOptions vendor_node,
+          litert::OpaqueOptions::Create(identifier, payload, payload_deleter));
+      std::move(cleaner).Cancel();
+      LITERT_RETURN_IF_ERROR(scoped_modifier.Append(std::move(vendor_node)));
+    }
+#endif  // !defined(LITERT_DISABLE_NPU)
     LITERT_RETURN_IF_ERROR(scoped_modifier.Append(std::move(dispatch_options)));
   }
 
@@ -1640,6 +1752,9 @@ Expected<bool> LiteRtCompiledModelT::ApplyPluginsWithCaching(
       LITERT_LOG(GetLogSeverityForJitCompilationFailure(hw_accelerators),
                  "Failed to apply compiler plugins: %s",
                  jit_result.Error().Message().c_str());
+      if (!maybe_compiled_plugins->empty()) {
+        return jit_result.Error();
+      }
     } else {
       LITERT_LOG(
           LITERT_INFO, "%d compiler plugins were applied successfully: %s",

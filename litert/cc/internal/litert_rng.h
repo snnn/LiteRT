@@ -15,15 +15,19 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LITERT_CC_INTERNAL_LITERT_RNG_H_
 #define THIRD_PARTY_ODML_LITERT_LITERT_CC_INTERNAL_LITERT_RNG_H_
 
+#include <algorithm>
+#include <array>
 #include <bitset>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <iostream>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <optional>
 #include <ostream>
 #include <random>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -162,12 +166,18 @@ class DataGenerator : public DataGeneratorBase<D> {
   using Wide = WideType<D>;
 
   /// @brief Returns the maximum value of the distribution.
-  DataType Max() const override { return dist_.max(); }
+  DataType Max() const override { return static_cast<DataType>(dist_.max()); }
   /// @brief Returns the minimum value of the distribution.
-  DataType Min() const override { return dist_.min(); }
+  DataType Min() const override { return static_cast<DataType>(dist_.min()); }
 
  protected:
-  Dist<DataType> dist_;
+  // Widen 1-byte ints as std::uniform_int_distribution requires >= 16-bit ints.
+  using DistDataType =
+      std::conditional_t<std::is_integral_v<D> && sizeof(D) == 1,
+                         std::conditional_t<std::is_signed_v<D>, int16_t,
+                                            uint16_t>,
+                         D>;
+  Dist<DistDataType> dist_;
 };
 
 /// @brief A data generator that produces values within a given range.
@@ -180,12 +190,14 @@ class RangedGenerator final : public DataGenerator<D, Dist> {
 
  public:
   using typename Base::DataType;
+  using typename Base::DistDataType;
   using typename Base::Wide;
 
   RangedGenerator(Wide min = NumericLimits<D>::Lowest(),
                   Wide max = NumericLimits<D>::Max()) {
-    ConstructAt(&this->dist_, LowerBoundary<DataType>(min),
-                UpperBoundary<DataType>(max));
+    ConstructAt(&this->dist_,
+                static_cast<DistDataType>(LowerBoundary<DataType>(min)),
+                static_cast<DistDataType>(UpperBoundary<DataType>(max)));
   }
 
   RangedGenerator(const RangedGenerator&) = default;
@@ -195,7 +207,7 @@ class RangedGenerator final : public DataGenerator<D, Dist> {
 
   template <typename Rng>
   DataType operator()(Rng& rng) {
-    return this->dist_(rng);
+    return static_cast<DataType>(this->dist_(rng));
   }
 };
 

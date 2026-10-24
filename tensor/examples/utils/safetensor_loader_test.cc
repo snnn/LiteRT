@@ -24,7 +24,6 @@ limitations under the License.
 #include <cstring>
 #include <filesystem>  // NOLINT
 #include <fstream>
-#include <memory>
 #include <optional>
 #include <string>
 #include <system_error>  // NOLINT
@@ -34,7 +33,6 @@ limitations under the License.
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
-#include "absl/strings/string_view.h"  // from @com_google_absl
 #include "tensor/buffer.h"
 #include "tensor/datatypes.h"
 #include "tensor/examples/utils/safetensor_test_util.h"
@@ -945,6 +943,26 @@ TEST(SafetensorLoaderTest, CompanionConfigRejectsIncompleteExponent) {
     fixture.Save(config);
     EXPECT_FALSE(SafetensorLoader::Load(fixture.FilePath()).ok());
   }
+}
+
+TEST(SafetensorLoaderTest, LoadsHeaderNotSortedByOffset) {
+  SafetensorFileGuard file = CreateTempSafetensor(
+      {
+          {.name = "b",
+           .type = Type::kFP32,
+           .shape = {2},
+           .buffer = std::vector<float>{1, 2}},
+          {.name = "a",
+           .type = Type::kFP32,
+           .shape = {1},
+           .buffer = std::vector<float>{3}},
+      },
+      R"({})", Order::kReverse);
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(SafetensorLoader loader,
+                                  SafetensorLoader::Load(file.GetPath()));
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(TensorHandle b, loader.LoadTensor("b"));
+  LRT_TENSOR_ASSERT_OK_AND_ASSIGN(Buffer & buffer, b.GetBuffer());
+  EXPECT_THAT(buffer.Lock().As<const float>(), ElementsAre(1.0f, 2.0f));
 }
 
 }  // namespace

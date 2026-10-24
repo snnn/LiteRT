@@ -20,9 +20,10 @@ load("@rules_cc//cc:objc_library.bzl", "objc_library")
 package(
     # copybara:uncomment default_applicable_licenses = ["//third_party/odml:license"],
     default_visibility = [
+        "//third_party/odml/infra/ml_drift_delegate:__subpackages__",
         "//ml_drift_delegate/delegate:__subpackages__",
         "//ml_drift_delegate/tflite:__subpackages__",
-        "//third_party/odml/infra/ml_drift_delegate:__subpackages__",
+        # copybara:uncomment "//third_party/py/ai_edge_jax/generative/backends/cpu_gpu/compat:__subpackages__",
     ],
 )
 
@@ -386,7 +387,6 @@ cc_library(
     hdrs = ["short_conv_step_kernel.h"],
     deps = [
         ":short_conv_step_parser",
-        "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/strings",
@@ -673,6 +673,7 @@ cc_library(
         "@ml_drift//ml_drift/common:model",
         "@ml_drift//ml_drift/common:types",
         "@ml_drift//ml_drift/common/task:gpu_operation",
+        "@ml_drift//ml_drift/common/task:tensor_desc",
         "@ml_drift//ml_drift/common/task:tuning_type",
     ],
 )
@@ -905,6 +906,8 @@ cc_test(
         ":add_values_to_cache_parser",
         ":fused_sdpa_cache_update_parser",
         ":litert_op_selector",
+        ":sdpa_transposed_parser",
+        ":short_conv_step_parser",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_googletest//:gtest_main",
         "@ml_drift//ml_drift/common:data_type",
@@ -915,9 +918,9 @@ cc_test(
         "@ml_drift//ml_drift/common:operations",
         "@ml_drift//ml_drift/common:precision",
         "@ml_drift//ml_drift/common:shape",
-        "@ml_drift//ml_drift/common:tensor",
-        "@ml_drift//ml_drift/common:types",
+        "@ml_drift//ml_drift/common/kernels:fully_connected",
         "@ml_drift//ml_drift/common/task:gpu_operation",
         "@ml_drift//ml_drift/common/task:tensor_desc",
+        "@ml_drift//ml_drift/common/task:weights_layout",
     ],
 )

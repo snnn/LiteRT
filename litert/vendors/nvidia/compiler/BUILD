@@ -293,6 +293,7 @@ cc_library(
 cc_test(
     name = "weight_store_builder_test",
     srcs = ["weight_store_builder_test.cc"],
+    tags = ["no_oss"],
     target_compatible_with = select({
         "//litert:linux_x86_64": [],
         "//litert:linux_aarch64": [],
@@ -426,6 +427,7 @@ cc_test(
         "//litert/cc:litert_buffer_ref",
         "//litert/core/model",
         "//litert/vendors/c:litert_compiler_plugin",
+        "//litert/vendors/c:litert_compiler_plugin_api",
         "//litert/vendors/nvidia:bytecode",
         "//litert/vendors/nvidia:cache_layout",
         "//tflite/schema:schema_fbs",
@@ -461,6 +463,7 @@ litert_dynamic_lib(
         "//litert/c:litert_builder",
         "//litert/c:litert_common",
         "//litert/c:litert_op_code",
+        "//litert/c:litert_op_options",
         "//litert/c/internal:litert_logging",
         "//litert/c/internal:litert_logging_helper_with_compiler_context",
         "//litert/cc:litert_element_type",
@@ -472,6 +475,7 @@ litert_dynamic_lib(
         "//litert/core:filesystem",
         "//litert/core/model",
         "//litert/vendors/c:litert_compiler_plugin",
+        "//litert/vendors/c:litert_compiler_plugin_api",
         "//litert/vendors/nvidia:bytecode",
         "//litert/vendors/nvidia:cache_layout",
         "//litert/vendors/nvidia:cuda_vmm",

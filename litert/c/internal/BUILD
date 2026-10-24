@@ -40,6 +40,7 @@ package(
         # "//litert/runtime/dispatch:__subpackages__",
         # "//litert/vendors:__subpackages__",
         # "//litert/kotlin:__subpackages__",
+        # "//litert/rust:__subpackages__",
         # "//ml_drift_delegate/delegate:__subpackages__",
         # "//third_party/odml/infra/ml_drift_delegate:__subpackages__",
         # "//third_party/odml/litert/weight_loader:__subpackages__",
@@ -151,7 +152,6 @@ cc_library(
     deps = [
         ":litert_abi_header",
         "//litert/c:litert_any",
-        "//litert/c:litert_builder_header",
         "//litert/c:litert_common",
         "//litert/c:litert_environment_options_header",
         "//litert/c:litert_model_types",

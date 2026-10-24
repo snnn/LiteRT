@@ -34,6 +34,7 @@
 #include "litert/cc/litert_macros.h"
 #include "litert/core/model/model.h"
 #include "litert/core/model/ops/concatenation.h"
+#include "litert/core/model/ops/gather.h"
 #include "litert/core/model/ops/matmul.h"
 #include "litert/core/model/ops/reductions.h"
 #include "litert/core/model/ops/select.h"
@@ -44,6 +45,7 @@
 #include "litert/core/model/shape_inference_types.h"
 #include "litert/test/generators/common.h"
 #include "litert/test/simple_buffer.h"
+#include "tensor/datatypes.h"
 #include "tflite/schema/schema_generated.h"
 #include "tflite/types/half.h"
 
@@ -91,6 +93,26 @@ Expected<void> ReferenceEvaluator::TensorData::AssignData(const void* data,
   } else if (element_type == kLiteRtElementTypeInt32) {
     const int32_t* ptr = static_cast<const int32_t*>(data);
     i32_data.assign(ptr, ptr + num_elements);
+  } else if (element_type == kLiteRtElementTypeInt8) {
+    const int8_t* ptr = static_cast<const int8_t*>(data);
+    i32_data.resize(num_elements);
+    for (size_t j = 0; j < num_elements; ++j) {
+      i32_data[j] = static_cast<int32_t>(ptr[j]);
+    }
+  } else if (element_type == kLiteRtElementTypeInt4) {
+    const auto* ptr = static_cast<const litert::tensor::int4_t*>(data);
+    i32_data.resize(num_elements);
+    for (size_t j = 0; j < num_elements; ++j) {
+      const auto& packed = ptr[j / 2];
+      i32_data[j] = static_cast<int32_t>((j % 2 == 0) ? packed.a : packed.b);
+    }
+  } else if (element_type == kLiteRtElementTypeInt2) {
+    const auto* ptr = static_cast<const litert::tensor::int2_t*>(data);
+    i32_data.resize(num_elements);
+    for (size_t j = 0; j < num_elements; ++j) {
+      i32_data[j] = static_cast<int32_t>(
+          litert::tensor::internal::GetPackedValue(ptr[j / 4], j % 4));
+    }
   } else if (element_type == kLiteRtElementTypeBool) {
     const bool* ptr = static_cast<const bool*>(data);
     i32_data.resize(num_elements);
@@ -683,6 +705,93 @@ void ReferenceEvaluator::RegisterStandardOps() {
   register_comparison_op(
       kLiteRtOpCodeTflLessEqual,
       [](auto... args) { litert::internal::ReferenceLessEqual(args...); });
+
+  RegisterOp(kLiteRtOpCodeTflDequantize,
+             [](const LiteRtOpT& op, const TensorEnv& env,
+                TensorData& out) -> Expected<void> {
+               const LiteRtTensorT* in_tensor = op.Inputs()[0];
+               const auto& in = env.at(in_tensor);
+               const auto& qparams = in_tensor->Qparams();
+               if (qparams.first == kLiteRtQuantizationPerTensor) {
+                 litert::internal::ReferenceDequantize(
+                     in.i32_data.data(), in.i32_data.size(),
+                     out.f32_data.data(), qparams.second.per_tensor.scale,
+                     qparams.second.per_tensor.zero_point);
+               } else if (qparams.first == kLiteRtQuantizationPerChannel) {
+                 const auto& pc = qparams.second.per_channel;
+                 litert::internal::ReferenceDequantizePerChannel(
+                     in.i32_data.data(), in.dimensions.data(),
+                     in.dimensions.size(), pc.quantized_dimension, pc.scales,
+                     pc.zero_points, out.f32_data.data());
+               } else {
+                 return Error(kLiteRtStatusErrorUnsupported,
+                              "Unsupported quantization type in Dequantize");
+               }
+               return {};
+             });
+
+  RegisterOp(
+      kLiteRtOpCodeTflGather,
+      [](const LiteRtOpT& op, const TensorEnv& env,
+         TensorData& out) -> Expected<void> {
+        const auto& params = env.at(op.Inputs()[0]);
+        const auto& indices = env.at(op.Inputs()[1]);
+        const auto& opts = litert::internal::GetTflOptions(op);
+        const auto* gather_opts = opts.AsGatherOptions();
+        int32_t axis = gather_opts ? gather_opts->axis : 0;
+        int32_t batch_dims = gather_opts ? gather_opts->batch_dims : 0;
+        if (!params.f32_data.empty()) {
+          litert::internal::ReferenceGather(
+              params.f32_data.data(), params.dimensions.data(),
+              params.dimensions.size(), indices.i32_data.data(),
+              indices.dimensions.data(), indices.dimensions.size(), axis,
+              batch_dims, out.f32_data.data());
+        } else if (!params.i32_data.empty()) {
+          litert::internal::ReferenceGather(
+              params.i32_data.data(), params.dimensions.data(),
+              params.dimensions.size(), indices.i32_data.data(),
+              indices.dimensions.data(), indices.dimensions.size(), axis,
+              batch_dims, out.i32_data.data());
+        }
+        return {};
+      });
+
+  RegisterOp(kLiteRtOpCodeTflGelu,
+             [](const LiteRtOpT& op, const TensorEnv& env,
+                TensorData& out) -> Expected<void> {
+               const auto& in = env.at(op.Inputs()[0]);
+               const auto& opts = litert::internal::GetTflOptions(op);
+               const auto* gelu_opts = opts.AsGeluOptions();
+               bool approximate = gelu_opts ? gelu_opts->approximate : false;
+               litert::internal::ReferenceGelu(in.f32_data.data(),
+                                               in.f32_data.size(), approximate,
+                                               out.f32_data.data());
+               return {};
+             });
+
+  RegisterOp(
+      kLiteRtOpCodeTflSum,
+      [](const LiteRtOpT& op, const TensorEnv& env,
+         TensorData& out) -> Expected<void> {
+        const auto& in = env.at(op.Inputs()[0]);
+        const auto& axes = env.at(op.Inputs()[1]);
+        const auto& opts = litert::internal::GetTflOptions(op);
+        const auto* reducer_opts = opts.AsReducerOptions();
+        bool keep_dims = reducer_opts ? reducer_opts->keep_dims : false;
+
+        if (!litert::internal::ReferenceReduction<float>(
+                in.f32_data.data(), in.dimensions.data(),
+                in.dimensions.size(), out.f32_data.data(),
+                out.dimensions.data(), out.dimensions.size(),
+                axes.i32_data.data(), axes.i32_data.size(), keep_dims, 0.0f,
+                [](const float current, const float val) {
+                  return current + val;
+                })) {
+          return Error(kLiteRtStatusErrorRuntimeFailure,
+                       "ReferenceSum evaluation failed");
+        }
+        return {};
+      });
 }
 
 Expected<void> ReferenceEvaluator::ExecuteOp(const LiteRtOpT& op,

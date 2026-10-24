@@ -31,9 +31,14 @@ pub enum ErrorCause {
     InputDoesntSupportAnyTensorBufferTypes,
     ResizeCompiledModelInputBuffer,
     RunCompiledModel,
+    IsCompiledModelFullyAccelerated,
+    IsCompiledModelNonCpuFullyAccelerated,
     // environment
     NotSupportedLiteRtAnyType,
     CreateEnvironment,
+    GetNumAccelerators,
+    GetAccelerator,
+    GetAcceleratorHardwareSupport,
     // model
     GetSignatureKey,
     GetSignatureSubgraph,
@@ -155,6 +160,9 @@ impl Error {
             LiteRtStatus_kLiteRtStatusErrorWrongVersion => "kLiteRtStatusErrorWrongVersion",
             LiteRtStatus_kLiteRtStatusErrorUnknown => "kLiteRtStatusErrorUnknown",
             LiteRtStatus_kLiteRtStatusErrorAlreadyExists => "kLiteRtStatusErrorAlreadyExists",
+            LiteRtStatus_kLiteRtStatusErrorFailedPrecondition => {
+                "kLiteRtStatusErrorFailedPrecondition"
+            }
 
             // Inference progression errors.
             LiteRtStatus_kLiteRtStatusCancelled => "kLiteRtStatusCancelled",
