@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -25,6 +26,7 @@
 #include "testing/base/public/gmock.h"
 #include "testing/base/public/gunit.h"
 #include "absl/status/status.h"  // from @com_google_absl
+#include "absl/status/status_macros.h"  // from @com_google_absl
 #include "absl/strings/match.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/str_replace.h"  // from @com_google_absl
@@ -32,14 +34,18 @@
 #include "ml_drift/common/gpu_info.h"  // from @ml_drift
 #include "ml_drift/common/gpu_model.h"  // from @ml_drift
 #include "ml_drift/common/gpu_model_builder.h"  // from @ml_drift
+#include "ml_drift/common/ir_model.h"  // from @ml_drift
 #include "ml_drift/common/kernels/fully_connected.h"  // from @ml_drift
 #include "ml_drift/common/kernels/tests/kernel_test.h"  // from @ml_drift
 #include "ml_drift/common/precision.h"  // from @ml_drift
 #include "ml_drift/common/shape.h"  // from @ml_drift
+#include "ml_drift/common/task/gpu_operation.h"  // from @ml_drift
 #include "ml_drift/common/task/tensor_desc.h"  // from @ml_drift
 #include "ml_drift/common/task/testing_util.h"  // from @ml_drift
 #include "ml_drift/common/task/weights_layout.h"  // from @ml_drift
 #include "ml_drift/common/tensor.h"  // from @ml_drift
+#include "ml_drift_delegate/delegate/composite/add_values_to_cache_kernel.h"
+#include "ml_drift_delegate/delegate/composite/add_values_to_cache_parser.h"
 #include "ml_drift_delegate/delegate/composite/sdpa_transposed_parser.h"
 
 namespace litert::ml_drift {
@@ -282,6 +288,33 @@ MATCHER_P2(FloatNearWithRelativeTolerance, abs_tolerance, rel_tolerance,
   return diff <= abs_tolerance + rel_tolerance * std::abs(expected);
 }
 
+// Checks that the decomposed graph in `gpu_model` splits the query rows into
+// `expected_score_chunks` chunks (one `strided_slice` per chunk when there is
+// more than one). Does nothing when `expected_score_chunks` is not positive.
+absl::Status CheckDecomposedSdpaScoreChunks(
+    const ::ml_drift::GpuModel& gpu_model, int expected_score_chunks) {
+  if (expected_score_chunks <= 0) return absl::OkStatus();
+  int num_slices = 0;
+  for (const ::ml_drift::GpuNode& node : gpu_model.nodes) {
+    if (node.name == "strided_slice") ++num_slices;
+  }
+  const int num_chunks = num_slices > 0 ? num_slices : 1;
+  if (num_chunks != expected_score_chunks) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("The decomposed graph has ", num_chunks,
+                     " score chunks, expected ", expected_score_chunks, "."));
+  }
+  return absl::OkStatus();
+}
+
+// Whether the decomposed graph on `gpu_info` splits score tensors within
+// `kMaxDecomposedSdpaScoreBytes`: not on OpenCL and WebGPU, which keep them on
+// one GEMM (`DecomposedSdpaScoreChunkBudget`).
+bool SplitsScoresWithinPrefillBudget(const ::ml_drift::GpuInfo& gpu_info) {
+  return DecomposedSdpaScoreChunkBudget(gpu_info, kMaxDecomposedSdpaScoreBytes,
+                                        /*max_chunk_bytes=*/0) == 0;
+}
+
 // `KV` is the number of key/value heads (defaults to `BK`, i.e. plain MHA) and
 // `q_start` is the absolute position of the first query token inside the KV
 // cache (non-zero when a prompt is prefilled in several chunks).
@@ -301,7 +334,12 @@ MATCHER_P2(FloatNearWithRelativeTolerance, abs_tolerance, rel_tolerance,
 // `force_work_group_flash_prefill` sets the score tensor budget of the
 // decomposed prefill graph to 0, so multi-token prefill on backends without the
 // MMA prefill kernel (OpenCL, WebGPU) runs on the work-group Flash kernel, and
-// checks that the built graph does.
+// checks that the built graph does. Plain K/V tensors, which the Flash kernel
+// does not take, keep the decomposed graph with that budget.
+// `max_decomposed_score_chunk_bytes` is the chunk budget of the score tensor of
+// the decomposed graph. When `expected_score_chunks` is positive, the test also
+// checks that the built graph splits the query rows into that many chunks (one
+// `strided_slice` per chunk when there is more than one).
 absl::Status RunSdpaTransposedTest(
     ::ml_drift::TestExecutionEnvironment& env,
     ::ml_drift::CalculationsPrecision precision,
@@ -311,7 +349,10 @@ absl::Status RunSdpaTransposedTest(
     bool flatten_output = false, int active_tokens = 0,
     int decode_mask_keys = 0,
     std::optional<int> param_active_tokens = std::nullopt,
-    bool force_work_group_flash_prefill = false) {
+    bool force_work_group_flash_prefill = false,
+    uint64_t max_decomposed_score_chunk_bytes =
+        kMaxDecomposedSdpaScoreChunkBytes,
+    int expected_score_chunks = 0) {
   if (KV <= 0) KV = BK;
   if (active_tokens <= 0) active_tokens = S;
   if (decode_mask_keys <= 0) decode_mask_keys = active_tokens;
@@ -409,9 +450,9 @@ absl::Status RunSdpaTransposedTest(
 
   const uint64_t max_decomposed_score_bytes =
       force_work_group_flash_prefill ? 0 : kMaxDecomposedSdpaScoreBytes;
-  ABSL_RETURN_IF_ERROR(
-      BuildSdpaTransposedGpuGraph(graph_input_ids, out_tensor.id, attr,
-                                  &builder, max_decomposed_score_bytes));
+  ABSL_RETURN_IF_ERROR(BuildSdpaTransposedGpuGraph(
+      graph_input_ids, out_tensor.id, attr, &builder,
+      max_decomposed_score_bytes, max_decomposed_score_chunk_bytes));
 
   std::vector<std::pair<uint32_t, uint32_t>> model_inputs = {
       {q.id, 0}, {k.id, 1}, {v.id, 2}};
@@ -425,7 +466,7 @@ absl::Status RunSdpaTransposedTest(
       std::vector<std::pair<uint32_t, uint32_t>>{{out_tensor.id, 0}},
       &gpu_model));
 
-  if (force_work_group_flash_prefill && T > 1 &&
+  if (force_work_group_flash_prefill && from_cache_update && T > 1 &&
       SupportsFusedSdpaKernels(env.GetGpuInfo()) &&
       !SupportsWaveMatrixPrefill(env.GetGpuInfo())) {
     bool uses_work_group_kernel = false;
@@ -439,6 +480,9 @@ absl::Status RunSdpaTransposedTest(
           "Prefill did not run on the work-group Flash kernel.");
     }
   }
+
+  ABSL_RETURN_IF_ERROR(
+      CheckDecomposedSdpaScoreChunks(gpu_model, expected_score_chunks));
 
   const float q_scale = 1.0f / std::sqrt(static_cast<float>(H));
 
@@ -872,6 +916,40 @@ TEST_P(SdpaTransposedKernelExecuteTest, PrefillGemma4HeadDimsGroupedQuery) {
   }
 }
 
+// The Gemma 4 global attention prefill above with the score tensor
+// [1, 2, 8 * 8, 64] (16 KiB in F16, 32 KiB in F32) over a lowered chunk
+// budget: the decomposed graph runs on 2, 4 or 8 chunks of whole query heads
+// per K/V head, each reading the [1, 1, T, S] mask with the same `w % T`
+// broadcast as the folded rows. OpenCL and WebGPU keep these scores, which fit
+// `kMaxDecomposedSdpaScoreBytes`, on one GEMM.
+TEST_P(SdpaTransposedKernelExecuteTest,
+       PrefillGemma4GlobalAttentionScoreChunks) {
+  const uint64_t score_bytes =
+      16 * 8 * 64 *
+      DecomposedSdpaBytesPerScore(
+          ::ml_drift::DeduceDataTypeFromPrecision(precision()),
+          /*from_cache_update=*/true);
+  const bool splits = SplitsScoresWithinPrefillBudget(exec_env->GetGpuInfo());
+  for (const auto& [chunk_bytes, chunks] :
+       std::vector<std::pair<uint64_t, int>>{{score_bytes, 1},
+                                             {score_bytes / 2, 2},
+                                             {score_bytes / 3, 4},
+                                             {0, 8}}) {
+    auto status = RunSdpaTransposedTest(
+        *exec_env, precision(), storage(), /*BK=*/16, /*T=*/8, /*S=*/64,
+        /*H=*/512, mask_mode(), /*KV=*/2, /*q_start=*/40,
+        /*from_cache_update=*/true, /*is_causal=*/false,
+        /*flatten_output=*/false,
+        /*active_tokens=*/FilledCacheEntries(mask_mode(), 48, 64),
+        /*decode_mask_keys=*/0, /*param_active_tokens=*/std::nullopt,
+        /*force_work_group_flash_prefill=*/false,
+        /*max_decomposed_score_chunk_bytes=*/chunk_bytes,
+        /*expected_score_chunks=*/splits ? chunks : 1);
+    EXPECT_TRUE(status.ok())
+        << "chunk_bytes=" << chunk_bytes << ": " << status.message();
+  }
+}
+
 // Single-token decode with a pruned BOOL causal mask (`MaskMode::kNone`,
 // `attr.is_causal = true`) for the head dims whose BOOL mask the parsers prune
 // (head_dim / 4 dividing 256), using a partially filled cache.
@@ -898,6 +976,21 @@ TEST_P(SdpaTransposedKernelExecuteTest, StandardTensorsFallbackGroupedQuery) {
   auto status = RunSdpaTransposedTest(
       *exec_env, precision(), storage(), /*BK=*/8, /*T=*/4, /*S=*/8, /*H=*/8,
       mask_mode(), /*KV=*/2, /*q_start=*/0, /*from_cache_update=*/false);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+// The BatchedMatMul + Softmax graph on plain K/V tensors with score and chunk
+// budgets of 0: one chunk per query head of each K/V head, on every backend
+// (the work-group Flash kernel does not take plain K/V tensors).
+TEST_P(SdpaTransposedKernelExecuteTest,
+       StandardTensorsFallbackGroupedQueryScoreChunks) {
+  auto status = RunSdpaTransposedTest(
+      *exec_env, precision(), storage(), /*BK=*/8, /*T=*/4, /*S=*/8, /*H=*/8,
+      mask_mode(), /*KV=*/2, /*q_start=*/0, /*from_cache_update=*/false,
+      /*is_causal=*/false, /*flatten_output=*/false, /*active_tokens=*/0,
+      /*decode_mask_keys=*/0, /*param_active_tokens=*/std::nullopt,
+      /*force_work_group_flash_prefill=*/true,
+      /*max_decomposed_score_chunk_bytes=*/0, /*expected_score_chunks=*/4);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
@@ -1067,6 +1160,274 @@ TEST_P(SdpaTransposedKernelExecuteTest,
   }
 }
 
+// End-to-end INT8 KV cache test. An `AddValuesToCache` op quantizes the float
+// K/V updates of all `S` tokens into `kUint8` caches (`int8 + 128` bytes with
+// static `scale_k` / `scale_v`), which `BuildSdpaTransposedGpuGraph` reads as
+// int8 FullyConnected external weights dequantized with the broadcast scales.
+// `T == 1` decodes the last cache slot, otherwise the whole cache is prefilled.
+// `max_decomposed_score_bytes` and `max_decomposed_score_chunk_bytes` are the
+// score and chunk budgets of `BuildSdpaTransposedGpuGraph`. INT8 K/V caches
+// never run on the work-group Flash kernel, so the score budget only bounds
+// the chunk budget of OpenCL and WebGPU (`DecomposedSdpaScoreChunkBudget`).
+// `expected_score_chunks` is as in `RunSdpaTransposedTest`.
+absl::Status RunSdpaTransposedInt8KvTest(
+    ::ml_drift::TestExecutionEnvironment& env,
+    ::ml_drift::CalculationsPrecision precision,
+    ::ml_drift::TensorStorageType storage, int BK, int T, int S, int H,
+    MaskMode mask_mode, int KV, bool flatten_output,
+    uint64_t max_decomposed_score_bytes = kMaxDecomposedSdpaScoreBytes,
+    uint64_t max_decomposed_score_chunk_bytes =
+        kMaxDecomposedSdpaScoreChunkBytes,
+    int expected_score_chunks = 0) {
+  constexpr float kScaleK = 0.01f;
+  constexpr float kScaleV = 0.02f;
+  if (flatten_output && T != 1) {
+    return absl::InvalidArgumentError(
+        "Only single-token outputs can be flattened.");
+  }
+  ::ml_drift::GpuModelBuilder builder(env.GetGpuInfo(), {}, precision, storage);
+  const ::ml_drift::DataType datatype =
+      ::ml_drift::DeduceDataTypeFromPrecision(precision);
+
+  auto q = builder.AddTensor(::ml_drift::BHWC(1, BK, T, H), datatype);
+  // Float K/V updates in the `[B, H, T, D]` layout of `odml.cache_update`.
+  auto src_k = builder.AddTensor(::ml_drift::BHWC(1, KV, S, H), datatype);
+  auto src_v = builder.AddTensor(::ml_drift::BHWC(1, KV, S, H), datatype);
+  // INT8 caches in the packed layout written by AddValuesToCache.
+  auto k = builder.AddTensor(1, KV, S, H,
+                             ::ml_drift::TensorStorageType::kBuffer,
+                             ::ml_drift::DataType::kUint8);
+  auto v = builder.AddTensor(1, KV, H, S,
+                             ::ml_drift::TensorStorageType::kBuffer,
+                             ::ml_drift::DataType::kUint8);
+
+  std::optional<::ml_drift::GpuModelBuilder::TensorHandle> mask_handle;
+  std::optional<::ml_drift::GpuModelBuilder::TensorHandle> mask_feed_handle;
+  ::ml_drift::BHWC mask_shape(1, 1, T, S);
+  if (mask_mode == MaskMode::kBool) {
+    auto mask_float = builder.AddTensor(mask_shape, datatype);
+    mask_feed_handle = mask_float;
+    mask_handle = builder.Cast(mask_float, ::ml_drift::DataType::kBool);
+  } else if (mask_mode == MaskMode::kFloatAdditive) {
+    auto mask_float = builder.AddTensor(mask_shape, datatype);
+    mask_feed_handle = mask_float;
+    mask_handle = mask_float;
+  }
+
+  ::ml_drift::Tensor<::ml_drift::StrongShape<::ml_drift::Layout::kBHWC>,
+                     ::ml_drift::DataType::kInt32>
+      param_tensor_cpu;
+  param_tensor_cpu.shape = ::ml_drift::BHWC(1, 1, 1, 7);
+  // {cache update start index, cache update end index, active tokens}: the
+  // update fills the whole cache and SDPA attends to all of it.
+  param_tensor_cpu.data = {0, S, S, 0, 0, 0, 0};
+
+  ::ml_drift::TensorDescriptor param_desc(
+      ::ml_drift::DataType::kInt32, ::ml_drift::TensorStorageType::kBuffer,
+      ::ml_drift::Layout::kBHWC);
+  param_desc.UploadData(param_tensor_cpu);
+  auto param_tensor = builder.AddConstantTensor(std::move(param_desc));
+
+  // The AddValuesToCache op quantizing the K/V updates into the caches.
+  ::ml_drift::OperationDef cache_op_def;
+  cache_op_def.src_tensors = {src_k.tensor_desc, src_v.tensor_desc,
+                              param_tensor.tensor_desc};
+  cache_op_def.dst_tensors = {k.tensor_desc, v.tensor_desc};
+  AddValuesToCacheAttributes cache_attr;
+  cache_attr.kv_cache_batch_size = KV;
+  cache_attr.cache_size = S;
+  cache_attr.head_size = H;
+  cache_attr.scale_k = kScaleK;
+  cache_attr.scale_v = kScaleV;
+  ::ml_drift::ir::IrOp cache_ir_op(::ml_drift::ir::IrOpId{0});
+  cache_ir_op.name = kAddValuesToCacheType;
+  cache_ir_op.attr = cache_attr;
+  ABSL_ASSIGN_OR_RETURN(
+      std::unique_ptr<::ml_drift::GPUOperation> cache_op,
+      CreateAddValuesToCacheFromNode(cache_op_def, cache_ir_op));
+  builder.AddGpuOperation({src_k, src_v, param_tensor}, {k, v},
+                          std::move(cache_op), kAddValuesToCacheType);
+
+  const ::ml_drift::BHWC out_shape = flatten_output
+                                         ? ::ml_drift::BHWC(1, 1, 1, BK * H)
+                                         : ::ml_drift::BHWC(1, BK, T, H);
+  auto out_tensor = builder.AddTensor(out_shape, datatype);
+
+  // The attributes the parsers build for int8 K/V caches.
+  SdpaTransposedAttributes attr;
+  attr.runtime_check.src_end_ch_index = 2;
+  attr.from_cache_update = true;
+  attr.is_prefill = (T > 1);
+  attr.bmm1_weights.weights_shape = ::ml_drift::OHWI(S, KV, 1, H);
+  attr.bmm1_weights.desc = ::ml_drift::GetFullyConnectedWeightsDesc(
+      ::ml_drift::DataType::kUint8, attr.bmm1_weights.weights_shape);
+  attr.bmm1_weights.desc.layout =
+      ::ml_drift::WeightsLayout::kOSpatialIOGroupO4I4;
+  attr.bmm2_weights.weights_shape = ::ml_drift::OHWI(H, KV, 1, S);
+  attr.bmm2_weights.desc = ::ml_drift::GetFullyConnectedWeightsDesc(
+      ::ml_drift::DataType::kUint8, attr.bmm2_weights.weights_shape);
+  attr.scale_k.emplace();
+  attr.scale_k->shape = ::ml_drift::Linear(S);
+  attr.scale_k->data = std::vector<float>(S, kScaleK);
+  attr.scale_v.emplace();
+  attr.scale_v->shape = ::ml_drift::Linear(H);
+  attr.scale_v->data = std::vector<float>(H, kScaleV);
+
+  std::vector<uint32_t> graph_input_ids = {q.id, k.id, v.id};
+  if (mask_handle.has_value()) {
+    graph_input_ids.push_back(mask_handle->id);
+  }
+  graph_input_ids.push_back(param_tensor.id);
+
+  ABSL_RETURN_IF_ERROR(BuildSdpaTransposedGpuGraph(
+      graph_input_ids, out_tensor.id, attr, &builder,
+      max_decomposed_score_bytes, max_decomposed_score_chunk_bytes));
+
+  std::vector<std::pair<uint32_t, uint32_t>> model_inputs = {
+      {q.id, 0}, {src_k.id, 1}, {src_v.id, 2}};
+  if (mask_feed_handle.has_value()) {
+    model_inputs.push_back({mask_feed_handle->id, 3});
+  }
+
+  ::ml_drift::GpuModel gpu_model;
+  ABSL_RETURN_IF_ERROR(builder.GetGpuModel(
+      model_inputs,
+      std::vector<std::pair<uint32_t, uint32_t>>{{out_tensor.id, 0}},
+      &gpu_model));
+  ABSL_RETURN_IF_ERROR(
+      CheckDecomposedSdpaScoreChunks(gpu_model, expected_score_chunks));
+
+  const float q_scale = 1.0f / std::sqrt(static_cast<float>(H));
+  std::vector<float> q_data(BK * T * H, 0.0f);
+  for (int bk = 0; bk < BK; ++bk) {
+    for (int t = 0; t < T; ++t) {
+      for (int h = 0; h < H; ++h) {
+        int idx = (bk * T + t) * H + h;
+        q_data[idx] = q_scale * (0.05f * (bk + 1) + 0.02f * (t + 1) +
+                                 0.01f * ((h % 8) + 1));
+      }
+    }
+  }
+
+  // K and V values are int8-range multiples of `kScaleK` / `kScaleV`, so the
+  // cache quantization is exact. `k_data` and `src_v_data` are in the update
+  // layout [KV, S, H]; `v_data` is the transposed [KV, H, S] reference layout.
+  std::vector<float> k_data(KV * S * H, 0.0f);
+  std::vector<float> src_v_data(KV * S * H, 0.0f);
+  std::vector<float> v_data(KV * H * S, 0.0f);
+  for (int kvh = 0; kvh < KV; ++kvh) {
+    for (int s = 0; s < S; ++s) {
+      for (int h = 0; h < H; ++h) {
+        const int k_idx = (kvh * S + s) * H + h;
+        const int v_idx = (kvh * H + h) * S + s;
+        k_data[k_idx] =
+            kScaleK * static_cast<float>(5 * (kvh + 1) + 2 * (s + 1) -
+                                         ((h % 8) + 1));
+        const float v_value =
+            kScaleV * static_cast<float>(((h % 8) + 1) + 2 * (s + 1) + 5 * kvh);
+        src_v_data[k_idx] = v_value;
+        v_data[v_idx] = v_value;
+      }
+    }
+  }
+
+  const int q_start = (T == 1) ? (S - 1) : 0;
+  std::vector<float> mask_data(T * S, 0.0f);
+  if (mask_mode == MaskMode::kBool) {
+    for (int t = 0; t < T; ++t) {
+      for (int s = 0; s < S; ++s) {
+        const bool unmasked =
+            (T == 1) ? (s == 0 || s % 4 != 3) : (s <= t + q_start);
+        mask_data[t * S + s] = unmasked ? 1.0f : 0.0f;
+      }
+    }
+  } else if (mask_mode == MaskMode::kFloatAdditive) {
+    for (int t = 0; t < T; ++t) {
+      for (int s = 0; s < S; ++s) {
+        const bool unmasked =
+            (T == 1) ? (s == 0 || s % 4 != 3) : (s <= t + q_start);
+        mask_data[t * S + s] =
+            unmasked ? -0.25f * static_cast<float>((t + s) % 4) : -10000.0f;
+      }
+    }
+  }
+
+  std::vector<float> expected_out_data = ComputeSdpaReferenceOutput(
+      q_data, k_data, v_data, mask_data, BK, T, S, H, mask_mode, KV, q_start,
+      /*implicit_causal=*/false, S);
+
+  ::ml_drift::TensorFloat32 q_tensor;
+  q_tensor.shape = q.tensor_desc.GetBHWCShape();
+  q_tensor.data = q_data;
+
+  ::ml_drift::TensorFloat32 src_k_tensor;
+  src_k_tensor.shape = src_k.tensor_desc.GetBHWCShape();
+  src_k_tensor.data = k_data;
+
+  ::ml_drift::TensorFloat32 src_v_tensor;
+  src_v_tensor.shape = src_v.tensor_desc.GetBHWCShape();
+  src_v_tensor.data = src_v_data;
+
+  std::vector<::ml_drift::TensorFloat32> src_cpu = {q_tensor, src_k_tensor,
+                                                    src_v_tensor};
+  if (mask_mode != MaskMode::kNone) {
+    ::ml_drift::TensorFloat32 mask_tensor;
+    mask_tensor.shape = mask_shape;
+    mask_tensor.data = mask_data;
+    src_cpu.push_back(mask_tensor);
+  }
+
+  ::ml_drift::TensorFloat32 out_tensor_cpu;
+  out_tensor_cpu.shape = out_shape;
+  out_tensor_cpu.data.resize(BK * T * H);
+  std::vector<::ml_drift::TensorFloat32*> dst_cpu = {&out_tensor_cpu};
+
+  ABSL_RETURN_IF_ERROR(env.ExecuteGpuModel(src_cpu, dst_cpu, &gpu_model));
+
+  const float tolerance = (H > 16) ? 1.5e-2f : 2e-3f;
+  constexpr float kRelativeTolerance = 4e-3f;
+  EXPECT_THAT(out_tensor_cpu.data,
+              testing::Pointwise(FloatNearWithRelativeTolerance(
+                                     tolerance, kRelativeTolerance),
+                                 expected_out_data));
+  return absl::OkStatus();
+}
+
+TEST_P(SdpaTransposedKernelExecuteTest, SingleTokenDecodeInt8KvGqa) {
+  auto status = RunSdpaTransposedInt8KvTest(
+      *exec_env, precision(), storage(), /*BK=*/8, /*T=*/1, /*S=*/16,
+      /*H=*/64, mask_mode(), /*KV=*/2, /*flatten_output=*/true);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_P(SdpaTransposedKernelExecuteTest, PrefillMultiTokenInt8KvGqa) {
+  auto status = RunSdpaTransposedInt8KvTest(
+      *exec_env, precision(), storage(), /*BK=*/8, /*T=*/4, /*S=*/16,
+      /*H=*/64, mask_mode(), /*KV=*/2, /*flatten_output=*/false);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+// INT8 K/V caches through the chunked decomposed graph: zero score and chunk
+// budgets split the 4 query heads of each GQA group into 4 chunks on every
+// backend, which share the dequantization scales.
+TEST_P(SdpaTransposedKernelExecuteTest, SingleTokenDecodeInt8KvGqaScoreChunks) {
+  auto status = RunSdpaTransposedInt8KvTest(
+      *exec_env, precision(), storage(), /*BK=*/8, /*T=*/1, /*S=*/16,
+      /*H=*/64, mask_mode(), /*KV=*/2, /*flatten_output=*/true,
+      /*max_decomposed_score_bytes=*/0,
+      /*max_decomposed_score_chunk_bytes=*/0, /*expected_score_chunks=*/4);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_P(SdpaTransposedKernelExecuteTest, PrefillMultiTokenInt8KvGqaScoreChunks) {
+  auto status = RunSdpaTransposedInt8KvTest(
+      *exec_env, precision(), storage(), /*BK=*/8, /*T=*/4, /*S=*/16,
+      /*H=*/64, mask_mode(), /*KV=*/2, /*flatten_output=*/false,
+      /*max_decomposed_score_bytes=*/0,
+      /*max_decomposed_score_chunk_bytes=*/0, /*expected_score_chunks=*/4);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
 INSTANTIATE_TEST_SUITE_P(
     SdpaTransposedKernelExecuteTestSuite, SdpaTransposedKernelExecuteTest,
     Combine(ValuesIn({::ml_drift::CalculationsPrecision::kF32,
@@ -1188,6 +1549,128 @@ TEST(DecomposedSdpaScoreBytesTest, CountsF16Scores) {
   // 32K cache: 2 GiB.
   EXPECT_EQ(DecomposedSdpaScoreBytes(Lfm2Prefill(), Lfm2Cache32K()),
             2ull << 30);
+}
+
+TEST(NumDecomposedSdpaScoreChunksTest, SplitsWholeQueryHeadsOfGqaGroups) {
+  // Gemma 4 global attention: 16 query heads, 2 K/V heads, head dim 512, and
+  // 1024-token prefill into a 32K cache: 1 GiB of scores.
+  const ::ml_drift::BHWC q_shape(1, 16, 1024, 512);
+  const ::ml_drift::BHWC k_shape(1, 2, 32768, 512);
+  ASSERT_EQ(DecomposedSdpaScoreBytes(q_shape, k_shape), 1ull << 30);
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape,
+                                         kMaxDecomposedSdpaScoreChunkBytes),
+            8);
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape, 256ull << 20), 4);
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape, 768ull << 20), 2);
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape, 1ull << 30), 1);
+  // At most one chunk per query head of a GQA group.
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape, 0), 8);
+  // A 1280-entry cache (1K context) fits the budget: 40 MiB.
+  EXPECT_EQ(
+      NumDecomposedSdpaScoreChunks(q_shape, ::ml_drift::BHWC(1, 2, 1280, 512),
+                                   kMaxDecomposedSdpaScoreChunkBytes),
+      1);
+}
+
+TEST(NumDecomposedSdpaScoreChunksTest, UsesDivisorsOfTheGqaGroupSize) {
+  // 6 query heads per K/V head; a budget for 3.5 chunks takes 6, the next
+  // divisor of 6 after 3.
+  const ::ml_drift::BHWC q_shape(1, 12, 4, 8);
+  const ::ml_drift::BHWC k_shape(1, 2, 16, 8);
+  const uint64_t score_bytes = DecomposedSdpaScoreBytes(q_shape, k_shape);
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape, score_bytes / 2), 2);
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape, score_bytes / 3), 3);
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape, score_bytes * 2 / 7),
+            6);
+}
+
+TEST(NumDecomposedSdpaScoreChunksTest, KeepsOneChunkWithoutGqa) {
+  // Multi-head attention has no whole query heads per K/V head to split.
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(Lfm2Prefill(),
+                                         ::ml_drift::BHWC(1, 32, 32768, 64),
+                                         /*max_chunk_bytes=*/0),
+            1);
+  // Invalid head counts.
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(::ml_drift::BHWC(1, 2, 8, 8),
+                                         ::ml_drift::BHWC(1, 4, 8, 8),
+                                         /*max_chunk_bytes=*/0),
+            1);
+}
+
+TEST(NumDecomposedSdpaScoreChunksTest, SizesChunksByBytesPerScore) {
+  // The Gemma 4 global attention prefill above: F32 logits (or F16 logits and
+  // probabilities) take twice the bytes of F16 logits, so twice the chunks.
+  const ::ml_drift::BHWC q_shape(1, 16, 1024, 512);
+  const ::ml_drift::BHWC k_shape(1, 2, 32768, 512);
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape, 512ull << 20,
+                                         /*bytes_per_score=*/2),
+            2);
+  EXPECT_EQ(NumDecomposedSdpaScoreChunks(q_shape, k_shape, 512ull << 20,
+                                         /*bytes_per_score=*/4),
+            4);
+}
+
+TEST(DecomposedSdpaBytesPerScoreTest, CountsLogitsAndProbabilities) {
+  // The `odml.cache_update` layout folds the softmax into the P * V matmul.
+  EXPECT_EQ(DecomposedSdpaBytesPerScore(::ml_drift::DataType::kFloat16,
+                                        /*from_cache_update=*/true),
+            2);
+  EXPECT_EQ(DecomposedSdpaBytesPerScore(::ml_drift::DataType::kFloat32,
+                                        /*from_cache_update=*/true),
+            4);
+  // Plain K/V tensors also keep the probabilities written by `Softmax`.
+  EXPECT_EQ(DecomposedSdpaBytesPerScore(::ml_drift::DataType::kFloat16,
+                                        /*from_cache_update=*/false),
+            4);
+  EXPECT_EQ(DecomposedSdpaBytesPerScore(::ml_drift::DataType::kFloat32,
+                                        /*from_cache_update=*/false),
+            8);
+}
+
+TEST(DecomposedSdpaScoreChunkBudgetTest, MetalSplitsAboveTheChunkBudget) {
+  const auto metal =
+      MakeGpuInfo(::ml_drift::GpuVendor::kApple, ::ml_drift::GpuApi::kMetal);
+  EXPECT_EQ(DecomposedSdpaScoreChunkBudget(metal),
+            kMaxDecomposedSdpaScoreChunkBytes);
+  EXPECT_EQ(DecomposedSdpaScoreChunkBudget(metal, kMaxDecomposedSdpaScoreBytes,
+                                           /*max_chunk_bytes=*/0),
+            0);
+  // So do backends without the fused kernels.
+  EXPECT_EQ(DecomposedSdpaScoreChunkBudget(MakeGpuInfo(
+                ::ml_drift::GpuVendor::kQualcomm, ::ml_drift::GpuApi::kVulkan)),
+            kMaxDecomposedSdpaScoreChunkBytes);
+}
+
+// OpenCL and WebGPU keep the score tensors that `UsesWorkGroupFlashPrefill`
+// leaves to the decomposed graph on one GEMM, and only split larger ones, which
+// reach it when the Flash kernel does not apply (e.g. INT8 K/V caches).
+TEST(DecomposedSdpaScoreChunkBudgetTest, OpenClAndWebGpuKeepThePrefillBudget) {
+  const ::ml_drift::BHWC lfm25_cache(1, 8, 8704, 64);
+  for (const auto api :
+       {::ml_drift::GpuApi::kOpenCl, ::ml_drift::GpuApi::kWebGpu}) {
+    const auto gpu = MakeGpuInfo(::ml_drift::GpuVendor::kQualcomm, api);
+    const uint64_t budget = DecomposedSdpaScoreChunkBudget(gpu);
+    EXPECT_EQ(budget, kMaxDecomposedSdpaScoreBytes);
+    // LFM2.5 1024-token prefill: 544 MiB of scores on one GEMM.
+    EXPECT_FALSE(UsesWorkGroupFlashPrefill(gpu, Lfm2Prefill(), lfm25_cache));
+    EXPECT_EQ(NumDecomposedSdpaScoreChunks(Lfm2Prefill(), lfm25_cache, budget),
+              1);
+    // A 32K cache: 2 GiB of scores on 4 chunks of 512 MiB.
+    EXPECT_EQ(
+        NumDecomposedSdpaScoreChunks(Lfm2Prefill(), Lfm2Cache32K(), budget), 4);
+    // Tests lower both budgets to split small shapes.
+    EXPECT_EQ(DecomposedSdpaScoreChunkBudget(gpu, /*max_score_bytes=*/0,
+                                             /*max_chunk_bytes=*/0),
+              0);
+  }
+  // On OpenCL, at most the maximum allocation of the device.
+  auto opencl = MakeGpuInfo(::ml_drift::GpuVendor::kQualcomm,
+                            ::ml_drift::GpuApi::kOpenCl);
+  opencl.opencl_info.max_allocation_size = 512ull << 20;
+  EXPECT_EQ(DecomposedSdpaScoreChunkBudget(opencl), 512ull << 20);
+  // Also below `kMaxDecomposedSdpaScoreChunkBytes`.
+  opencl.opencl_info.max_allocation_size = 64ull << 20;
+  EXPECT_EQ(DecomposedSdpaScoreChunkBudget(opencl), 64ull << 20);
 }
 
 TEST(UsesFusedSdpaKernelTest, OpenClAndWebGpuGatePrefillOnScoreBytes) {

@@ -10,7 +10,7 @@
 #   TENSORRT_RTX_ROOT  TensorRT-RTX SDK (default: ~/opt/tensorrt-rtx-sdk)
 #   CUDA_HOME          CUDA toolkit (default: /usr/local/cuda)
 #   LITERT_BENCH_ROOT  where builds, caches and runs live
-#                      (default: ~/.local/state/litert-nvidia-benchmark)
+#                      (default: ~/.local/state/litert-nvidia-benchmark-wl)
 #   LITERT_BENCH_MODELS directory of the litertlm files (default: $LITERT_LM_DIR/../models)
 #   LITERT_BENCH_DISTDIR a Bazel --distdir for offline builds
 
@@ -26,7 +26,8 @@ nb_resolve_paths() {
   export NB_RT NB_LM NB_ROOT NB_SDK NB_CUDA NB_MODELS NB_BUILD_RT NB_BUILD_LM NB_RUNTIME_LIBS
   NB_RT=$(realpath -m "${LITERT_RT_DIR:-$here/../../../..}")
   NB_LM=$(realpath -m "${LITERT_LM_DIR:-$NB_RT/../../llm/LiteRT-LM}")
-  NB_ROOT=${LITERT_BENCH_ROOT:-$HOME/.local/state/litert-nvidia-benchmark}
+  NB_ROOT=$(realpath -m "${LITERT_BENCH_ROOT:-$HOME/.local/state/litert-nvidia-benchmark-wl}")
+  export LITERT_BENCH_ROOT=$NB_ROOT
   NB_SDK=$(realpath -m "${TENSORRT_RTX_ROOT:-$HOME/opt/tensorrt-rtx-sdk}")
   NB_CUDA=$(realpath -m "${CUDA_HOME:-/usr/local/cuda}")
   NB_MODELS=$(realpath -m "${LITERT_BENCH_MODELS:-$NB_LM/../models}")
@@ -49,11 +50,14 @@ nb_model_file() {
 
 # nb_build_id -> "<litert sha>[+]-<litert-lm sha>[+]" (a + marks local changes); the model
 # caches of one build live under it, because the compiler, dispatch and CLI binaries decide
-# what the AOT and runtime caches hold.
+# what the AOT and runtime caches hold. The LiteRT side is the last commit that changed
+# anything but this benchmark directory: its scripts and tools are not part of the binaries,
+# so editing them keeps the pools warm.
 nb_build_id() {
   local rt lm
-  rt=$(git -C "$NB_RT" rev-parse --short=9 HEAD)
-  [[ -z $(git -C "$NB_RT" status --porcelain --untracked-files=no) ]] || rt+=+
+  local -a sources=(. ':(exclude)litert/vendors/nvidia/benchmark')
+  rt=$(git -C "$NB_RT" log -1 --format=%h --abbrev=9 HEAD -- "${sources[@]}")
+  [[ -z $(git -C "$NB_RT" status --porcelain --untracked-files=no -- "${sources[@]}") ]] || rt+=+
   lm=$(git -C "$NB_LM" rev-parse --short=8 HEAD)
   [[ -z $(git -C "$NB_LM" status --porcelain --untracked-files=no) ]] || lm+=+
   echo "$rt-$lm"

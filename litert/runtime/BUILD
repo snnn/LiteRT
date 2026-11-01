@@ -113,10 +113,38 @@ cc_library(
         ":ahwb_wrapper",
         ":event",
         "//litert/c:litert_common",
+        "//litert/c:litert_event_type",
         "//litert/c/internal:litert_logging",
         "//litert/cc:litert_expected",
         "//litert/cc:litert_macros",
     ],
+)
+
+cc_test(
+    name = "ahwb_buffer_test",
+    srcs = ["ahwb_buffer_test.cc"],
+    linkopts = litert_android_linkopts(),
+    tags = [
+        "noios",
+        "nomacos",
+        "nowindows",
+    ],
+    target_compatible_with = select({
+        "//litert:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":ahwb_buffer",
+        ":event",
+        "//litert/c:litert_common",
+        "//litert/c:litert_event_type",
+    ] + gtest_main_no_heapcheck_deps(),
+)
+
+litert_device_exec(
+    name = "ahwb_buffer_device_test",
+    data = [],
+    target = ":ahwb_buffer_test",
 )
 
 cc_library(
@@ -424,6 +452,8 @@ cc_test(
 )
 
 GPU_ENVIRONMENT_DEPS = [
+    "@com_google_absl//absl/base:core_headers",
+    "@com_google_absl//absl/synchronization",
     "@ml_drift//ml_drift/cl:cl_command_queue",
     "@ml_drift//ml_drift/cl:cl_context",
     "@ml_drift//ml_drift/cl:cl_device",
@@ -571,6 +601,7 @@ cc_library(
         "//litert/cc:litert_macros",
         "//tflite/c:c_api_types",
         "//tflite/c:common",
+        "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/strings",
     ] + select({
         "//litert:without_builtin_ops": [
@@ -803,6 +834,7 @@ cc_library(
             # Omit default TFLite builtin/reference kernels (e.g.
             # litert_builtin_ops=false or cpu_backend=selective). XNNPACK or a
             # selective op resolver is used instead.
+            "//litert/tflite_support/op_resolver:selected_ops_registry",
             "//tflite/c:c_api_opaque_without_op_resolver_without_alwayslink",
             "//tflite/c:c_api_without_op_resolver_without_alwayslink",
         ],

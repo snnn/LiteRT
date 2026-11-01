@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Copyright 2026 The ODML Authors. Licensed under the Apache License, Version 2.0.
 # Builds what the NVIDIA benchmarks run: the compiler plugin and dispatch libraries of this
-# LiteRT tree and the unchanged LiteRT-LM advanced CLI against it, with Bazel output bases
+# LiteRT tree and the LiteRT-LM advanced CLI against it, with Bazel output bases
 # under the benchmark root so the benchmark caches and the binaries stay together.
 # usage: build.sh [--rt-only | --lm-only]    (environment: see env.sh)
 set -euo pipefail
 source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/env.sh"
 nb_resolve_paths
 what=${1:-all}
+echo "TensorRT-RTX SDK: $NB_SDK; CUDA: $NB_CUDA"
 for command in bazel git realpath flock; do command -v "$command" >/dev/null || nb_die "Missing prerequisite: $command"; done
 # The system clang, not the caller's CC/CXX: toolchain managers (swiftly) export proxies named
 # clang that print their own help when Bazel calls them. LITERT_BENCH_CC/CXX override.
@@ -46,5 +47,13 @@ if [[ $what != --rt-only ]]; then
   bazel_build "$NB_LM" "$NB_BUILD_LM" "--override_repository=litert=$NB_RT" //runtime/engine:litert_lm_advanced_main
   ln -sfn "$(realpath "$NB_LM/bazel-bin/runtime/engine/litert_lm_advanced_main")" "$NB_RUNTIME_LIBS/litert_lm_advanced_main"
 fi
-echo "Build id: $(nb_build_id)"
+# The stamp names the build the binaries came from: a run records it beside the checkout's build
+# id, which moves with commits that rebuild nothing. A partial build keeps the other half of the
+# previous stamp (the binaries it names were not rebuilt); without one, that half is "unknown".
+id=$(nb_build_id); rt=${id%-*}; lm=${id##*-}
+if [[ -f $NB_RUNTIME_LIBS/BUILD_ID ]]; then prev=$(cat "$NB_RUNTIME_LIBS/BUILD_ID"); prev_rt=${prev%-*}; prev_lm=${prev##*-}; else prev_rt=unknown; prev_lm=unknown; fi
+[[ $what != --lm-only ]] || rt=$prev_rt
+[[ $what != --rt-only ]] || lm=$prev_lm
+echo "$rt-$lm" > "$NB_RUNTIME_LIBS/BUILD_ID"
+echo "Build id: $(cat "$NB_RUNTIME_LIBS/BUILD_ID")"
 echo "Runtime libraries and CLI: $NB_RUNTIME_LIBS"

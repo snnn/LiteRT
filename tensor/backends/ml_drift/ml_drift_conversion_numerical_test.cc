@@ -28,7 +28,6 @@ limitations under the License.
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/strings/match.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
-#include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/types/any.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
 #include "ml_drift/cl/cl_command_queue.h"  // from @ml_drift
@@ -262,13 +261,6 @@ class MlDriftTestBackendBridge : public TestBackendBridge {
 
 struct MlDriftTraits {
   using Tag = MlDriftMixinTag;
-  // TODO(b/574438217): Enable these tests once the ML Drift backend is fixed.
-  static constexpr absl::string_view kDisabledTests[] = {
-      // Dequantizing values without zero points aborts.
-      "QuantizedWeightsSharedByDotAndAddOp",
-      // Dequantizing per-channel int8 inputs crashes.
-      "DequantizePerChannelOp",
-  };
   static std::unique_ptr<TestBackendBridge> CreateBridge() {
     return std::make_unique<MlDriftTestBackendBridge>();
   }
@@ -431,14 +423,14 @@ void MlDriftConversionNumericalTest::RunTest(
   }
 }
 
-TEST_F(MlDriftConversionNumericalTest, DISABLED_QuantizeOp) {
+TEST_F(MlDriftConversionNumericalTest, QuantizeThenDequantizeOp) {
   TensorMLD input({.type = Type::kFP32, .shape = {1, 2, 2, 1}});
-  TensorMLD output = Quantize(input, Type::kI8, {0.5}, {0});
+  TensorMLD output = Dequantize(Quantize(input, Type::kI8, {0.5}, {0}));
   RunTest(output, {{input, std::vector<float>{0.6f, 0.8f, 1.2f, 1.6f}}},
           {0.5f, 1.0f, 1.0f, 1.5f});
 }
 
-TEST_F(MlDriftConversionNumericalTest, DISABLED_DequantizeOp) {
+TEST_F(MlDriftConversionNumericalTest, DequantizeOp) {
   TensorMLD quant_input({.type = Type::kI8, .shape = {1, 2, 2, 1}});
   auto quant_params = std::make_shared<PerChannelAffineQuantization>();
   quant_params->scales = {0.25f};
@@ -447,6 +439,20 @@ TEST_F(MlDriftConversionNumericalTest, DISABLED_DequantizeOp) {
   TensorMLD output = Dequantize(quant_input);
   RunTest(output, {{quant_input, std::vector<int8_t>{1, 2, -1, -2}}},
           {0.25f, 0.5f, -0.25f, -0.5f});
+}
+
+TEST_F(MlDriftConversionNumericalTest, DequantizeConstantOp) {
+  // [[1, 3, 5], [-7, 9, 11]] quantized along their first dimension.
+  TensorMLD weights(
+      {.type = Type::kI8,
+       .shape = {2, 3},
+       .buffer = OwningCpuBuffer::Copy<Type::kI8>({1, 3, 5, -7, 9, 11}),
+       .quantization = std::make_shared<PerChannelAffineQuantization>(
+           std::vector<float>{0.5f, 2.0f}, std::vector<int64_t>{1, -1})});
+  TensorMLD input({.type = Type::kFP32, .shape = {2, 3}});
+  TensorMLD output = Add(Dequantize(weights), input);
+  RunTest(output, {{input, std::vector<float>{1, 1, 1, 1, 1, 1}}},
+          {1, 2, 3, -11, 21, 25});
 }
 
 TEST_F(MlDriftConversionNumericalTest, GetTensorHandleWithMlDriftBuffer) {

@@ -32,6 +32,7 @@ cuda_library(
         "int4_block_gemv.cu",
         "qkv_norm_rope.cu",
         "subbyte_gemm.cu",
+        "subbyte_gemm_int8.cu",
         "tiled_attention.cu",
     ],
     hdrs = [
@@ -129,6 +130,27 @@ cc_test(
 )
 
 cc_test(
+    name = "int2_gemv_test",
+    srcs = ["int2_gemv_test.cc"],
+    tags = [
+        "exclusive",
+        "manual",
+        "requires-gpu",
+    ],
+    target_compatible_with = select({
+        "//litert:linux_x86_64": [],
+        "//litert:linux_aarch64": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":gemma4_head_kernels",
+        "@com_google_googletest//:gtest_main",
+        "@local_cuda//:cuda_headers",
+        "@local_cuda//:cuda_runtime",
+    ],
+)
+
+cc_test(
     name = "gemma4_head_kernels_test",
     srcs = ["gemma4_head_kernels_test.cc"],
     tags = [
@@ -195,6 +217,48 @@ cc_test(
 cc_test(
     name = "tiled_attention_test",
     srcs = ["tiled_attention_test.cc"],
+    tags = [
+        "exclusive",
+        "manual",
+        "requires-gpu",
+    ],
+    target_compatible_with = select({
+        "//litert:linux_x86_64": [],
+        "//litert:linux_aarch64": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":gemma4_head_kernels",
+        "@com_google_googletest//:gtest_main",
+        "@local_cuda//:cuda_headers",
+        "@local_cuda//:cuda_runtime",
+    ],
+)
+
+cc_test(
+    name = "subbyte_gemm_benchmark_test",
+    srcs = ["subbyte_gemm_benchmark_test.cc"],
+    tags = [
+        "exclusive",
+        "manual",
+        "requires-gpu",
+    ],
+    target_compatible_with = select({
+        "//litert:linux_x86_64": [],
+        "//litert:linux_aarch64": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":gemma4_head_kernels",
+        "@com_google_googletest//:gtest_main",
+        "@local_cuda//:cuda_headers",
+        "@local_cuda//:cuda_runtime",
+    ],
+)
+
+cc_test(
+    name = "subbyte_gemm_int8_test",
+    srcs = ["subbyte_gemm_int8_test.cc"],
     tags = [
         "exclusive",
         "manual",

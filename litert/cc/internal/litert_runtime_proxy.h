@@ -638,6 +638,13 @@ class RuntimeProxy {
         output_buffers, async, scheduling_info);
   }
 
+  LiteRtStatus GetCompiledModelLastInferenceDuration(
+      LiteRtCompiledModelConst compiled_model, int64_t* duration_nanoseconds) {
+    LITERT_PROXY_METHOD_STATUS_MIN_VERSION(
+        1, 6, 0, litert_get_compiled_model_last_inference_duration,
+        compiled_model, duration_nanoseconds);
+  }
+
   LiteRtStatus SetCompiledModelCancellationFunction(
       LiteRtCompiledModel compiled_model, void* data,
       bool (*check_cancelled_func)(void*)) {
@@ -734,6 +741,19 @@ class RuntimeProxy {
         metrics, partition_count);
   }
 
+  LiteRtStatus CompiledModelRegisterTensorBuffer(
+      LiteRtCompiledModel compiled_model, LiteRtTensorBuffer tensor_buffer) {
+    LITERT_PROXY_METHOD_STATUS_MIN_VERSION(
+        1, 5, 0, litert_compiled_model_register_tensor_buffer, compiled_model,
+        tensor_buffer);
+  }
+
+  LiteRtStatus CompiledModelUnregisterTensorBuffer(
+      LiteRtCompiledModel compiled_model, LiteRtTensorBuffer tensor_buffer) {
+    LITERT_PROXY_METHOD_STATUS_MIN_VERSION(
+        1, 5, 0, litert_compiled_model_unregister_tensor_buffer, compiled_model,
+        tensor_buffer);
+  }
   LiteRtStatus CompiledModelGetProfiler(LiteRtCompiledModel compiled_model,
                                         LiteRtProfiler* profiler) {
     LITERT_PROXY_METHOD_STATUS(litert_compiled_model_get_profiler,

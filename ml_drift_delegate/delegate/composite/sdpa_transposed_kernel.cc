@@ -116,7 +116,7 @@ void ResolveWaveSimd(const ::ml_drift::GpuInfo& gpu_info, std::string* code) {
 }
 
 // Whether the fused Flash-Decode kernel supports these shapes. K and V must be
-// BUFFER tensors in the packed layout written by `odml.cache_update`, the
+// float BUFFER tensors in the packed layout written by `odml.cache_update`, the
 // shapes must pass `IsSupportedFlashSdpaShape`, and a mask must be shared by
 // all heads with one row, or one row per query token, that covers every cache
 // entry.
@@ -127,6 +127,10 @@ bool IsSupportedFlashDecode(const ::ml_drift::GpuInfo& gpu_info,
                             const ::ml_drift::TensorDescriptor* mask_desc) {
   if (k_desc.GetStorageType() != ::ml_drift::TensorStorageType::kBuffer ||
       v_desc.GetStorageType() != ::ml_drift::TensorStorageType::kBuffer) {
+    return false;
+  }
+  if (!::ml_drift::IsFloatType(k_desc.GetDataType()) ||
+      !::ml_drift::IsFloatType(v_desc.GetDataType())) {
     return false;
   }
   const ::ml_drift::BHWC k_shape = k_desc.GetBHWCShape();
@@ -1707,13 +1711,172 @@ MAIN_FUNCTION($0) {
   return dst;
 }
 
+// Whether a mask of `mask_shape` applies directly to the GQA-folded logits
+// [b, kv_heads, gqa_ratio * T, keys] of query `q_shape` [b, heads, T,
+// head_dim]. A [*, 1, T, keys] (or [*, 1, 1, keys]) mask does: the elementwise
+// width broadcast reads mask row `w % T`, the query token of folded row `w`.
+// Other layouts (e.g. a mask per query head) need the logits unfolded to
+// [b, heads, T, keys].
+bool MaskAppliesToFoldedLogits(const ::ml_drift::BHWC& mask_shape,
+                               const ::ml_drift::BHWC& q_shape) {
+  return mask_shape.h == 1 && (mask_shape.w == 1 || mask_shape.w == q_shape.w);
+}
+
+// Builds the decomposed `softmax(q k^T [+ mask]) v` graph of
+// `odml.sdpa_transposed` for `q_rows` [b, kv_heads, rows, head_dim]: the query
+// heads of each GQA group folded into the rows of their K/V head, where `rows`
+// holds whole query heads, i.e. is a multiple of the `q_shape.w` query tokens.
+// `scale_k` and `scale_v` are the dequantization scales of INT8 K/V caches, or
+// null for float caches. Returns the attention output
+// [b, kv_heads, rows, head_dim].
+absl::StatusOr<::ml_drift::GpuModelBuilder::TensorHandle> BuildDecomposedSdpa(
+    const SdpaTransposedAttributes& attr, const ::ml_drift::BHWC& q_shape,
+    const ::ml_drift::GpuModelBuilder::TensorHandle& q_rows,
+    const ::ml_drift::GpuModelBuilder::TensorHandle& k,
+    const ::ml_drift::GpuModelBuilder::TensorHandle& v,
+    const ::ml_drift::GpuModelBuilder::TensorHandle* mask,
+    const ::ml_drift::GpuModelBuilder::TensorHandle* param_tensor,
+    const ::ml_drift::GpuModelBuilder::TensorHandle* scale_k,
+    const ::ml_drift::GpuModelBuilder::TensorHandle* scale_v,
+    ::ml_drift::GpuModelBuilder* model_builder) {
+  const ::ml_drift::BHWC k_shape = k.tensor_desc.GetBHWCShape();
+  const int gqa_ratio = q_shape.h / k_shape.h;
+
+  ::ml_drift::GpuModelBuilder::TensorHandle logits;
+  if (scale_k != nullptr) {
+    // Q * K^T with the raw int8 cache bytes as external weights, dequantized
+    // in the kernel with one scale per cache slot. Without a zero-point tensor
+    // the weights are decoded as `(byte - 128) * scale`, matching the offset
+    // binary encoding written by the AddValuesToCache kernel.
+    ::ml_drift::ConvRuntimeCheckDesc bmm1_runtime_check;
+    if (param_tensor != nullptr) {
+      bmm1_runtime_check.dst_end_ch_index = attr.runtime_check.src_end_ch_index;
+    }
+    const ::ml_drift::GpuModelBuilder::Weights bmm1_external_weights =
+        ::ml_drift::CreateExternalWeights(
+            k, attr.bmm1_weights.desc, attr.bmm1_weights.weights_shape,
+            ::ml_drift::OHWI(attr.scale_k->shape.v, 1, 1, 1), scale_k);
+    logits = model_builder->FullyConnectedInt8ExternalWeights(
+        q_rows, bmm1_external_weights, /*biases=*/nullptr,
+        /*src_exp=*/nullptr, bmm1_runtime_check, param_tensor);
+  } else if (attr.from_cache_update) {
+    ::ml_drift::WeightsDescription bmm1_desc = attr.bmm1_weights.desc;
+    bmm1_desc.type = q_rows.tensor_desc.GetDataType();
+    const ::ml_drift::GpuModelBuilder::Weights bmm1_external_weights =
+        ::ml_drift::CreateExternalWeights(k, bmm1_desc,
+                                          attr.bmm1_weights.weights_shape);
+
+    ::ml_drift::ConvRuntimeCheckDesc bmm1_runtime_check;
+    if (param_tensor != nullptr) {
+      bmm1_runtime_check.dst_end_ch_index = attr.runtime_check.src_end_ch_index;
+    }
+
+    ABSL_ASSIGN_OR_RETURN(
+        logits, model_builder->FullyConnectedExternalWeights(
+                    q_rows, bmm1_external_weights, /*biases=*/nullptr,
+                    /*src_exp=*/nullptr, bmm1_runtime_check, param_tensor));
+  } else {
+    ::ml_drift::BatchedMatMulAttributes bmm1_attr;
+    bmm1_attr.transpose_left = false;
+    bmm1_attr.transpose_right = true;
+    ::ml_drift::ConvRuntimeCheckDesc bmm1_runtime_check;
+    if (param_tensor != nullptr) {
+      bmm1_runtime_check.dst_end_ch_index = attr.runtime_check.src_end_ch_index;
+    }
+    ABSL_ASSIGN_OR_RETURN(
+        logits, model_builder->BatchedMatMul(q_rows, k, bmm1_attr,
+                                             /*src_exp=*/nullptr,
+                                             bmm1_runtime_check, param_tensor));
+  }
+
+  if (attr.softcap.has_value() && *attr.softcap > 0.0f) {
+    const float cap_val = *attr.softcap;
+    logits = model_builder->Multiplication(logits, 1.0f / cap_val);
+    logits =
+        model_builder->Elementwise(logits, ::ml_drift::OperationType::kTanh);
+    logits = model_builder->Multiplication(logits, cap_val);
+  }
+
+  if (mask != nullptr) {
+    const bool reshape_logits_for_mask =
+        gqa_ratio > 1 &&
+        !MaskAppliesToFoldedLogits(mask->tensor_desc.GetBHWCShape(), q_shape);
+    if (reshape_logits_for_mask) {
+      if (q_rows.tensor_desc.GetBHWCShape().w != gqa_ratio * q_shape.w) {
+        return absl::InternalError(
+            "A mask per query head needs the rows of all query heads.");
+      }
+      logits = model_builder->Reshape(
+          logits, ::ml_drift::BHWC(q_shape.b, q_shape.h, q_shape.w, k_shape.w));
+    }
+    // Both ops are elementwise, so they get fused into the epilogue of the
+    // operation producing `logits`.
+    if (mask->tensor_desc.GetDataType() == ::ml_drift::DataType::kBool) {
+      logits = SelectBoolMask(model_builder, logits, *mask);
+    } else {
+      logits = model_builder->Add(logits, *mask);
+    }
+    if (reshape_logits_for_mask) {
+      logits = model_builder->Reshape(
+          logits, ::ml_drift::BHWC(q_shape.b, k_shape.h, gqa_ratio * q_shape.w,
+                                   k_shape.w));
+    }
+  }
+
+  ::ml_drift::SoftmaxRuntimeCheckDesc softmax_runtime_check;
+  if (param_tensor != nullptr) {
+    softmax_runtime_check.end_ch_index = attr.runtime_check.src_end_ch_index;
+  }
+  ::ml_drift::ConvRuntimeCheckDesc bmm2_runtime_check;
+  if (param_tensor != nullptr) {
+    bmm2_runtime_check.src_end_ch_index = attr.runtime_check.src_end_ch_index;
+  }
+
+  if (scale_v != nullptr) {
+    // P * V with the raw int8 cache bytes as external weights, dequantized in
+    // the kernel with one scale per head_dim element (see the Q * K^T matmul
+    // above for the byte encoding).
+    auto sfmx_partial = model_builder->SoftmaxReduce(
+        logits, softmax_runtime_check, param_tensor);
+    const ::ml_drift::GpuModelBuilder::Weights bmm2_external_weights =
+        ::ml_drift::CreateExternalWeights(
+            v, attr.bmm2_weights.desc, attr.bmm2_weights.weights_shape,
+            ::ml_drift::OHWI(attr.scale_v->shape.v, 1, 1, 1), scale_v);
+    return model_builder->FullyConnectedInt8ExternalWeights(
+        logits, bmm2_external_weights, /*biases=*/nullptr, &sfmx_partial,
+        bmm2_runtime_check, param_tensor);
+  }
+  if (attr.from_cache_update) {
+    auto sfmx_partial = model_builder->SoftmaxReduce(
+        logits, softmax_runtime_check, param_tensor);
+
+    ::ml_drift::WeightsDescription bmm2_desc = attr.bmm2_weights.desc;
+    bmm2_desc.type = logits.tensor_desc.GetDataType();
+    const ::ml_drift::GpuModelBuilder::Weights bmm2_external_weights =
+        ::ml_drift::CreateExternalWeights(v, bmm2_desc,
+                                          attr.bmm2_weights.weights_shape);
+    return model_builder->FullyConnectedExternalWeights(
+        logits, bmm2_external_weights, /*biases=*/nullptr, &sfmx_partial,
+        bmm2_runtime_check, param_tensor);
+  }
+
+  auto probs =
+      model_builder->Softmax(logits, softmax_runtime_check, param_tensor);
+  ::ml_drift::BatchedMatMulAttributes bmm2_attr;
+  bmm2_attr.transpose_left = false;
+  bmm2_attr.transpose_right = true;
+  return model_builder->BatchedMatMul(probs, v, bmm2_attr, /*src_exp=*/nullptr,
+                                      bmm2_runtime_check, param_tensor);
+}
+
 }  // namespace
 
 absl::Status BuildSdpaTransposedGpuGraph(
     const std::vector<uint32_t>& input_ids, uint32_t output_id,
     const SdpaTransposedAttributes& attr,
     ::ml_drift::GpuModelBuilder* model_builder,
-    uint64_t max_decomposed_score_bytes) {
+    uint64_t max_decomposed_score_bytes,
+    uint64_t max_decomposed_score_chunk_bytes) {
   if (input_ids.size() < 3) {
     return absl::InvalidArgumentError(
         "SDPA transposed expects at least 3 inputs (Q, K, V).");
@@ -1751,15 +1914,40 @@ absl::Status BuildSdpaTransposedGpuGraph(
   const bool supports_fused_kernels =
       SupportsFusedSdpaKernels(model_builder->gpu_info());
 
+  // INT8 symmetric per-tensor quantized K/V caches arrive as kUint8 byte
+  // tensors with per-output-channel dequantization scales (see
+  // `SdpaTransposedAttributes::scale_k`). They only take the decomposed
+  // FullyConnected path below, so the fused Flash kernels are skipped.
+  const bool int8_k =
+      k.tensor_desc.GetDataType() == ::ml_drift::DataType::kUint8;
+  const bool int8_v =
+      v.tensor_desc.GetDataType() == ::ml_drift::DataType::kUint8;
+  if (int8_k != attr.scale_k.has_value() ||
+      int8_v != attr.scale_v.has_value()) {
+    return absl::InvalidArgumentError(
+        "SDPA transposed expects dequantization scales exactly for INT8 K/V "
+        "caches.");
+  }
+  if (int8_k != int8_v) {
+    return absl::InvalidArgumentError(
+        "SDPA transposed expects both or none of the K/V caches to be INT8.");
+  }
+  const bool int8_kv = int8_k && int8_v;
+  if (int8_kv && !attr.from_cache_update) {
+    return absl::InvalidArgumentError(
+        "SDPA transposed expects INT8 K/V caches in the odml.cache_update "
+        "layout.");
+  }
+
   // The fused Flash-Attention prefill kernel indexes K and V directly in the
   // packed 4D layout produced by `odml.cache_update`, so it requires
-  // `from_cache_update` and BUFFER storage. It also uses wave-matrix MMA and
-  // 32-lane wave-SIMD intrinsics covering at most 32 channel slices
+  // `from_cache_update` and float BUFFER storage. It also uses wave-matrix MMA
+  // and 32-lane wave-SIMD intrinsics covering at most 32 channel slices
   // (head_dim <= 128), and reads whole GQA groups and 4-key blocks of the
   // cache (`IsSupportedFlashPrefillShape`). Everything else falls back to the
   // multi-op graph below.
   const bool is_supported_flash_prefill =
-      attr.is_prefill && attr.from_cache_update &&
+      attr.is_prefill && attr.from_cache_update && !int8_kv &&
       IsSupportedFlashPrefillShape(q_shape, k_cache_shape) &&
       k.tensor_desc.GetStorageType() ==
           ::ml_drift::TensorStorageType::kBuffer &&
@@ -1890,117 +2078,61 @@ absl::Status BuildSdpaTransposedGpuGraph(
                             q_shape.c));
   }
 
-  ::ml_drift::GpuModelBuilder::TensorHandle logits;
-  if (attr.from_cache_update) {
-    ::ml_drift::WeightsDescription bmm1_desc = attr.bmm1_weights.desc;
-    bmm1_desc.type = q.tensor_desc.GetDataType();
-    const ::ml_drift::GpuModelBuilder::Weights bmm1_external_weights =
-        ::ml_drift::CreateExternalWeights(k, bmm1_desc,
-                                          attr.bmm1_weights.weights_shape);
-
-    ::ml_drift::ConvRuntimeCheckDesc bmm1_runtime_check;
-    if (param_desc) {
-      bmm1_runtime_check.dst_end_ch_index = attr.runtime_check.src_end_ch_index;
-    }
-
+  // The score tensor [b, kv_heads, gqa_ratio * T, keys] grows with the full
+  // cache size. Above the chunk budget of the backend
+  // (`DecomposedSdpaScoreChunkBudget`), build the graph for chunks of whole
+  // query heads of every GQA group, which a mask shared by the query heads
+  // applies to unchanged, and concatenate their outputs. The score tensors of
+  // the chunks are live one after the other, so the memory planner gives them
+  // one chunk-sized buffer. The chunks are sized by the bytes live per score
+  // element: the logits in the query data type, plus the probabilities on
+  // plain K/V tensors. A mask per query head needs the logits of all heads
+  // unfolded, so it keeps a single chunk.
+  const int num_chunks =
+      (mask_desc == nullptr ||
+       MaskAppliesToFoldedLogits(mask.tensor_desc.GetBHWCShape(), q_shape))
+          ? NumDecomposedSdpaScoreChunks(
+                q_shape, k_shape,
+                DecomposedSdpaScoreChunkBudget(
+                    model_builder->gpu_info(), max_decomposed_score_bytes,
+                    max_decomposed_score_chunk_bytes),
+                DecomposedSdpaBytesPerScore(q.tensor_desc.GetDataType(),
+                                            attr.from_cache_update))
+          : 1;
+  const int chunk_rows = gqa_ratio / num_chunks * q_shape.w;
+  // The dequantization scales of INT8 K/V caches, shared by all chunks. The
+  // matmuls output the query data type, so both scales use it.
+  ::ml_drift::GpuModelBuilder::TensorHandle scale_k;
+  ::ml_drift::GpuModelBuilder::TensorHandle scale_v;
+  if (int8_kv) {
+    scale_k = model_builder->AddConstantTensor(*attr.scale_k,
+                                               q.tensor_desc.GetDataType());
+    scale_v = model_builder->AddConstantTensor(*attr.scale_v,
+                                               q.tensor_desc.GetDataType());
+  }
+  std::vector<::ml_drift::GpuModelBuilder::TensorHandle> chunk_outputs;
+  chunk_outputs.reserve(num_chunks);
+  for (int chunk = 0; chunk < num_chunks; ++chunk) {
+    const ::ml_drift::GpuModelBuilder::TensorHandle q_rows =
+        num_chunks == 1
+            ? q_for_bmm1
+            : model_builder->SubTensor(
+                  q_for_bmm1, ::ml_drift::BHWC(0, 0, chunk * chunk_rows, 0),
+                  ::ml_drift::BHWC(q_shape.b, k_shape.h, chunk_rows,
+                                   q_shape.c));
     ABSL_ASSIGN_OR_RETURN(
-        logits, model_builder->FullyConnectedExternalWeights(
-                    q_for_bmm1, bmm1_external_weights, /*biases=*/nullptr,
-                    /*src_exp=*/nullptr, bmm1_runtime_check,
-                    param_desc ? &param_tensor : nullptr));
-  } else {
-    ::ml_drift::BatchedMatMulAttributes bmm1_attr;
-    bmm1_attr.transpose_left = false;
-    bmm1_attr.transpose_right = true;
-    ::ml_drift::ConvRuntimeCheckDesc bmm1_runtime_check;
-    if (param_desc) {
-      bmm1_runtime_check.dst_end_ch_index = attr.runtime_check.src_end_ch_index;
-    }
-    ABSL_ASSIGN_OR_RETURN(
-        logits, model_builder->BatchedMatMul(
-                    q_for_bmm1, k, bmm1_attr, /*src_exp=*/nullptr,
-                    bmm1_runtime_check, param_desc ? &param_tensor : nullptr));
+        auto chunk_output,
+        BuildDecomposedSdpa(attr, q_shape, q_rows, k, v,
+                            mask_desc != nullptr ? &mask : nullptr,
+                            param_desc != nullptr ? &param_tensor : nullptr,
+                            int8_kv ? &scale_k : nullptr,
+                            int8_kv ? &scale_v : nullptr, model_builder));
+    chunk_outputs.push_back(chunk_output);
   }
-
-  if (attr.softcap.has_value() && *attr.softcap > 0.0f) {
-    const float cap_val = *attr.softcap;
-    logits = model_builder->Multiplication(logits, 1.0f / cap_val);
-    logits =
-        model_builder->Elementwise(logits, ::ml_drift::OperationType::kTanh);
-    logits = model_builder->Multiplication(logits, cap_val);
-  }
-
-  if (mask_desc != nullptr) {
-    const auto mask_shape = mask.tensor_desc.GetBHWCShape();
-    // With GQA the logits are folded to [b, kv_heads, gqa_ratio * T, keys]. A
-    // [*, 1, T, keys] (or [*, 1, 1, keys]) mask applies to them directly: the
-    // elementwise width broadcast reads mask row `w % T`, the query token of
-    // folded row `w`. Other layouts (e.g. a mask per query head) need the
-    // logits unfolded to [b, heads, T, keys].
-    const bool mask_applies_to_folded_logits =
-        mask_shape.h == 1 && (mask_shape.w == 1 || mask_shape.w == q_shape.w);
-    const bool reshape_logits_for_mask =
-        gqa_ratio > 1 && !mask_applies_to_folded_logits;
-    if (reshape_logits_for_mask) {
-      logits = model_builder->Reshape(
-          logits, ::ml_drift::BHWC(q_shape.b, q_shape.h, q_shape.w, k_shape.w));
-    }
-    // Both ops are elementwise, so they get fused into the epilogue of the
-    // operation producing `logits`.
-    if (mask.tensor_desc.GetDataType() == ::ml_drift::DataType::kBool) {
-      logits = SelectBoolMask(model_builder, logits, mask);
-    } else {
-      logits = model_builder->Add(logits, mask);
-    }
-    if (reshape_logits_for_mask) {
-      logits = model_builder->Reshape(
-          logits, ::ml_drift::BHWC(q_shape.b, k_shape.h, gqa_ratio * q_shape.w,
-                                   k_shape.w));
-    }
-  }
-
-  ::ml_drift::SoftmaxRuntimeCheckDesc softmax_runtime_check;
-  if (param_desc) {
-    softmax_runtime_check.end_ch_index = attr.runtime_check.src_end_ch_index;
-  }
-
-  ::ml_drift::GpuModelBuilder::TensorHandle output;
-  if (attr.from_cache_update) {
-    auto sfmx_partial = model_builder->SoftmaxReduce(
-        logits, softmax_runtime_check, param_desc ? &param_tensor : nullptr);
-
-    ::ml_drift::WeightsDescription bmm2_desc = attr.bmm2_weights.desc;
-    bmm2_desc.type = logits.tensor_desc.GetDataType();
-    const ::ml_drift::GpuModelBuilder::Weights bmm2_external_weights =
-        ::ml_drift::CreateExternalWeights(v, bmm2_desc,
-                                          attr.bmm2_weights.weights_shape);
-
-    ::ml_drift::ConvRuntimeCheckDesc bmm2_runtime_check;
-    if (param_desc) {
-      bmm2_runtime_check.src_end_ch_index = attr.runtime_check.src_end_ch_index;
-    }
-
-    ABSL_ASSIGN_OR_RETURN(
-        output,
-        model_builder->FullyConnectedExternalWeights(
-            logits, bmm2_external_weights, /*biases=*/nullptr, &sfmx_partial,
-            bmm2_runtime_check, param_desc ? &param_tensor : nullptr));
-  } else {
-    auto probs = model_builder->Softmax(logits, softmax_runtime_check,
-                                        param_desc ? &param_tensor : nullptr);
-
-    ::ml_drift::BatchedMatMulAttributes bmm2_attr;
-    bmm2_attr.transpose_left = false;
-    bmm2_attr.transpose_right = true;
-    ::ml_drift::ConvRuntimeCheckDesc bmm2_runtime_check;
-    if (param_desc) {
-      bmm2_runtime_check.src_end_ch_index = attr.runtime_check.src_end_ch_index;
-    }
-    ABSL_ASSIGN_OR_RETURN(
-        output, model_builder->BatchedMatMul(
-                    probs, v, bmm2_attr, /*src_exp=*/nullptr,
-                    bmm2_runtime_check, param_desc ? &param_tensor : nullptr));
-  }
+  ::ml_drift::GpuModelBuilder::TensorHandle output =
+      num_chunks == 1
+          ? chunk_outputs[0]
+          : model_builder->Concat(chunk_outputs, ::ml_drift::Axis::kWidth);
 
   ABSL_ASSIGN_OR_RETURN(auto output_ref, model_builder->GetTensor(output_id));
   const auto output_shape = output_ref.tensor_desc.GetBHWCShape();

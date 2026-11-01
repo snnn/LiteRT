@@ -44,6 +44,7 @@ cc_library(
         "@ml_drift//ml_drift/common:shape",
         "@ml_drift//ml_drift/common:tensor",
         "@ml_drift//ml_drift/common:types",
+        "@ml_drift//ml_drift/common:util",
         "@ml_drift//ml_drift/common/task:tensor_desc",
         "@opencl_headers",
     ],
@@ -55,6 +56,7 @@ cc_library(
     hdrs = ["arithmetic_ml_drift.h"],
     deps = [
         ":ml_drift_helpers",
+        "//ml_drift_delegate/delegate/composite:tiled_quantized_fully_connected_kernel",
         "//tensor",
         "//tensor:arithmetic",
         "//tensor:arithmetic_graph",
@@ -64,6 +66,7 @@ cc_library(
         "//tensor/internal:mixin",
         "//tensor/internal:type_id",
         "//tensor/utils:macros",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -77,7 +80,6 @@ cc_library(
         "@ml_drift//ml_drift/common:tensor",
         "@ml_drift//ml_drift/common/kernels:elementwise",
         "@ml_drift//ml_drift/common/kernels:embedding_lookup",
-        "@ml_drift//ml_drift/common/kernels:fully_connected",
         "@ml_drift//ml_drift/common/kernels:one_hot",
         "@ml_drift//ml_drift/common/kernels:prelu",
         "@ml_drift//ml_drift/common/kernels:reduce",
@@ -114,6 +116,7 @@ cc_library(
         "@ml_drift//ml_drift/common:precision",
         "@ml_drift//ml_drift/common:shape",
         "@ml_drift//ml_drift/common:tensor",
+        "@ml_drift//ml_drift/common:util",
     ],
 )
 
@@ -171,6 +174,7 @@ cc_test(
         "@ml_drift//ml_drift/common:precision",
         "@ml_drift//ml_drift/common:shape",
         "@ml_drift//ml_drift/common:tensor",
+        "@ml_drift//ml_drift/common:util",
         "@ml_drift//ml_drift/common/task:tensor_desc",
         "@ml_drift//ml_drift/common/task:weights_conversion",
     ],
@@ -218,6 +222,7 @@ cc_test(
         "@ml_drift//ml_drift/common:precision",
         "@ml_drift//ml_drift/common:shape",
         "@ml_drift//ml_drift/common:tensor",
+        "@ml_drift//ml_drift/common:util",
         "@ml_drift//ml_drift/common/task:tensor_desc",
     ],
 )

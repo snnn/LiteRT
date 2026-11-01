@@ -9,7 +9,6 @@ package(
     # copybara:uncomment default_applicable_licenses = ["//third_party/odml:license"],
     default_visibility = [
         "//litert:litert_internal_users",
-        "//third_party/odml/litert_lm:__subpackages__",
     ],
 )
 
@@ -63,6 +62,7 @@ cc_library(
         "@ml_drift//ml_drift/cl:memory_manager",
         "@ml_drift//ml_drift/cl:opencl_wrapper",
         "@ml_drift//ml_drift/cl:tensor",
+        "@ml_drift//ml_drift/cl:util",
         "@ml_drift//ml_drift/common:data_type",
         "@ml_drift//ml_drift/common:gpu_info",
         "@ml_drift//ml_drift/common:gpu_model",
@@ -358,7 +358,7 @@ objc_library(
     hdrs = ["gpu_backend_metal_litert.h"],
     # Required to prevent build errors when this target is reachable from the
     # deps of a Swift target.
-    aspect_hints = ["//tools/build_defs/swift:no_module"],
+    # copybara:uncomment(//tools/build_defs/swift:no_module is google-only) aspect_hints = ["//tools/build_defs/swift:no_module"],
     deps = [
         ":custom_event_metal",
         ":delegate_options",
@@ -751,6 +751,7 @@ cc_library(
         "//tflite/c:c_api_types",
         "//tflite/c:common",
         "//tflite/profiling:time",
+        "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/log:absl_log",
@@ -779,7 +780,6 @@ cc_library(
     name = "gpu_environment_util",
     srcs = ["gpu_environment_util.cc"],
     hdrs = ["gpu_environment_util.h"],
-    visibility = ["//third_party/odml/litert_lm:__subpackages__"],
     deps = [
         ":shared_vulkan_env",
         "//litert/c:litert_common",
@@ -952,7 +952,7 @@ objc_library(
     srcs = ["delegate_metal.mm"],
     # Required to prevent build errors when this target is reachable from the
     # deps of a Swift target.
-    aspect_hints = ["//tools/build_defs/swift:no_module"],
+    # copybara:uncomment(//tools/build_defs/swift:no_module is google-only) aspect_hints = ["//tools/build_defs/swift:no_module"],
     visibility = ["//litert:__subpackages__"],
     deps = [
         ":delegate_data",
@@ -1007,7 +1007,7 @@ objc_library(
     name = "buffer_handler_metal",
     srcs = ["buffer_handler_metal.mm"],
     # Required to prevent build errors when this target is reachable from the deps of Swift targets.
-    aspect_hints = ["//tools/build_defs/swift:no_module"],
+    # copybara:uncomment(//tools/build_defs/swift:no_module is google-only) aspect_hints = ["//tools/build_defs/swift:no_module"],
     deps = [
         ":buffer_handler_metal_headers",
         ":buffer_handler_utils",
@@ -1223,7 +1223,7 @@ objc_library(
     srcs = ["custom_event_metal.mm"],
     hdrs = ["custom_event_metal.h"],
     # Required to prevent build errors when this target is reachable from the deps of Swift targets.
-    aspect_hints = ["//tools/build_defs/swift:no_module"],
+    # copybara:uncomment(//tools/build_defs/swift:no_module is google-only) aspect_hints = ["//tools/build_defs/swift:no_module"],
     copts = ["-ObjC++"],
     deps = [
         # Dependency placeholder: apple_frameworks Metal,
@@ -1240,8 +1240,14 @@ objc_library(
 #     ],
 #     deps = [
 #         ":delegate_opencl",
+#         ":gpu_backend_opencl",
 #         "@com_google_googletest//:gtest_main",
 #         "@com_google_absl//absl/cleanup",
+#         "@com_google_absl//absl/status",
+#         "@com_google_absl//absl/types:span",
+#         "@ml_drift//ml_drift/cl:environment",
+#         "@ml_drift//ml_drift/cl:opencl_wrapper",
+#         "@ml_drift//ml_drift/common:data_type",
 #         "//third_party/odml/infra/ml_drift_delegate/testdata:simple_add",
 #         "//litert/c:litert_common",
 #         "//litert/c:litert_environment",
@@ -1378,6 +1384,7 @@ cc_test(
         "//litert/experimental/custom_ops/gated_delta_net:gated_delta_update_tflite_op",
         "//tflite/c:common",
         "@com_google_absl//absl/time",
+        "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest_main",
     ] + litert_gpu_accelerator_deps(),
 )

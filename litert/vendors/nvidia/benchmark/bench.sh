@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Copyright 2026 The ODML Authors. Licensed under the Apache License, Version 2.0.
-# One measurement = one run of the unchanged LiteRT-LM advanced CLI in benchmark mode on the
+# One measurement = one run of the LiteRT-LM advanced CLI in benchmark mode on the
 # NVIDIA (TensorRT-RTX) backend. The CLI's own benchmark report is the data; this script only
 # chooses the flags of a workload, keeps the run's files together and samples the GPU memory
 # with nvidia-smi for the memory metric. report.py turns run directories into tables.
 #
 # usage: bench.sh --model e2b|e4b|12b|26b|FILE --out DIR [options]
-#   --workload short|8k|16k|30k|32k|128k  prefill tokens / decode tokens / context (default short;
+#   --workload short|8k|16k|30k|32k|128k|256k  prefill tokens / decode tokens / context (default short;
 #                                         1,024-token prefill batches throughout)
 #   --metric latency|memory|verify|cold   latency: the benchmark (default); memory: one benchmark
 #                                         iteration with GPU sampling and the CLI's peak RSS;
@@ -17,6 +17,7 @@
 #   --prompt-file FILE                    prefill the file's text instead of synthetic tokens
 #                                         and decode the model's answer, at most the workload's
 #                                         decode tokens (acceptance needs real text)
+#   --context N                           override the workload context capacity (input plus output)
 #   --iterations N                        benchmark iterations (default by workload)
 #   --label NAME                          run directory name under --out (default derived)
 #   --pool DIR                            model cache pool (default: by model and build id)
@@ -28,7 +29,7 @@ set -euo pipefail
 source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/env.sh"
 nb_resolve_paths
 
-model_arg= out= workload=short metric=latency mtp=false prompt_file= iterations= label= pool= extra=() env_extra=()
+model_arg= out= workload=short metric=latency mtp=false prompt_file= iterations= context_override= label= pool= extra=() env_extra=()
 while (($#)); do
   case "$1" in
     --model) model_arg=$2; shift 2 ;;
@@ -38,16 +39,20 @@ while (($#)); do
     --mtp) mtp=true; shift ;;
     --prompt-file) prompt_file=$(realpath "$2"); shift 2 ;;
     --iterations) iterations=$2; shift 2 ;;
+    --context) context_override=$2; shift 2 ;;
     --label) label=$2; shift 2 ;;
     --pool) pool=$2; shift 2 ;;
     --cli-arg) extra+=("$2"); shift 2 ;;
     --env) env_extra+=("$2"); shift 2 ;;
-    -h|--help) sed -n '3,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '3,27p' "$0"; exit 0 ;;
     *) nb_die "Unknown option $1" ;;
   esac
 done
 [[ -n $model_arg && -n $out ]] || nb_die "--model and --out are required"
-[[ $workload =~ ^(short|8k|16k|30k|32k|128k)$ ]] || nb_die "Invalid workload"
+if [[ -n $prompt_file ]]; then
+  [[ -f $prompt_file && -r $prompt_file ]] || nb_die "Cannot read prompt file: $prompt_file"
+fi
+[[ $workload =~ ^(short|8k|16k|30k|32k|128k|256k)$ ]] || nb_die "Invalid workload"
 [[ $metric =~ ^(latency|memory|verify|cold)$ ]] || nb_die "Invalid metric"
 model=$(nb_model_file "$model_arg")
 profile=$model_arg; [[ $profile =~ ^(e2b|e4b|12b|26b)$ ]] || profile=$(basename "${model%.litertlm}")
@@ -64,11 +69,30 @@ case "$workload" in
   30k) input=30720 output=256 context=31744 default_iterations=4 warmups=1 prefill=1024 ;;
   32k) input=32768 output=256 context=33792 default_iterations=4 warmups=1 prefill=1024 ;;
   128k) input=128001 output=128 context=130048 default_iterations=4 warmups=1 prefill=1024 ;;
+  256k) input=256001 output=128 context=262144 default_iterations=4 warmups=1 prefill=1024 ;;
 esac
+if [[ -n $context_override ]]; then
+  [[ $context_override =~ ^[1-9][0-9]*$ ]] || nb_die "--context must be a positive integer"
+  context=$context_override
+fi
 iterations=${iterations:-$default_iterations}
+# Under MTP the decode engine runs once per conversation (the priming step), so its second run,
+# where TensorRT-RTX captures its CUDA graph (a one-time cost that grows with the context), is
+# the second conversation: the report skips two.
+[[ $mtp == false || $warmups -ge 2 ]] || warmups=2
 [[ $metric != memory && $metric != cold ]] || { iterations=1; warmups=0; }
 mode=plain; [[ $mtp == false ]] || mode=mtp
 label=${label:-${profile}_${workload}_${mode}_${metric}}
+# The host's clocks (clock_check.py beside this script: the kernel tick and frequency, the monotonic
+# clock's rate against the raw clock over 3 s): recorded with the run; a formal or idle-verified run
+# refuses a clock that is not fit, since the CLI's rates are read on the monotonic clock.
+NB_HOST_CLOCK=$(python3 "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/clock_check.py" 3) || {
+  case ${CI_HOST_MODE:-unspecified} in
+    formal|idle-verified) nb_die "The host's clock is not fit for a $CI_HOST_MODE run: $NB_HOST_CLOCK" ;;
+    *) echo "Warning: the host's clock is not fit: $NB_HOST_CLOCK" >&2 ;;
+  esac
+}
+export NB_HOST_CLOCK
 run=$out/$label
 mkdir -p "$run"
 build_id=$(nb_build_id)
@@ -140,9 +164,13 @@ meta = {
   'input_tokens': int(os.environ['NB_INPUT']), 'output_tokens': int(os.environ['NB_OUTPUT']), 'context': int(os.environ['NB_CONTEXT']),
   'iterations': int(os.environ['NB_ITERATIONS']), 'warmups': int(os.environ['NB_WARMUPS']),
   'build_id': os.environ['NB_BUILD_ID'], 'pool': os.environ['NB_POOL'], 'command': command, 'exit_code': int(rc),
+  'host_mode': os.environ.get('CI_HOST_MODE', 'unspecified'),
+  'host_clock': json.loads(os.environ['NB_HOST_CLOCK']) if os.environ.get('NB_HOST_CLOCK') else None,
   'start': start, 'end': end, 'gpu_baseline_mib': int(baseline),
   'environment': {k: v for k, v in os.environ.items() if k.startswith('LITERT_NVIDIA_')},
   'binaries': {n: sha(os.path.realpath(os.path.join(libs, n))) for n in ('libLiteRtCompilerPlugin_Nvidia.so', 'libLiteRtDispatch_Nvidia.so', 'litert_lm_advanced_main')},
+  # The build the binaries came from (build.sh's stamp), beside the checkout's build_id.
+  'binaries_build_id': open(os.path.join(libs, 'BUILD_ID')).read().strip() if os.path.exists(os.path.join(libs, 'BUILD_ID')) else None,
   'sources': {k: os.environ[k] for k in ('NB_RT', 'NB_LM')},
 }
 json.dump(meta, open(meta_path, 'w'), indent=1)

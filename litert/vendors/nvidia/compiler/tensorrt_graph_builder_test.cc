@@ -1162,13 +1162,350 @@ TEST(TensorRtGraphBuilderTest, CudaGemmForManyActivationRows) {
         }
         // BF16 results: about 2e-3 of the norm of a row for one rounding, two
         // more for the matmul lowering of the gate (its factors are BF16).
-        EXPECT_LE(std::sqrt(error), 6.0e-3 * std::sqrt(norm))
+        // The CUDA GEMM runs on the int8 tensor cores by default, with the
+        // activations quantized per row: within 1e-2 of the norm on
+        // subbyte_gemm_int8_test's data (4e-3 to 9e-3 measured), and up to
+        // 1.9e-2 on three rows of 6,144 here, where the gated product
+        // compounds the errors of two int8 products (the GELU's knee).
+        EXPECT_LE(std::sqrt(error), (gemm ? 2.0e-2 : 6.0e-3) * std::sqrt(norm))
             << "output=" << i << " row=" << m;
       }
       EXPECT_EQ(cudaFree(device_outputs[i]), cudaSuccess);
     }
     EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
     EXPECT_EQ(cudaFree(device_input), cudaSuccess);
+  }
+}
+
+TEST(TensorRtGraphBuilderTest, CudaGemmReadsThePrefillPositions) {
+  // LiteRT-LM pads a prefill chunk past its tokens with rows at position 0,
+  // whose activations hold whatever their attention averaged from the cache.
+  // With the signature's positions input the GEMM's int8 path chooses its
+  // outlier dims over the chunk's rows (the plugin's default), so the chunk's
+  // results do not depend on the padding. Without the input, or with
+  // LITERT_NVIDIA_GEMM_INT8_REAL_ROWS=0, loud padding changes them: the
+  // target tensorrt_graph_builder_real_rows_off_test builds this file with
+  // LITERT_NVIDIA_TEST_REAL_ROWS_OFF and runs this test with the switch at 0
+  // (the plugin reads it once per process).
+#ifdef LITERT_NVIDIA_TEST_REAL_ROWS_OFF
+  ASSERT_STREQ(std::getenv("LITERT_NVIDIA_GEMM_INT8_REAL_ROWS"), "0")
+      << "the target sets the switch";
+  constexpr bool kRealRows = false;
+#else
+  constexpr bool kRealRows = true;
+#endif
+  constexpr int32_t kM = 1024;
+  constexpr int32_t kK = 256;
+  constexpr int32_t kChunk = 900;
+  constexpr int32_t kStart = 5000;
+  const int32_t tiles = ColumnTilesThatFillTheDevice();
+  ASSERT_GT(tiles, 0);
+  const int32_t channels = tiles * 128;
+  for (const bool positions : {true, false}) {
+    SCOPED_TRACE(testing::Message() << "positions=" << positions);
+    LiteRtModelT model;
+    auto& graph = model.EmplaceSubgraph();
+    const auto tensor =
+        [&](const char* name, LiteRtElementType type,
+            const std::vector<int32_t>& dims) -> LiteRtTensorT& {
+      auto& value = graph.EmplaceTensor();
+      value.SetName(name);
+      value.SetType(MakeRankedTensorType(type, dims));
+      return value;
+    };
+    auto& input =
+        tensor("prefill_1024_embeddings", kLiteRtElementTypeFloat32, {kM, kK});
+    graph.Inputs().push_back(&input);
+    if (positions) {
+      graph.Inputs().push_back(
+          &tensor("prefill_1024_input_pos", kLiteRtElementTypeInt32, {kM}));
+    }
+    std::vector<int8_t> values(static_cast<size_t>(channels) * kK);
+    for (size_t i = 0; i < values.size(); ++i) {
+      values[i] = static_cast<int8_t>((i * 5 + i / 7) % 16) - 8;
+    }
+    const std::vector<uint8_t> packed = PackInt4(values);
+    auto& weight = tensor("projection", kLiteRtElementTypeInt4, {channels, kK});
+    SetWeightsFromUnownedBuffer(
+        weight.Weights(),
+        litert::BufferRef<uint8_t>(packed.data(), packed.size()));
+    std::vector<float> scales(channels);
+    for (int32_t n = 0; n < channels; ++n) scales[n] = 0.002f * (1 + n % 5);
+    const std::vector<int64_t> zero_points(channels, 0);
+    weight.SetQarams(MakePerChannelQuantization(scales, zero_points,
+                                                /*quantized_dim=*/0, weight));
+    auto& output = tensor("prefill_1024_projected", kLiteRtElementTypeFloat32,
+                          {kM, channels});
+    graph.Outputs().push_back(&output);
+    auto& fc = graph.EmplaceOp();
+    fc.SetOpCode(kLiteRtOpCodeTflFullyConnected);
+    tflite::FullyConnectedOptionsT fc_options;
+    fc_options.keep_num_dims = true;
+    tflite::BuiltinOptionsUnion options;
+    options.Set(std::move(fc_options));
+    litert::internal::SetTflOptions(fc, std::move(options));
+    litert::internal::AttachInput(&input, fc);
+    litert::internal::AttachInput(&weight, fc);
+    litert::internal::AttachOutput(&output, fc);
+
+    setenv("LITERT_NVIDIA_TENSORRT_PREDEQUANTIZE_FC_WEIGHTS", "cuda_gemv", 1);
+    auto built = litert::nvidia::BuildTensorRtEngine(
+        litert::compiler::Subgraph(LrtGetCompilerContext(), &graph));
+    unsetenv("LITERT_NVIDIA_TENSORRT_PREDEQUANTIZE_FC_WEIGHTS");
+    ASSERT_TRUE(built.HasValue()) << built.Error().Message();
+    ASSERT_EQ(built->input_names.size(), positions ? 2u : 1u);
+    litert::nvidia::TensorRtLogger logger;
+    std::unique_ptr<nvinfer1::IRuntime> runtime(
+        nvinfer1::createInferRuntime(logger));
+    ASSERT_NE(runtime, nullptr);
+    std::unique_ptr<nvinfer1::ICudaEngine> engine(
+        runtime->deserializeCudaEngine(built->engine.data(),
+                                       built->engine.size()));
+    ASSERT_NE(engine, nullptr);
+    std::unique_ptr<nvinfer1::IExecutionContext> context(
+        engine->createExecutionContext());
+    ASSERT_NE(context, nullptr);
+
+    // The chunk's rows, with massive activations in a few dims, and loud
+    // padding (32 dims, as many as the outlier set holds) or zero padding.
+    std::vector<int32_t> rows_positions(kM, 0);
+    for (int32_t r = 0; r < kChunk; ++r) rows_positions[r] = kStart + r;
+    const auto run = [&](bool loud) {
+      std::vector<float> activations(static_cast<size_t>(kM) * kK);
+      uint32_t state = 99u;
+      for (size_t i = 0; i < activations.size(); ++i) {
+        state = state * 1664525u + 1013904223u;
+        float value =
+            static_cast<float>((state >> 8) & 0xFFFF) / 65535.0f * 4.0f - 2.0f;
+        const int32_t row = static_cast<int32_t>(i / kK);
+        const int32_t k = static_cast<int32_t>(i % kK);
+        if (row < kChunk) {
+          if (k % 61 == 7) value *= 40.0f;
+        } else {
+          value = loud && k % 8 == 5 ? 900.0f * value : 0.0f;
+        }
+        activations[i] = value;
+      }
+      std::vector<float> result(static_cast<size_t>(kM) * channels);
+      void* device_input = nullptr;
+      void* device_positions = nullptr;
+      void* device_output = nullptr;
+      EXPECT_EQ(cudaMalloc(&device_input, activations.size() * sizeof(float)),
+                cudaSuccess);
+      EXPECT_EQ(cudaMalloc(&device_positions, kM * sizeof(int32_t)),
+                cudaSuccess);
+      EXPECT_EQ(cudaMalloc(&device_output, result.size() * sizeof(float)),
+                cudaSuccess);
+      EXPECT_EQ(cudaMemcpy(device_input, activations.data(),
+                           activations.size() * sizeof(float),
+                           cudaMemcpyHostToDevice),
+                cudaSuccess);
+      EXPECT_EQ(cudaMemcpy(device_positions, rows_positions.data(),
+                           kM * sizeof(int32_t), cudaMemcpyHostToDevice),
+                cudaSuccess);
+      EXPECT_TRUE(context->setTensorAddress(built->input_names[0].c_str(),
+                                            device_input));
+      if (positions) {
+        EXPECT_TRUE(context->setTensorAddress(built->input_names[1].c_str(),
+                                              device_positions));
+      }
+      EXPECT_TRUE(context->setTensorAddress(built->output_names[0].c_str(),
+                                            device_output));
+      cudaStream_t stream = nullptr;
+      EXPECT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+      EXPECT_TRUE(context->enqueueV3(stream));
+      EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+      EXPECT_EQ(
+          cudaMemcpy(result.data(), device_output,
+                     result.size() * sizeof(float), cudaMemcpyDeviceToHost),
+          cudaSuccess);
+      EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+      EXPECT_EQ(cudaFree(device_input), cudaSuccess);
+      EXPECT_EQ(cudaFree(device_positions), cudaSuccess);
+      EXPECT_EQ(cudaFree(device_output), cudaSuccess);
+      return result;
+    };
+    const std::vector<float> loud = run(true);
+    const std::vector<float> quiet = run(false);
+    size_t differences = 0;
+    for (size_t i = 0; i < static_cast<size_t>(kChunk) * channels; ++i) {
+      differences += std::memcmp(&loud[i], &quiet[i], sizeof(float)) != 0;
+    }
+    if (positions && kRealRows) {
+      EXPECT_EQ(differences, 0u);
+    } else {
+      EXPECT_GT(differences, 0u);
+    }
+  }
+}
+
+TEST(TensorRtGraphBuilderTest, NormBehindCastsFusesOnlyWhenAsked) {
+  // The Gemma 4 12B wraps each RMS norm in casts (float16 to float32 and
+  // back) before an INT4 projection. By default the fusion stops at the
+  // cast and the engine keeps TensorRT's norm; with
+  // LITERT_NVIDIA_TENSORRT_NORM_THROUGH_CASTS=1 the GEMV plugin reads the
+  // norm's input and applies the norm itself, and TensorRT drops its own.
+  // Either way the projection is the normed input's.
+  constexpr int32_t kK = 256;
+  constexpr int32_t kN = 64;
+  std::vector<float> gains(kK);
+  for (int32_t k = 0; k < kK; ++k) gains[k] = 1.0f + 0.0625f * (k % 5);
+  std::vector<int8_t> values(static_cast<size_t>(kN) * kK);
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = static_cast<int8_t>((i * 7 + i / 13) % 16) - 8;
+  }
+  const std::vector<uint8_t> packed = PackInt4(values);
+  std::vector<float> scales(kN);
+  for (int32_t n = 0; n < kN; ++n) scales[n] = 0.01f * (1 + n % 3);
+  const std::vector<int64_t> zero_points(kN, 0);
+  // BF16-exact activations, one of them loud.
+  std::vector<float> activations(kK);
+  for (int32_t k = 0; k < kK; ++k) {
+    activations[k] = 0.25f * ((k % 9) - 4) + (k == 17 ? 24.0f : 0.0f);
+  }
+  double sum_squares = 0.0;
+  for (const float a : activations) {
+    sum_squares += static_cast<double>(a) * a;
+  }
+  const double inverse_rms = 1.0 / std::sqrt(sum_squares / kK + 1e-6);
+  std::vector<double> expected(kN, 0.0);
+  for (int32_t n = 0; n < kN; ++n) {
+    for (int32_t k = 0; k < kK; ++k) {
+      expected[n] += activations[k] * inverse_rms * gains[k] *
+                     values[static_cast<size_t>(n) * kK + k] * scales[n];
+    }
+  }
+  for (const bool through : {false, true}) {
+    SCOPED_TRACE(testing::Message() << "through=" << through);
+    LiteRtModelT model;
+    auto& graph = model.EmplaceSubgraph();
+    const auto tensor =
+        [&](const char* name, LiteRtElementType type,
+            const std::vector<int32_t>& dims) -> LiteRtTensorT& {
+      auto& value = graph.EmplaceTensor();
+      value.SetName(name);
+      value.SetType(MakeRankedTensorType(type, dims));
+      return value;
+    };
+    const auto cast = [&](LiteRtTensorT& from, LiteRtTensorT& to) {
+      auto& op = graph.EmplaceOp();
+      op.SetOpCode(kLiteRtOpCodeTflCast);
+      litert::internal::AttachInput(&from, op);
+      litert::internal::AttachOutput(&to, op);
+    };
+    auto& input = tensor("input", kLiteRtElementTypeFloat16, {1, kK});
+    graph.Inputs().push_back(&input);
+    auto& wide = tensor("wide", kLiteRtElementTypeFloat32, {1, kK});
+    cast(input, wide);
+    auto& gain = tensor("gain", kLiteRtElementTypeFloat32, {kK});
+    SetWeightsFromUnownedBuffer(
+        gain.Weights(), litert::BufferRef<uint8_t>(
+                            reinterpret_cast<const uint8_t*>(gains.data()),
+                            gains.size() * sizeof(float)));
+    auto& normed = tensor("normed", kLiteRtElementTypeFloat32, {1, kK});
+    auto& norm = graph.EmplaceOp();
+    norm.SetOpCode(kLiteRtOpCodeShloComposite);
+    tflite::StableHLOCompositeOptionsT composite;
+    composite.name = "odml.rms_norm";
+    flexbuffers::Builder attributes;
+    const auto map = attributes.StartMap();
+    attributes.Float("epsilon", 1e-6f);
+    attributes.EndMap(map);
+    attributes.Finish();
+    composite.composite_attributes = attributes.GetBuffer();
+    tflite::BuiltinOptions2Union norm_options;
+    norm_options.Set(std::move(composite));
+    litert::internal::SetTflOptions2(norm, std::move(norm_options));
+    litert::internal::AttachInput(&wide, norm);
+    litert::internal::AttachInput(&gain, norm);
+    litert::internal::AttachOutput(&normed, norm);
+    auto& narrow = tensor("narrow", kLiteRtElementTypeFloat16, {1, kK});
+    cast(normed, narrow);
+    auto& weights = tensor("weights", kLiteRtElementTypeInt4, {kN, kK});
+    SetWeightsFromUnownedBuffer(
+        weights.Weights(),
+        litert::BufferRef<uint8_t>(packed.data(), packed.size()));
+    weights.SetQarams(MakePerChannelQuantization(scales, zero_points,
+                                                 /*quantized_dim=*/0, weights));
+    auto& output = tensor("output", kLiteRtElementTypeFloat16, {1, kN});
+    graph.Outputs().push_back(&output);
+    auto& fc = graph.EmplaceOp();
+    fc.SetOpCode(kLiteRtOpCodeTflFullyConnected);
+    tflite::FullyConnectedOptionsT fc_options;
+    fc_options.keep_num_dims = true;
+    tflite::BuiltinOptionsUnion fc_union;
+    fc_union.Set(std::move(fc_options));
+    litert::internal::SetTflOptions(fc, std::move(fc_union));
+    litert::internal::AttachInput(&narrow, fc);
+    litert::internal::AttachInput(&weights, fc);
+    litert::internal::AttachOutput(&output, fc);
+
+    if (through) {
+      setenv("LITERT_NVIDIA_TENSORRT_NORM_THROUGH_CASTS", "1", 1);
+    } else {
+      unsetenv("LITERT_NVIDIA_TENSORRT_NORM_THROUGH_CASTS");
+    }
+    setenv("LITERT_NVIDIA_TENSORRT_PREDEQUANTIZE_FC_WEIGHTS", "cuda_gemv", 1);
+    auto built = litert::nvidia::BuildTensorRtEngine(
+        litert::compiler::Subgraph(LrtGetCompilerContext(), &graph));
+    unsetenv("LITERT_NVIDIA_TENSORRT_PREDEQUANTIZE_FC_WEIGHTS");
+    unsetenv("LITERT_NVIDIA_TENSORRT_NORM_THROUGH_CASTS");
+    ASSERT_TRUE(built.HasValue()) << built.Error().Message();
+    litert::nvidia::TensorRtLogger logger;
+    std::unique_ptr<nvinfer1::IRuntime> runtime(
+        nvinfer1::createInferRuntime(logger));
+    ASSERT_NE(runtime, nullptr);
+    std::unique_ptr<nvinfer1::ICudaEngine> engine(
+        runtime->deserializeCudaEngine(built->engine.data(),
+                                       built->engine.size()));
+    ASSERT_NE(engine, nullptr);
+    std::unique_ptr<nvinfer1::IEngineInspector> inspector(
+        engine->createEngineInspector());
+    ASSERT_NE(inspector, nullptr);
+    const std::string layers = inspector->getEngineInformation(
+        nvinfer1::LayerInformationFormat::kONELINE);
+    EXPECT_NE(layers.find("cuda_subbyte_gemv_"), std::string::npos) << layers;
+    // TensorRT's norm becomes a node named after its ops (a Myelin
+    // "CastMulMeanAddSqrtDivMulMul"); the fused GEMV takes the mean itself.
+    EXPECT_EQ(layers.find("Mean") == std::string::npos, through) << layers;
+
+    std::unique_ptr<nvinfer1::IExecutionContext> context(
+        engine->createExecutionContext());
+    ASSERT_NE(context, nullptr);
+    std::vector<uint16_t> half_input(kK);
+    for (int32_t k = 0; k < kK; ++k) {
+      half_input[k] = Fp16Bits(activations[k]);
+    }
+    std::vector<uint16_t> half_output(kN);
+    void* device_input = nullptr;
+    void* device_output = nullptr;
+    ASSERT_EQ(cudaMalloc(&device_input, kK * sizeof(uint16_t)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&device_output, kN * sizeof(uint16_t)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(device_input, half_input.data(), kK * sizeof(uint16_t),
+                         cudaMemcpyHostToDevice),
+              cudaSuccess);
+    EXPECT_TRUE(
+        context->setTensorAddress(built->input_names[0].c_str(), device_input));
+    EXPECT_TRUE(context->setTensorAddress(built->output_names[0].c_str(),
+                                          device_output));
+    cudaStream_t stream = nullptr;
+    ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+    EXPECT_TRUE(context->enqueueV3(stream));
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(half_output.data(), device_output,
+                         kN * sizeof(uint16_t), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+    EXPECT_EQ(cudaFree(device_input), cudaSuccess);
+    EXPECT_EQ(cudaFree(device_output), cudaSuccess);
+    double error = 0.0;
+    double norm2 = 0.0;
+    for (int32_t n = 0; n < kN; ++n) {
+      const double delta = Fp16ToFloat(half_output[n]) - expected[n];
+      error += delta * delta;
+      norm2 += expected[n] * expected[n];
+    }
+    EXPECT_LE(std::sqrt(error), 2.0e-2 * std::sqrt(norm2));
   }
 }
 

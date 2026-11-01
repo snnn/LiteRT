@@ -16,6 +16,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+// Lint prefers absl over <chrono>, but we need a steady monotonic clock that
+// measures elapsed real time unaffected by wall-clock adjustments and ignoring
+// periods when the device is suspended, which absl does not provide.
+#include <chrono>  // NOLINT(build/c++11)
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -122,6 +127,7 @@
 
 #if defined(LITERT_NO_BUILTIN_OPS)
 #include "litert/runtime/stub_op_resolver.h"
+#include "litert/tflite_support/op_resolver/selected_ops_registry.h"
 #endif  // LITERT_NO_BUILTIN_OPS
 
 using litert::Error;
@@ -476,18 +482,30 @@ Expected<void> LiteRtCompiledModelT::InitializeRuntime(
     resolver = resolver_storage.get();
   } else {
 #ifdef LITERT_NO_BUILTIN_OPS
-    if ((hardware_accelerators & kLiteRtHwAcceleratorCpu) &&
-        use_builtin_or_reference_cpu_backend) {
-      return Unexpected(kLiteRtStatusErrorInvalidArgument,
-                        "Builtin and reference CPU kernel modes require "
-                        "builtin kernels.");
+    if (litert::tflite_support::HasSelectedOpsCallback()) {
+      if ((hardware_accelerators & kLiteRtHwAcceleratorCpu) &&
+          use_reference_cpu_kernels) {
+        return Unexpected(kLiteRtStatusErrorInvalidArgument,
+                          "Reference CPU kernel mode requires reference "
+                          "kernels.");
+      }
+      resolver_storage = std::make_unique<tflite::MutableOpResolver>();
+      litert::tflite_support::ApplySelectedOpsCallbacks(resolver_storage.get());
+      resolver = resolver_storage.get();
+    } else {
+      if ((hardware_accelerators & kLiteRtHwAcceleratorCpu) &&
+          use_builtin_or_reference_cpu_backend) {
+        return Unexpected(kLiteRtStatusErrorInvalidArgument,
+                          "Builtin and reference CPU kernel modes require "
+                          "builtin kernels.");
+      }
+      // Use StubOpResolver which provides minimal stub implementations for all
+      // builtin ops. These stubs allow the model to pass validation, but the
+      // actual operations will be handled by LiteRT's accelerator system
+      // (NPU > GPU > CPU) through their respective delegates.
+      resolver_storage = std::make_unique<litert::internal::StubOpResolver>();
+      resolver = resolver_storage.get();
     }
-    // Use StubOpResolver which provides minimal stub implementations for all
-    // builtin ops. These stubs allow the model to pass validation, but the
-    // actual operations will be handled by LiteRT's accelerator system
-    // (NPU > GPU > CPU) through their respective delegates.
-    resolver_storage = std::make_unique<litert::internal::StubOpResolver>();
-    resolver = resolver_storage.get();
 #else
     if ((hardware_accelerators & kLiteRtHwAcceleratorCpu) &&
         use_reference_cpu_kernels) {
@@ -2101,6 +2119,7 @@ Expected<void> LiteRtCompiledModelT::RegisterBuffer(
   }
 
   bool buffer_requires_cpu_sync = false;
+  bool registered_in_buffer_context = false;
 
   Expected<LiteRtTensorBufferRequirementsConst> requirements =
       buffer_context_->GetBufferRequirements(tensor);
@@ -2118,15 +2137,16 @@ Expected<void> LiteRtCompiledModelT::RegisterBuffer(
           return Unexpected(kLiteRtStatusErrorRuntimeFailure,
                             "Failed to register tensor buffer");
         }
+        registered_in_buffer_context = true;
+        LITERT_ASSIGN_OR_RETURN(const auto tensor_id,
+                                GetTensorIdentifier(*interp_, tensor));
+        user_registered_buffers_.insert(tensor_id);
 
         // A host buffer shared with CPU nodes needs a CPU allocation even
         // when it is also registered with an accelerator backend.
-        if (buffer->buffer_type() == kLiteRtTensorBufferTypeHostMemory) {
-          LITERT_ASSIGN_OR_RETURN(const auto tensor_id,
-                                  GetTensorIdentifier(*interp_, tensor));
-          if (cpu_tensors_.contains(tensor_id)) {
-            break;
-          }
+        if (buffer->buffer_type() == kLiteRtTensorBufferTypeHostMemory &&
+            cpu_tensors_.contains(tensor_id)) {
+          break;
         }
 
         // Mark the tensor as non-CPU to avoid TFLite from allocating it.
@@ -2147,6 +2167,16 @@ Expected<void> LiteRtCompiledModelT::RegisterBuffer(
   }
 
   if (buffer_requires_cpu_sync) {
+    // A host buffer shared with CPU nodes is registered with the backend above
+    // and still needs CPU sync, so only unregister a stale buffer that was
+    // registered by an earlier RegisterBuffer() call for this tensor.
+    if (!registered_in_buffer_context) {
+      LITERT_ASSIGN_OR_RETURN(const auto tensor_id,
+                              GetTensorIdentifier(*interp_, tensor));
+      if (user_registered_buffers_.erase(tensor_id) > 0) {
+        buffer_context_->UnregisterTensorBuffer(tensor);
+      }
+    }
     // When backend requires CPU buffer.
     bool buffer_is_cpu_compatible =
         buffer->buffer_type() == kLiteRtTensorBufferTypeHostMemory ||
@@ -2385,6 +2415,7 @@ Expected<void> LiteRtCompiledModelT::Run(
     const std::vector<LiteRtTensorBuffer>& output_buffers, bool& async,
     LiteRtOptions run_options, const LiteRtSchedulingInfo* scheduling_info) {
   LITERT_PERFETTO_TRACE_EVENT("CompiledModel Inference");
+  last_inference_duration_nanos_.store(-1, std::memory_order_relaxed);
   LITERT_RETURN_IF_ERROR(ValidateSignatureIsActive(signature_key));
 
   uint64_t event_handle = std::numeric_limits<uint64_t>::max();
@@ -2691,6 +2722,7 @@ Expected<void> LiteRtCompiledModelT::Run(
   };
 
   TfLiteStatus invoke_status = kTfLiteOk;
+  const auto inference_start = std::chrono::steady_clock::now();
   {
     LITERT_PERFETTO_TRACE_EVENT("CompiledModel Invoke");
     if (use_interpreter_directly) {
@@ -2705,6 +2737,43 @@ Expected<void> LiteRtCompiledModelT::Run(
     }
     return Unexpected(kLiteRtStatusErrorRuntimeFailure, "Failed to invoke");
   }
+
+  if (profiler_ && profiler_->IsProfiling()) {
+    profiler_->SetCurrentEventSource(LITERT);
+    event_handle = profiler_->BeginEvent(
+        "LiteRT::Run[Buffer sync]", tflite::Profiler::EventType::DEFAULT, 0, 0);
+  }
+
+  if (async) {
+    // If the caller requested async execution, then set async to true if any
+    // of the output buffers have been assigned a synchronization event.
+    async = false;
+    for (auto& tb : output_buffers) {
+      async |= tb->HasEvent();
+    }
+  } else {
+    // If the caller has not requested async execution, then wait on
+    // synchronization events that have been attached to the outputs.
+    for (auto& tb : output_buffers) {
+      if (tb->HasEvent()) {
+        LITERT_ASSIGN_OR_RETURN(LiteRtEventT * event, tb->GetEvent());
+        LITERT_RETURN_IF_ERROR(event->Wait(/*timeout_in_ms=*/-1));
+      }
+    }
+  }
+
+  const auto inference_end = std::chrono::steady_clock::now();
+  const int64_t inference_duration_nanos =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(inference_end -
+                                                           inference_start)
+          .count();
+
+  if (profiler_ && profiler_->IsProfiling() &&
+      event_handle != std::numeric_limits<uint64_t>::max()) {
+    profiler_->SetCurrentEventSource(LITERT);
+    profiler_->EndEvent(event_handle);
+  }
+
   // Copy data from TfLiteTensor to LiteRtTensorBuffer for pending outputs (e.g.
   // strings)
   LITERT_LOG(LITERT_DEBUG, "Run: pending_string_output_copies size=%d",
@@ -2762,35 +2831,8 @@ Expected<void> LiteRtCompiledModelT::Run(
     }
   }
 
-  if (profiler_ && profiler_->IsProfiling()) {
-    profiler_->SetCurrentEventSource(LITERT);
-    event_handle = profiler_->BeginEvent(
-        "LiteRT::Run[Buffer sync]", tflite::Profiler::EventType::DEFAULT, 0, 0);
-  }
-
-  if (async) {
-    // If the caller requested async execution, then set async to true if any
-    // of the output buffers have been assigned a synchronization event.
-    async = false;
-    for (auto& tb : output_buffers) {
-      async |= tb->HasEvent();
-    }
-  } else {
-    // If the caller has not requested async execution, then wait on
-    // synchronization events that have been attached to the outputs.
-    for (auto& tb : output_buffers) {
-      if (tb->HasEvent()) {
-        LITERT_ASSIGN_OR_RETURN(LiteRtEventT * event, tb->GetEvent());
-        LITERT_RETURN_IF_ERROR(event->Wait(/*timeout_in_ms=*/-1));
-      }
-    }
-  }
-  if (profiler_ && profiler_->IsProfiling() &&
-      event_handle != std::numeric_limits<uint64_t>::max()) {
-    profiler_->SetCurrentEventSource(LITERT);
-    profiler_->EndEvent(event_handle);
-  }
-
+  last_inference_duration_nanos_.store(inference_duration_nanos,
+                                       std::memory_order_relaxed);
   return {};
 }
 
