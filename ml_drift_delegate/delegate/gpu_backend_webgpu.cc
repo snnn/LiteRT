@@ -69,6 +69,7 @@
 #include "ml_drift_delegate/delegate/shared_memory_manager/graph_adapter.h"
 #include "ml_drift_delegate/delegate/shared_memory_manager/shared_memory_manager.h"
 #include "ml_drift_delegate/delegate/shared_memory_manager/shared_memory_manager_webgpu.h"
+#include "ml_drift_delegate/delegate/shared_webgpu_env.h"
 #include "ml_drift_delegate/delegate/unowned_tensor_desc.h"
 #include "tflite/c/common.h"
 
@@ -350,11 +351,14 @@ absl::Status GpuBackendWebGpu::UpdateSpatialTensor(
   // If the device is Apple and it meets the right storage & data types, use
   // an optimized path. A release_data_callback indicates the data is mmap'd,
   // which CopyBufferToBuffer relies on to wrap whole pages without copying.
+  // Keep the data types in sync with CreateSharedWebGpuTensor().
   if (release_data_callback &&
       desc.GetStorageType() == ::ml_drift::TensorStorageType::kBuffer &&
       (desc.GetDataType() == ::ml_drift::DataType::kUint8 ||
        desc.GetDataType() == ::ml_drift::DataType::kUint4 ||
-       desc.GetDataType() == ::ml_drift::DataType::kUint2)) {
+       desc.GetDataType() == ::ml_drift::DataType::kUint2 ||
+       desc.GetDataType() == ::ml_drift::DataType::kFloat16 ||
+       desc.GetDataType() == ::ml_drift::DataType::kFloat32)) {
     ::ml_drift::TensorDescriptor desc_no_data;
     desc.CopyWithoutData(&desc_no_data);
     ABSL_RETURN_IF_ERROR(
@@ -451,7 +455,7 @@ GpuInferenceContextWebGpu::~GpuInferenceContextWebGpu() {
                        capture_context_id_, capture_context_id_);
     next_command_buffers_thread_->join();
   }
-  if (last_ctx_ == this) last_ctx_ = nullptr;
+  SharedWebGpuEnv::Get().ClearLastContextIfMatched(&backend_->wgpu_env(), this);
 }
 
 absl::StatusOr<::ml_drift::webgpu::SpatialTensor*>
@@ -559,8 +563,6 @@ absl::Status GpuInferenceContextWebGpu::PrepareCommandBuffers(
   return absl::OkStatus();
 }
 
-GpuInferenceContextWebGpu* GpuInferenceContextWebGpu::last_ctx_ = nullptr;
-
 absl::Status GpuInferenceContextWebGpu::PrepareCommandBuffersFromCached(
     PreparedCommandBuffers& command_buffers) {
   if (next_command_buffers_.empty()) {
@@ -574,8 +576,10 @@ absl::Status GpuInferenceContextWebGpu::PrepareCommandBuffersFromCached(
     next_command_buffers_thread_->join();
   }
 
-  if (last_ctx_ != this) {
-    last_ctx_ = this;
+  SharedWebGpuEnv& shared_env = SharedWebGpuEnv::Get();
+  const ::ml_drift::webgpu::ExecutionEnvironment* env = &backend_->wgpu_env();
+  if (shared_env.GetLastContext(env) != this) {
+    shared_env.SetLastContext(env, this);
     // The next_command_buffers_ must be invalidated since the last Dispatch()
     // call was done by a different context. next_command_buffers_ is valid only
     // when Dispatch() is called by the same context continuously.
@@ -713,7 +717,9 @@ absl::Status GpuInferenceContextWebGpu::Profile(
   next_command_buffers_index_ = 0;
   next_command_buffers_ready_ = false;
   for (auto& buffers : next_command_buffers_) buffers.Clear();
-  last_ctx_ = nullptr;
+  // Profiling changes shared resource bindings, so other contexts on this
+  // environment must invalidate their prepared command buffers on dispatch.
+  SharedWebGpuEnv::Get().SetLastContext(&backend_->wgpu_env(), this);
   absl::MutexLock lock(backend_->memory_manager_mutex());
   return ctx_->ProfileOnce(backend_->wgpu_env(), &profiling_info,
                            num_nodes_per_command_encoder_);
