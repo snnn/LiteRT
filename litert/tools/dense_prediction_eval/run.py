@@ -163,9 +163,9 @@ def run(args):
     lines = []
     for i, sample in enumerate(batch):
       files = []
-      if set(sample['inputs']) != {'pixel_values'}:
+      if len(sample['inputs']) != 1:
         raise ValueError(
-            'The example orchestrator currently expects one pixel_values input')
+            'The example orchestrator currently expects one named input')
       for name, relative in sample['inputs'].items():
         path = (args.manifest.parent / relative).resolve()
         if digest(path) != sample['input_sha256']:

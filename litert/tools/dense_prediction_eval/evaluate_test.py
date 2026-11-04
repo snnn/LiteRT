@@ -79,6 +79,11 @@ class EvaluationTest(unittest.TestCase):
   def test_resume_after_partial_failure_and_reject_changed_model(self):
     # The first invocation completes one sample and then fails. The second
     # must receive only the remaining input, not silently repeat the first.
+    # Input names come from the manifest, including exported names such as args_0.
+    manifest = json.loads(self.manifest.read_text())
+    for sample in manifest['samples']:
+      sample['inputs'] = {'args_0': sample['inputs']['pixel_values']}
+    evaluate.write_json(self.manifest, manifest)
     runner = self.root / 'runner.py'
     runner.write_text('''
 from pathlib import Path

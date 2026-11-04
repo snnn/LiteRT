@@ -7,7 +7,7 @@ of tensor buffers serve a chunk of samples. Model loading is amortized across
 that chunk. Scoring runs on the host and requires NumPy; the optional dataset
 adapter also requires Pillow, PyArrow, and `huggingface_hub`.
 
-The current orchestrator accepts a single FLOAT32 `pixel_values` input and
+The current orchestrator accepts a single named FLOAT32 input and
 static, batch-one FLOAT32 outputs. Quantization inside the model is independent
 of this public interface. No model converter is required.
 
