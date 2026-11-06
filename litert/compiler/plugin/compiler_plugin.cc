@@ -760,6 +760,11 @@ Expected<PartitionResult> PartitionModel(
         // Now the decomposition subgraph is inlined into the main subgraph,
         // therefore its also "selected".
         selected_composite_subgraph_indexes.push_back(info->subgraph);
+      } else {
+        LITERT_LOG(LITERT_ERROR,
+                   "Failed to inline composite op '%s' (subgraph %d): %s",
+                   std::string(info->name).c_str(), info->subgraph,
+                   status.Error().Message().c_str());
       }
     }
     if (!ops_to_inline.empty()) {
@@ -837,6 +842,7 @@ Expected<PartitionResult> PartitionModel(
       selected_composite_subgraph_indexes.end());
 
   // Update input_num_sgs to account for removed decomposition subgraphs.
+  ABSL_DCHECK_LE(selected_composite_subgraph_indexes.size(), input_num_sgs);
   input_num_sgs -= selected_composite_subgraph_indexes.size();
   // Remove all decomposition subgraphs from the model.
   model.Yank(std::move(selected_composite_subgraph_indexes));

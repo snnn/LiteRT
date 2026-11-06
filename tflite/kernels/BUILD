@@ -1437,6 +1437,23 @@ cc_test(
 )
 
 cc_test(
+    name = "batch_matmul_blockwise_test",
+    size = "small",
+    srcs = ["batch_matmul_blockwise_test.cc"],
+    deps = [
+        ":kernel_util",
+        ":test_main",
+        "//tflite/core:framework_stable",
+        "//tflite/core/c:common",
+        "//tflite/core/kernels:builtin_ops",
+        "//tflite/schema:schema_fbs",
+        "@com_google_googletest//:gtest",
+        "@eigen_archive//:eigen3",
+        "@flatbuffers",
+    ],
+)
+
+cc_test(
     name = "batch_matmul_test",
     size = "small",
     srcs = ["batch_matmul_test.cc"],
@@ -1476,6 +1493,7 @@ cc_test(
         "//tflite/core:framework_stable",
         "//tflite/core/kernels:builtin_ops",
         "//tflite/schema:schema_fbs",
+        "//tflite/types:half",
         "@com_google_googletest//:gtest",
     ],
 )
@@ -2290,6 +2308,24 @@ cc_test(
         "//tflite/schema:schema_fbs",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_googletest//:gtest",
+        "@flatbuffers",
+    ],
+)
+
+cc_test(
+    name = "fully_connected_blockwise_test",
+    size = "small",
+    srcs = ["fully_connected_blockwise_test.cc"],
+    deps = [
+        ":kernel_util",
+        ":reference_ops",
+        ":test_main",
+        "//tflite/core:framework_stable",
+        "//tflite/core/c:common",
+        "//tflite/core/kernels:builtin_ops",
+        "//tflite/schema:schema_fbs",
+        "@com_google_googletest//:gtest",
+        "@eigen_archive//:eigen3",
         "@flatbuffers",
     ],
 )

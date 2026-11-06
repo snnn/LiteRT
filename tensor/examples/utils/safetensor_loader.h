@@ -188,6 +188,10 @@ class SafetensorLoader {
   LoadWeightsWithMapping(
       const absl::flat_hash_map<std::string, std::string>& name_mapping) const;
 
+  // Reads a tensor and converts its elements to `T` (`float` or `int64_t`).
+  template <typename T>
+  absl::StatusOr<std::vector<T>> ReadTensorAs(absl::string_view name) const;
+
  private:
   struct TargetedQuantizationConfig {
     QuantizationConfig::Scheme weights;

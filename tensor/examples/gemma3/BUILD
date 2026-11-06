@@ -14,6 +14,7 @@
 
 # copybara:uncomment load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//litert/build_common:litert_build_defs.bzl", "commandline_flag_copts", "litert_bin")
 load(
     "//litert/build_common:special_rule.bzl",
@@ -25,11 +26,6 @@ load(
 package(
     # copybara:uncomment default_applicable_licenses = ["//third_party/odml:license"],
     default_visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "safetensors",
-    hdrs = ["safetensors.h"],
 )
 
 cc_library(
@@ -55,10 +51,11 @@ cc_library(
     srcs = ["safetensor_loader.cc"],
     hdrs = ["safetensor_loader.h"],
     deps = [
-        ":safetensors",
         "//tensor",
         "//tensor:buffer",
         "//tensor:datatypes",
+        "//tensor/examples/utils:safetensor_loader",
+        "//tensor/examples/utils:safetensors",
         "//tensor/utils:macros",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log:absl_log",
@@ -66,6 +63,24 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
+    ],
+)
+
+cc_test(
+    name = "safetensor_loader_test",
+    srcs = ["safetensor_loader_test.cc"],
+    deps = [
+        ":safetensor_loader",
+        "//tensor",
+        "//tensor:buffer",
+        "//tensor:datatypes",
+        "//tensor/examples/utils:safetensor_loader",
+        "//tensor/examples/utils:safetensor_test_util",
+        "//tensor/utils:matchers",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -239,13 +254,47 @@ cc_library(
 #     hdrs = ["model_config.h"],
 #     deps = [
 #         ":gemma3_config",
-#         ":safetensor_loader",
-#         ":tflite_loader",
+#         "@com_google_absl//absl/status",
+#         "@com_google_absl//absl/status:statusor",
+#         "@com_google_absl//absl/strings",
+#         "@com_google_absl//absl/strings:string_view",
+#     ],
+# )
+#
+# cc_library(
+#     name = "safetensor_model_config",
+#     srcs = ["safetensor_model_config.cc"],
+#     hdrs = ["safetensor_model_config.h"],
+#     deps = [
+#         ":gemma3_config",
+#         ":model_config",
 #         "@com_google_absl//absl/log:absl_log",
 #         "@com_google_absl//absl/status",
 #         "@com_google_absl//absl/status:statusor",
 #         "@com_google_absl//absl/strings",
 #         "@com_google_absl//absl/strings:string_view",
+#         "//tensor/examples/utils:safetensor_loader",
+#     ],
+# )
+#
+# cc_test(
+#     name = "model_config_test",
+#     srcs = ["model_config_test.cc"],
+#     deps = [
+#         ":gemma3_config",
+#         ":model_config",
+#         ":safetensor_model_config",
+#         ":tflite_loader",
+#         "@com_google_googletest//:gtest_main",
+#         "@com_google_absl//absl/status",
+#         "@com_google_absl//absl/status:statusor",
+#         "@com_google_absl//absl/strings:string_view",
+#         "@flatbuffers",
+#         "//tensor:datatypes",
+#         "//tensor/examples/utils:safetensor_loader",
+#         "//tensor/examples/utils:safetensor_test_util",
+#         "//tensor/utils:matchers",
+#         "//tflite/schema:schema_fbs",
 #     ],
 # )
 # copybara:uncomment_end
@@ -289,6 +338,7 @@ litert_bin(
         "//tensor:datatypes",
         "//tensor/backends/tflite:arithmetic_tflite",
         "//tensor/backends/tflite:tflite_flatbuffer_conversion",
+        "//tensor/examples/utils:safetensor_loader",
         "//tensor/runners/litert:litert_dynamic_runner",
         "//tensor/utils:macros",
     ] + litert_gpu_accelerator_deps(),
@@ -355,6 +405,7 @@ litert_bin(
 #         ":graph_helpers",
 #         ":model_config",
 #         ":safetensor_loader",
+#         ":safetensor_model_config",
 #         ":tokenizer",
 #         ":util",
 #         "//base",
@@ -371,6 +422,7 @@ litert_bin(
 #         "//tensor:buffer",
 #         "//tensor:datatypes",
 #         "//tensor/backends/xnnpack:arithmetic",
+#         "//tensor/examples/utils:safetensor_loader",
 #         "//tensor/runners/xnnpack:runner",
 #         "//tensor/utils:macros",
 #     ],
@@ -384,6 +436,7 @@ litert_bin(
 #         ":gemma3_graph",
 #         ":model_config",
 #         ":safetensor_loader",
+#         ":safetensor_model_config",
 #         ":tokenizer",
 #         "//base",
 #         "@com_google_absl//absl/container:flat_hash_map",
@@ -402,6 +455,7 @@ litert_bin(
 #         "//tensor/backends/ml_drift:arithmetic_ml_drift",
 #         "//tensor/backends/xnnpack:arithmetic",
 #         "//tensor/backends/xnnpack:conversion",
+#         "//tensor/examples/utils:safetensor_loader",
 #         "//tensor/internal:graph",
 #         "//tensor/runners/ml_drift:ml_drift_webgpu_model_runner",
 #         "//tensor/utils:macros",
@@ -419,6 +473,7 @@ litert_bin(
 #         ":gemma3_graph",
 #         ":model_config",
 #         ":safetensor_loader",
+#         ":safetensor_model_config",
 #         ":tokenizer",
 #         "@com_google_absl//absl/algorithm:container",
 #         "@com_google_absl//absl/container:flat_hash_map",
@@ -436,6 +491,7 @@ litert_bin(
 #         "//tensor:buffer",
 #         "//tensor:datatypes",
 #         "//tensor/backends/ml_drift:arithmetic_ml_drift",
+#         "//tensor/examples/utils:safetensor_loader",
 #         "//tensor/internal:graph",
 #         "//tensor/runners/ml_drift:ml_drift_cl_model_runner",
 #         "//tensor/utils:macros",

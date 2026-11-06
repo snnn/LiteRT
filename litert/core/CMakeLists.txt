@@ -26,6 +26,7 @@ add_library(litert_core STATIC
     environment.cc
     environment_options.cc
     filesystem.cc
+    litert_options_encoder.cc
     litert_toml_parser.cc
     util/flatbuffer_tools.cc
     util/tensor_type_util.cc
@@ -57,12 +58,16 @@ target_link_libraries(litert_core
         Threads::Threads
 )
 
-# Platform-specific source exclusions
-if(NOT WIN32)
-    # Exclude Windows-specific source
+# Platform-specific source exclusions. The two dynamic_loading implementations
+# are alternatives, so exactly one of them is compiled: dynamic_loading.cc needs
+# <dlfcn.h>, which Windows does not have.
+if(WIN32)
+    set_source_files_properties(dynamic_loading.cc PROPERTIES HEADER_FILE_ONLY TRUE)
+else()
     set_source_files_properties(dynamic_loading_windows.cc PROPERTIES HEADER_FILE_ONLY TRUE)
 endif()
 
 # Add model subdirectory
 add_subdirectory(model)
 add_subdirectory(cache)
+add_subdirectory(util/memory_profiling)

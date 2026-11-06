@@ -23,22 +23,13 @@ package(
     default_visibility = ["//litert:litert_internal_users"],
 )
 
-# copybara:uncomment_begin(google-only)
-# config_setting(
-#     name = "windows_msvc",
-#     constraint_values = ["@platforms//os:windows"],
-#     flag_values = {"//tools/cpp:compiler": "msvc"},
-# )
-# copybara:uncomment_end
-
-# copybara:comment_begin(oss-only)
 config_setting(
     name = "windows_msvc",
-    values = {
-        "cpu": "x64_windows",
-    },
+    constraint_values = ["@platforms//os:windows"],
+    # copybara:uncomment_begin(google-only)
+    # flag_values = {"//tools/cpp:compiler": "msvc"},
+    # copybara:uncomment_end
 )
-# copybara:comment_end
 
 # copybara:uncomment_begin(google-only)
 # config_setting(
@@ -294,8 +285,11 @@ cc_test(
 #         "//tflite:testdata/multi_signatures.bin",
 #     ],
 #     deps = [
+#         ":dispatch_opaque_options",
 #         "@com_google_googletest//:gtest_main",
+#         "@com_google_absl//absl/base:no_destructor",
 #         "//litert/c:litert_common",
+#         "//litert/c:litert_options",
 #         "//litert/cc:litert_environment",
 #         "//litert/cc:litert_options",
 #         "//litert/cc/internal:litert_dispatch_delegate",
@@ -419,6 +413,7 @@ cc_library(
         ":dispatch",
         ":dispatch_kernel_facade",
         ":dispatch_kernel_resources",
+        ":dispatch_opaque_options",
         "//litert/c:litert_common",
         "//litert/c:litert_metrics",
         "//litert/c:litert_profiler_types",
@@ -428,7 +423,10 @@ cc_library(
         "//litert/c/internal:litert_logging",
         "//litert/cc:litert_expected",
         "//litert/cc:litert_macros",
+        "//litert/cc:litert_opaque_options",
+        "//litert/cc/internal:litert_handle",
         "//litert/core:build_stamp",
+        "//litert/core:options",
         "//litert/runtime:metrics",
         "//litert/vendors/c:litert_dispatch_c_api",
         "//tflite/c:c_api",

@@ -1,0 +1,379 @@
+name: "cmake-windows-arm64"
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "0 10 * * *"  # Run at 2am PST (10am UTC) every day to refresh the cache.
+  workflow_dispatch:
+    inputs:
+      REFRESH_CACHE:
+        description: 'Refresh cache to remove unused files'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run_build: ${{ steps.check.outputs.run_build }}
+    steps:
+      - if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          predicate-quantifier: 'some-with-excludes'
+          filters: |
+            src:
+              - '**'
+              - '!*.md'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!g3doc/**'
+              - '!site/**'
+              - '!LICENSE'
+              - '!litert/objc/**'
+              - '!litert/swift/**'
+              - '!litert_quantizer/**'
+      - name: Determine if build should run
+        id: check
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SRC_CHANGED: ${{ steps.filter.outputs.src }}
+        run: |
+          if [[ "${EVENT_NAME}" != "pull_request" || "${SRC_CHANGED}" == "true" ]]; then
+            echo "run_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  presubmit:
+    name: "Presubmit-CMake-Windows-ARM64"
+    needs: check
+    if: needs.check.outputs.run_build == 'true'
+    runs-on: windows-x86-n2-16
+    timeout-minutes: 120
+    permissions:
+      actions: write
+      contents: read
+    env:
+      ANDROID_NDK_HOME:
+      CMAKE_BUILD_PARALLEL_LEVEL: 8
+      GH_TOKEN: ${{ github.token }}
+      REFRESH_CACHE: ${{ github.event_name == 'schedule' ||
+                         (github.event_name == 'workflow_dispatch' && inputs.REFRESH_CACHE) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Add GNU tar to PATH
+        shell: bash
+        run: echo "C:/Program Files/Git/usr/bin" >> $GITHUB_PATH
+
+      - name: Install CMake and Ninja
+        run: |
+          python -m pip install --break-system-packages cmake==3.28.3 ninja==1.11.1.4
+          $scriptsDir = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          echo "$scriptsDir" >> $env:GITHUB_PATH
+          $env:PATH = "$scriptsDir;$env:PATH"
+          cmake --version
+          ninja --version
+
+      - name: Ensure MSVC ARM64 build tools are installed
+        run: |
+          $vsPath = if ($env:BAZEL_VS -and (Test-Path $env:BAZEL_VS)) {
+            (Get-Item $env:BAZEL_VS).FullName
+          } else {
+            (Get-ChildItem -Path "C:\Program Files*\Microsoft Visual Studio\2022\*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (-not $vsPath) {
+            throw "Visual Studio 2022 installation not found."
+          }
+          echo "VS_INSTALL_PATH=$vsPath" >> $env:GITHUB_ENV
+          $arm64Cl = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC\*\bin\Hostx64\arm64\cl.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($arm64Cl) {
+            Write-Host "Found MSVC ARM64 cross-compiler: $($arm64Cl.FullName)"
+          } else {
+            Write-Host "Installing Microsoft.VisualStudio.Component.VC.Tools.ARM64 into $vsPath..."
+            if ($env:TEMP) { $env:TEMP = $env:TEMP.Replace('/', '\') }
+            if ($env:TMP) { $env:TMP = $env:TMP.Replace('/', '\') }
+            $installerUrl = "https://download.visualstudio.microsoft.com/download/pr/2ae938ff-cbb6-4e4d-990c-7794a7a03745/15bc8cfc727e099aaba861eb21a811776bcbddc603c0a3f203eba5e5a7710421/vs_BuildTools.exe"
+            $expectedHash = "15BC8CFC727E099AABA861EB21A811776BCBDDC603C0A3F203EBA5E5A7710421"
+            $installerPath = Join-Path $env:TEMP "vs_BuildTools.exe"
+            Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
+            $actualHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash
+            if ($actualHash -ne $expectedHash) {
+              Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+              throw "SHA256 mismatch for vs_BuildTools.exe: expected $expectedHash, got $actualHash"
+            }
+            $installerArgs = @(
+              "modify",
+              "--installPath", $vsPath,
+              "--add", "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+              "--quiet", "--wait", "--norestart", "--nocache"
+            )
+            & $installerPath @installerArgs | Write-Output
+            $exitCode = $LASTEXITCODE
+            while (Get-Process -Name "vs_installer", "vs_buildtools", "setup" -ErrorAction SilentlyContinue) {
+              Start-Sleep -Seconds 3
+            }
+            Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+            if ($exitCode -ne 0 -and $exitCode -ne 3010) {
+              $logDirs = @($env:TEMP, $env:TMP, "$env:LOCALAPPDATA\Temp", "C:\TEMP", "C:\TMP") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+              foreach ($dir in $logDirs) {
+                Get-ChildItem -LiteralPath $dir -Filter "dd_*.log" -ErrorAction SilentlyContinue | ForEach-Object {
+                  Write-Host "=== $($_.FullName) ==="
+                  Get-Content -LiteralPath $_.FullName -Tail 80 -ErrorAction SilentlyContinue | Write-Host
+                }
+              }
+              throw "vs_BuildTools.exe modify failed with exit code $exitCode"
+            }
+            $arm64Cl = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC\*\bin\Hostx64\arm64\cl.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $arm64Cl) {
+              throw "MSVC ARM64 cross-compiler still not found after installation."
+            }
+            Write-Host "Installed MSVC ARM64 cross-compiler: $($arm64Cl.FullName)"
+          }
+
+      - name: Set up cache keys and short build paths
+        id: cache-keys
+        env:
+          WORKFLOW_NAME: ${{ github.workflow }}
+          FLATC_HASH: ${{ hashFiles('litert/CMakeLists.txt') }}
+          QAIRT_HASH: ${{ hashFiles('litert/vendors/CMakeLists.txt') }}
+        run: |
+          $flatcRestoreKey = "$env:WORKFLOW_NAME-flatc-v1"
+          $flatcCacheKey = "$flatcRestoreKey-$env:FLATC_HASH"
+          $qairtCacheKey = "$env:WORKFLOW_NAME-qairt-headers-v1-$env:QAIRT_HASH"
+          echo "FLATC_RESTORE_KEY=$flatcRestoreKey" >> "$env:GITHUB_OUTPUT"
+          echo "FLATC_CACHE_KEY=$flatcCacheKey" >> "$env:GITHUB_OUTPUT"
+          echo "QAIRT_CACHE_KEY=$qairtCacheKey" >> "$env:GITHUB_OUTPUT"
+
+          $shortRoot = "C:\t"
+          $tempDir = "$shortRoot\_tmp"
+          $homeDir = "$shortRoot\_home"
+          $gitConfigDir = "$homeDir\.config\git"
+          $buildDir = "$shortRoot\b_win_arm64"
+          New-Item -ItemType Directory -Force -Path $tempDir, $gitConfigDir, $buildDir | Out-Null
+          $gitIgnoreFile = "$gitConfigDir\ignore"
+          $gitAttrFile = "$gitConfigDir\attributes"
+          New-Item -ItemType File -Force -Path $gitIgnoreFile, $gitAttrFile | Out-Null
+          $gitConfigText = @(
+            "[core]",
+            "	excludesFile = C:/t/_home/.config/git/ignore",
+            "	attributesFile = C:/t/_home/.config/git/attributes"
+          )
+          Set-Content -LiteralPath "$homeDir\.gitconfig" -Value $gitConfigText -Encoding ASCII
+          Set-Content -LiteralPath "$gitConfigDir\config" -Value $gitConfigText -Encoding ASCII
+          echo "HOME=$homeDir" >> "$env:GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=C:/t/_home/.config" >> "$env:GITHUB_ENV"
+          echo "GIT_CONFIG_GLOBAL=C:/t/_home/.gitconfig" >> "$env:GITHUB_ENV"
+          echo "TMP=$tempDir" >> "$env:GITHUB_ENV"
+          echo "TEMP=$tempDir" >> "$env:GITHUB_ENV"
+          echo "LITERT_BUILD_DIR=$buildDir" >> "$env:GITHUB_ENV"
+
+      - name: Clean build outputs and remove caches if cache is being refreshed
+        if: env.REFRESH_CACHE == 'true'
+        continue-on-error: true
+        env:
+          FLATC_CACHE_KEY: ${{ steps.cache-keys.outputs.FLATC_CACHE_KEY }}
+          QAIRT_CACHE_KEY: ${{ steps.cache-keys.outputs.QAIRT_CACHE_KEY }}
+        run: |
+          if (Test-Path host_flatc_build) { Remove-Item -Recurse -Force host_flatc_build }
+          if (Test-Path qairt_headers) { Remove-Item -Recurse -Force qairt_headers }
+          gh cache delete "$env:FLATC_CACHE_KEY"
+          gh cache delete "$env:QAIRT_CACHE_KEY"
+
+      - name: Restore and save host flatc cache
+        id: flatc-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        env:
+          windir: ""
+          PATH: "C:/Program Files/Git/usr/bin;C:/tools/msys64/usr/bin;C:/Windows/System32;C:/Windows"
+        with:
+          path: host_flatc_build
+          key: ${{ steps.cache-keys.outputs.FLATC_CACHE_KEY }}
+          restore-keys: ${{ env.REFRESH_CACHE != 'true' && format('{0}-', steps.cache-keys.outputs.FLATC_RESTORE_KEY) || '' }}
+
+      - name: Build host flatc (x64)
+        if: steps.flatc-cache.outputs.cache-hit != 'true'
+        run: |
+          New-Item -ItemType Directory -Force -Path host_flatc_build | Out-Null
+          $cmakeContent = @"
+          cmake_minimum_required(VERSION 3.16)
+          project(HostFlatc LANGUAGES C CXX)
+          include(FetchContent)
+          FetchContent_Declare(flatbuffers GIT_REPOSITORY https://github.com/google/flatbuffers.git GIT_TAG v25.9.23)
+          set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+          FetchContent_MakeAvailable(flatbuffers)
+          "@
+          Set-Content -Path "host_flatc_build\CMakeLists.txt" -Value $cmakeContent -Encoding ASCII
+          $vcvars = Join-Path $env:VS_INSTALL_PATH "VC\Auxiliary\Build\vcvarsall.bat"
+          $flatcScript = Join-Path $env:TEMP "build_host_flatc.cmd"
+          $flatcLines = @(
+            "@echo off",
+            "call `"$vcvars`" amd64 || exit /b 1",
+            "set `"HOME=C:\t\_home`"",
+            "set `"XDG_CONFIG_HOME=C:/t/_home/.config`"",
+            "set `"GIT_CONFIG_GLOBAL=C:/t/_home/.gitconfig`"",
+            "cmake -G Ninja -S host_flatc_build -B host_flatc_build -DCMAKE_BUILD_TYPE=Release || exit /b 1",
+            "cmake --build host_flatc_build --target flatc --parallel $env:CMAKE_BUILD_PARALLEL_LEVEL || exit /b 1"
+          )
+          Set-Content -LiteralPath $flatcScript -Value $flatcLines -Encoding ASCII
+          & cmd.exe /d /c $flatcScript | Write-Output
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to build host flatc.exe"
+          }
+          if (-not (Test-Path "host_flatc_build\_deps\flatbuffers-build\flatc.exe")) {
+            throw "host_flatc_build\_deps\flatbuffers-build\flatc.exe not found after build"
+          }
+
+      - name: Restore and save QAIRT headers cache
+        id: qairt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        env:
+          windir: ""
+          PATH: "C:/Program Files/Git/usr/bin;C:/tools/msys64/usr/bin;C:/Windows/System32;C:/Windows"
+        with:
+          path: qairt_headers
+          key: ${{ steps.cache-keys.outputs.QAIRT_CACHE_KEY }}
+
+      - name: Extract QAIRT headers
+        if: steps.qairt-cache.outputs.cache-hit != 'true'
+        run: |
+          $cmakeText = Get-Content -LiteralPath "litert/vendors/CMakeLists.txt" -Raw
+          if ($cmakeText -notmatch 'set\(QAIRT_HEADERS_URL\s+"([^"]+)"\)') {
+            throw "Could not find QAIRT_HEADERS_URL in litert/vendors/CMakeLists.txt"
+          }
+          $url = $Matches[1]
+          $tmpZip = Join-Path $env:TEMP "qairt_sdk.zip"
+          $outDir = Join-Path $PWD "qairt_headers\include\QNN"
+          if (Test-Path -LiteralPath $outDir) {
+            Remove-Item -LiteralPath $outDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          Write-Host "Downloading QAIRT SDK archive from $url ..."
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $url -OutFile $tmpZip -MaximumRetryCount 3 -RetryIntervalSec 5
+          try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($tmpZip)
+            try {
+              $marker = "/include/QNN/"
+              $extracted = 0
+              foreach ($entry in $zip.Entries) {
+                $entryName = $entry.FullName.Replace('\', '/')
+                if ($entryName.EndsWith('/') -or (-not $entryName.Contains($marker))) {
+                  continue
+                }
+                $idx = $entryName.IndexOf($marker)
+                $relPath = $entryName.Substring($idx + $marker.Length)
+                if (-not $relPath) {
+                  continue
+                }
+                $dest = Join-Path $outDir ($relPath.Replace('/', '\'))
+                $destDir = Split-Path -Parent $dest
+                if (-not (Test-Path -LiteralPath $destDir)) {
+                  New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+                }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $dest, $true)
+                $extracted++
+              }
+              if ($extracted -eq 0 -or (-not (Test-Path -LiteralPath (Join-Path $outDir "QnnCommon.h")))) {
+                throw "Failed to extract QNN headers (extracted=$extracted)"
+              }
+              Write-Host "Extracted $extracted QNN header files into $outDir"
+            } finally {
+              $zip.Dispose()
+            }
+          } finally {
+            Remove-Item -LiteralPath $tmpZip -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Cross-build LiteRT for Windows ARM64
+        run: |
+          $vcvars = Join-Path $env:VS_INSTALL_PATH "VC\Auxiliary\Build\vcvarsall.bat"
+          $hostToolsDir = (Resolve-Path "host_flatc_build\_deps\flatbuffers-build").Path.Replace('\', '/')
+          $qairtHeadersDir = (Resolve-Path "qairt_headers\include\QNN").Path.Replace('\', '/')
+          $buildDir = $env:LITERT_BUILD_DIR.Replace('\', '/')
+          $litertSrcDir = Join-Path $PWD "litert"
+          $buildScript = Join-Path $env:TEMP "build_win_arm64.cmd"
+
+          $scriptLines = @(
+            "@echo off",
+            "call `"$vcvars`" amd64_arm64 || exit /b 1",
+            "set `"HOME=C:\t\_home`"",
+            "set `"XDG_CONFIG_HOME=C:/t/_home/.config`"",
+            "set `"GIT_CONFIG_GLOBAL=C:/t/_home/.gitconfig`"",
+            "cd /d `"$litertSrcDir`" || exit /b 1",
+            "cmake --preset windows-arm64 -B `"$buildDir`" -DTFLITE_HOST_TOOLS_DIR=`"$hostToolsDir`" -DCMAKE_HOST_EXECUTABLE_SUFFIX=.exe -DQAIRT_HEADERS_DIR=`"$qairtHeadersDir`" || exit /b 1",
+            "cmake --build `"$buildDir`" --target litert_runtime_c_api_shared_lib dispatch_api_qualcomm_so qnn_compiler_plugin run_model apply_plugin_main -j $env:CMAKE_BUILD_PARALLEL_LEVEL || exit /b 1"
+          )
+          Set-Content -LiteralPath $buildScript -Value $scriptLines -Encoding ASCII
+
+          & cmd.exe /d /c $buildScript | Write-Output
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows ARM64 CMake build failed with exit code $LASTEXITCODE"
+          }
+
+          $expectedArtifacts = @(
+            "$env:LITERT_BUILD_DIR\c\LiteRt.dll",
+            "$env:LITERT_BUILD_DIR\c\LiteRt.lib",
+            "$env:LITERT_BUILD_DIR\vendors\qualcomm\dispatch\LiteRtDispatch_Qualcomm.dll",
+            "$env:LITERT_BUILD_DIR\vendors\qualcomm\compiler\LiteRtCompilerPlugin_Qualcomm.dll",
+            "$env:LITERT_BUILD_DIR\tools\run_model.exe",
+            "$env:LITERT_BUILD_DIR\tools\apply_plugin_main.exe"
+          )
+          foreach ($artifact in $expectedArtifacts) {
+            if (-not (Test-Path $artifact)) {
+              throw "Expected Windows ARM64 build artifact missing: $artifact"
+            }
+            $hash = (Get-FileHash -Path $artifact -Algorithm SHA256).Hash
+            $size = (Get-Item $artifact).Length
+            Write-Host ("{0}  {1} ({2} bytes)" -f $hash, $artifact, $size)
+          }
+
+  # A PR is accepted only if this check concludes "success" ("skipped" doesn't
+  # count). So this job always runs, and passes if Presubmit-CMake-Windows-ARM64
+  # passed or was skipped because the PR has no relevant changes. This check is
+  # required by name, so keep the name unique across workflows.
+  gate:
+    name: "Presubmit-CMake-Windows-ARM64-Gate"
+    needs: [check, presubmit]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check results
+        shell: bash
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+          RUN_BUILD: ${{ needs.check.outputs.run_build }}
+          BUILD_RESULT: ${{ needs.presubmit.result }}
+        run: |
+          echo "check=${CHECK_RESULT} run_build=${RUN_BUILD} build=${BUILD_RESULT}"
+          if [[ "${CHECK_RESULT}" == "success" ]]; then
+            if [[ "${BUILD_RESULT}" == "success" ]]; then
+              exit 0
+            fi
+            if [[ "${BUILD_RESULT}" == "skipped" && "${RUN_BUILD}" == "false" ]]; then
+              exit 0
+            fi
+          fi
+          exit 1

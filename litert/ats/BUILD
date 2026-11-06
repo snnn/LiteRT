@@ -20,7 +20,7 @@ load("//litert/ats:ats.bzl", "litert_define_ats")
 # copybara:uncomment load("//litert/ats:models.bzl", "CLASSICAL_ALL_MODELS")
 load("//litert/build_common:litert_build_defs.bzl", "commandline_flag_copts", "if_oss", "litert_test")
 load("//litert/integration_test:litert_device.bzl", "litert_device_test")
-# copybara:uncomment load("//litert/integration_test/google:litert_device_guitar.bzl", "litert_exynos_mh_guitar_test", "litert_macos_mh_guitar_test", "litert_mediatek_mh_guitar_test", "litert_npu_aot_guitar_test", "litert_perfgate_upload_guitar_test", "litert_pixel_9_mh_guitar_test", "litert_pixel_mh_guitar_test", "litert_qualcomm_mh_guitar_test")
+# copybara:uncomment load("//litert/integration_test/google:litert_device_guitar.bzl", "litert_exynos_mh_guitar_test", "litert_macos_mh_guitar_test", "litert_mediatek_mh_guitar_test", "litert_npu_aot_guitar_test", "litert_perfgate_upload_guitar_test", "litert_pixel_9_mh_guitar_test", "litert_pixel_mh_guitar_test", "litert_qualcomm_mh_guitar_test", "litert_windows_mh_guitar_test")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["@org_tensorflow//tensorflow:license"],
@@ -198,9 +198,101 @@ YNNPACK_DONT_REGISTER = [
 ]
 
 BUILTIN_MODELS_DONT_REGISTER = [
+    "hf_mbart_large_50",  # TODO(b/576864700): OOMs on 8 GB devices prior to executor lifetime fix.
 ]
 
 YNNPACK_FALLBACK_MODELS_DONT_REGISTER = [
+    "hf_mbart_large_50",  # TODO(b/576864700): OOMs on 8 GB devices prior to executor lifetime fix.
+    "torchvision_video_resnet3d_18",  # TODO(b/576864700): Reference Conv3D fallback (~10m) causes target timeout.
+    "torchvision_video_resnetmc3_18",  # TODO(b/576864700): Reference Conv3D fallback (~12m) causes target timeout.
+]
+
+# TODO(b/581864435): Re-enable once YNNPACK/Slinky pipeline compilation no
+# longer overflows the 1 MB default Windows thread stack.
+YNNPACK_WINDOWS_MODELS_DONT_REGISTER = [
+    "hf_hubert_large_ls960_ft",
+    "hf_mms_300m",
+    "hf_mobilevit_small_e2e",
+    "hf_vit_base_patch16_224",
+    "hf_wav2vec2_base_960h",
+    "hf_wav2vec2_base_960h_dynamic",
+    "qai_hub_inception_v3",
+    "qai_hub_resnet101",
+    "timm_efficientformer_l1",
+    "timm_efficientnet",
+    "timm_nfnet",
+    "timm_pvt_v2_b1",
+    "timm_pvt_v2_b3",
+    "timm_regnety_120",
+    "timm_vit_small_path16_224",
+    "torchaudio_wav2vec2_base",
+    "torchvision_convnext_tiny",
+    "torchvision_densenet121",
+    "torchvision_efficientnet_b0",
+    "torchvision_efficientnet_b1",
+    "torchvision_efficientnet_b2",
+    "torchvision_efficientnet_b3",
+    "torchvision_efficientnet_b4",
+    "torchvision_efficientnet_b5",
+    "torchvision_efficientnet_b6",
+    "torchvision_efficientnet_b7",
+    "torchvision_googlenet",
+    "torchvision_inception_v3",
+    "torchvision_maxvit_t",
+    "torchvision_mnasnet0_5",
+    "torchvision_mobilenet_v2",
+    "torchvision_mobilenet_v3_large",
+    "torchvision_mobilenet_v3_small",
+    "torchvision_resnet152",
+    "torchvision_resnet50",
+    "torchvision_shufflenet_v2",
+    "torchvision_vit_base_patch16",
+    "torchvision_wide_resnet101_2",
+    "torchvision_wide_resnet50_2",
+]
+
+# TODO(b/581864435): Additional partially-delegated models in
+# YNNPACK_MODELS_DONT_REGISTER whose delegated YNNPACK subgraphs also overflow
+# the 1 MB default Windows thread stack in fallback mode.
+YNNPACK_FALLBACK_WINDOWS_MODELS_DONT_REGISTER = YNNPACK_WINDOWS_MODELS_DONT_REGISTER + [
+    "depth_anything_v2",
+    "hf_all_minilm_l6_v2",
+    "hf_detr_resnet50_dc5",
+    "hf_distil_whisper_small_no_cache",
+    "hf_distil_whisper_small_with_cache_init",
+    "hf_distilbert",
+    "hf_dpt_large",
+    "hf_emotion_english_distilroberta_base",
+    "hf_mbart_large_50",
+    "hf_mobilebert",
+    "hf_mobilevit_small",
+    "hf_pyannote_segmentation_3_0",
+    "hf_segformer_512",
+    "hf_splade_v2_distil",
+    "hf_tinyclip_vit_8m_16_text_3m_yfcc15m",
+    "hf_tinyroberta_squad2",
+    "hf_tinyroberta_squad2_dynamic_batch",
+    "hf_yolos_tiny",
+    "qai_hub_hf_wavlm_base_plus",
+    "qai_hub_hf_whisper_base_decoder",
+    "qai_hub_hf_whisper_base_encoder",
+    "qai_hub_midas",
+    "qai_hub_openai_clip",
+    "qai_hub_real_esrgan_x4plus",
+    "timm_efficientformerv2_s0",
+    "torchvision_deeplabv3_mobilenet_v3_large",
+    "torchvision_deeplabv3_resnet101",
+    "torchvision_deeplabv3_resnet50",
+    "torchvision_fcn_resnet50",
+    "torchvision_lraspp_mobilenet_v3_large",
+    "torchvision_swin_tiny",
+    "torchvision_video_resnet2plus1d_18",
+    "torchvision_video_resnet3d_18",
+    "torchvision_video_resnetmc3_18",
+    "torchvision_video_swin3d_tiny",
+    "whisper_tiny_decoder",
+    "whisper_tiny_encoder",
+    "yolo11n",
 ]
 
 GPU_MODELS_DONT_REGISTER = [
@@ -540,8 +632,7 @@ litert_define_ats(
         "FullyConnected.*,2d_f32[^c]",  # OpenCL does not support dynamic weights
         "FullyConnected.*,2d_f32.*,1d_f32",  # OpenCL dynamic bias permutations
         "BatchMatmul.*2d.*,[34]d",  # OpenCL does not support rank-asymmetric batch broadcasting
-        "BatchMatmul.*3d",  # ATS generator forces 1xB broadcast on 3D BatchMatmul
-        "BatchMatmul.*4d",  # ATS generator forces 1xB broadcast on 4D BatchMatmul
+        "BatchMatmul(?!.*_cst).*[34]d",  # OpenCL only supports 3D/4D BatchMatmul with constant 2D RHS (dynamic 3D/4D uses 1xB or rank-asymmetric broadcast)
         "Swiglu.*3d_f(16|32)<(?!1x)",  # GPU accelerator does not support SwiGLU with batch > 1
         "QkvNormRope.*4d_f(16|32)<(?!1x)",  # GPU accelerator does not support QkvNormRope with batch > 1
         "SelectV2",  # OpenCL SelectV2 rejects multidimensional if/else broadcasting and uses kExact on FP16-rounded f32
@@ -666,6 +757,43 @@ litert_define_ats(
     ],
     jit_suffix = "",
     platform = "macos",
+)
+
+litert_define_ats(
+    name = "cpu_windows_ats",
+    backend = "cpu",
+    compile_only_suffix = None,
+    dont_register = XNNPACK_DONT_REGISTER,
+    extra_flags = [
+        "--max_ms_per_test=2000",
+    ],
+    jit_suffix = "",
+    platform = "windows",
+)
+
+litert_define_ats(
+    name = "ynnpack_cpu_windows_ats",
+    backend = "cpu",
+    compile_only_suffix = None,
+    dont_register = YNNPACK_DONT_REGISTER,
+    extra_flags = [
+        "--enable_ynnpack=true",
+        "--max_ms_per_test=2000",
+    ],
+    jit_suffix = "",
+    platform = "windows",
+)
+
+litert_define_ats(
+    name = "builtin_cpu_windows_ats",
+    backend = "cpu",
+    compile_only_suffix = None,
+    dont_register = BUILTIN_DONT_REGISTER + ["CompositeOp"],
+    extra_flags = BUILTIN_EXTRA_FLAGS + [
+        "--max_ms_per_test=2000",
+    ],
+    jit_suffix = "",
+    platform = "windows",
 )
 
 litert_define_ats(
@@ -813,6 +941,70 @@ litert_define_ats(
 )
 
 litert_define_ats(
+    name = "cpu_windows_models_ats",
+    backend = "cpu",
+    compile_only_suffix = None,
+    do_register = ["ExtraModel"],
+    dont_register = XNNPACK_MODELS_DONT_REGISTER,
+    extra_flags = [
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
+    ],
+    extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
+    jit_suffix = "",
+    platform = "windows",
+)
+
+litert_define_ats(
+    name = "ynnpack_cpu_windows_models_ats",
+    backend = "cpu",
+    compile_only_suffix = None,
+    do_register = ["ExtraModel"],
+    dont_register = YNNPACK_MODELS_DONT_REGISTER + YNNPACK_WINDOWS_MODELS_DONT_REGISTER,
+    extra_flags = [
+        "--enable_ynnpack=true",
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
+    ],
+    extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
+    jit_suffix = "",
+    platform = "windows",
+)
+
+litert_define_ats(
+    name = "ynnpack_fallback_cpu_windows_models_ats",
+    backend = "cpu",
+    compile_only_suffix = None,
+    do_register = ["ExtraModel"],
+    dont_register = YNNPACK_FALLBACK_MODELS_DONT_REGISTER + YNNPACK_FALLBACK_WINDOWS_MODELS_DONT_REGISTER,
+    extra_flags = [
+        "--enable_ynnpack=true",
+        "--cpu_hint_fully_delegated=false",
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
+    ],
+    extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
+    jit_suffix = "",
+    platform = "windows",
+)
+
+litert_define_ats(
+    name = "builtin_cpu_windows_models_ats",
+    backend = "cpu",
+    compile_only_suffix = None,
+    do_register = ["ExtraModel"],
+    dont_register = BUILTIN_MODELS_DONT_REGISTER,
+    extra_flags = [
+        "--cpu_kernel_mode=builtin",
+        "--iters_per_test=10",
+        "--max_ms_per_test=20000",
+    ],
+    extra_models = ["https://storage.googleapis.com/litert/ats_models.tar.gz"],  # copybara:comment_replace extra_models = CLASSICAL_ALL_MODELS,
+    jit_suffix = "",
+    platform = "windows",
+)
+
+litert_define_ats(
     name = "metal_macos_models_ats",
     backend = "metal",
     compile_only_suffix = None,
@@ -855,7 +1047,7 @@ litert_test(
     linkstatic = True,
     no_main = True,
     target_compatible_with = select({
-        "//litert:windows": ["@platforms//:incompatible"],
+        "//litert:windows": if_oss(["@platforms//:incompatible"]),
         "//conditions:default": [],
     }),
     ungrte = if_oss(True, False),
@@ -870,13 +1062,21 @@ litert_test(
         ":register_transformer_layer",
         "//litert/c/internal:litert_logging",
         "//litert/cc/internal:litert_detail",
-        "//litert/runtime/accelerators/ynnpack:ynnpack_accelerator",  # buildcleaner: keep
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest",
-    ],
+    ] + select({
+        # On Windows (PE/COFF, no weak symbols), cpu_registry defines a strong
+        # nullptr fallback for LiteRtStaticLinkedAcceleratorYnnpackDef unless
+        # litert_enable_ynnpack is set (via ynnpack_platform_data), which then
+        # links ynnpack_accelerator through cpu_registry.
+        "//litert:windows": [],
+        "//conditions:default": [
+            "//litert/runtime/accelerators/ynnpack:ynnpack_accelerator",  # buildcleaner: keep
+        ],
+    }),
 )
 
 # Like `ats` above, `ynnpack_ats` is executed directly on the host machine with
@@ -2186,6 +2386,31 @@ cc_library(
 #     ],
 # )
 #
+# WINDOWS_ATS_GUITAR_TARGETS = [
+#     ":cpu_windows_ats_remote",
+#     ":ynnpack_cpu_windows_ats_remote",
+#     ":builtin_cpu_windows_ats_remote",
+# ]
+#
+# guitar_workflow_test(
+#     name = "litert_ats_guitar_windows",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_windows_mh_guitar_test(
+#                 targets = WINDOWS_ATS_GUITAR_TARGETS,
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
 # ANDROID_ATS_MODELS_GUITAR_TARGETS = [
 #     ":gpu_models_ats_remote",
 #     ":cpu_models_ats_remote",
@@ -2489,6 +2714,36 @@ cc_library(
 #             ),
 #             litert_perfgate_upload_guitar_test(
 #                 device = "macos",
+#             ),
+#         ],
+#     ),
+#     tags = [
+#         "external",
+#         "guitar",
+#         "manual",
+#         "notap",
+#     ],
+# )
+#
+# WINDOWS_ATS_MODELS_GUITAR_TARGETS = [
+#     ":cpu_windows_models_ats_remote",
+#     ":ynnpack_cpu_windows_models_ats_remote",
+#     ":ynnpack_fallback_cpu_windows_models_ats_remote",
+#     ":builtin_cpu_windows_models_ats_remote",
+# ]
+#
+# guitar_workflow_test(
+#     name = "litert_ats_models_guitar_windows",
+#     # This flag is required by guitar::update_culprit_finding_config and shard_count.
+#     extract_deps = True,
+#     integration_test = guitar.IntegrationTest(
+#         tests = [
+#             litert_windows_mh_guitar_test(
+#                 name = "model_tests",
+#                 targets = WINDOWS_ATS_MODELS_GUITAR_TARGETS,
+#             ),
+#             litert_perfgate_upload_guitar_test(
+#                 device = "windows",
 #             ),
 #         ],
 #     ),

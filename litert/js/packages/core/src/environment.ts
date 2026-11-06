@@ -15,16 +15,23 @@
  */
 
 import {getGlobalLiteRt} from './global_litert';
-import {Deletable, LiteRtEnvironment} from './wasm_binding_types';
+import type {LiteRt} from './litert_web';
+import {Deletable, LiteRtEnvironment, unwrapWasmResult} from './wasm_binding_types';
 
 /**
  * Options for creating a LiteRT.js Environment.
  *
  * If a property is omitted, it may be set to a default value. If a property is
  * explicitly set to `null`, no default value will be used.
+ *
+ * @property webGpuDevice A custom WebGPU device to use, or null to disable
+ *     WebGPU.
+ * @property cpuOnly If true, disables WebGPU and initializes a CPU-only
+ *     environment without querying WebGPU adapters.
  */
 export interface EnvironmentOptions {
   webGpuDevice?: GPUDevice|null;
+  cpuOnly?: boolean;
 }
 
 /**
@@ -47,16 +54,33 @@ export interface WithEnvironment {
  */
 export class Environment implements Deletable, EnvironmentOptions {
   readonly liteRtEnvironment: LiteRtEnvironment;
+  readonly options: EnvironmentOptions;
 
-  constructor(readonly options: Required<EnvironmentOptions>) {
+  constructor(
+      options: EnvironmentOptions = {},
+      liteRt?: LiteRt) {
+    const wasm = (liteRt ?? getGlobalLiteRt()).liteRtWasm;
+    const hasWebGpuSupport = wasm.hasWebGpuSupport?.() ?? true;
+    const webGpuDevice =
+        hasWebGpuSupport ? (options.webGpuDevice ?? null) : null;
+    this.options = {
+      ...options,
+      webGpuDevice,
+    };
     this.liteRtEnvironment =
-        getGlobalLiteRt().liteRtWasm.LiteRtEnvironment.create(
-            options.webGpuDevice);
+        unwrapWasmResult(wasm.LiteRtEnvironment.create(webGpuDevice));
   }
 
-  static async create(options: EnvironmentOptions = {}): Promise<Environment> {
+  static async create(
+      options: EnvironmentOptions = {},
+      liteRt?: LiteRt): Promise<Environment> {
+    const rt = liteRt ?? getGlobalLiteRt();
+    const hasWebGpuSupport = rt.liteRtWasm.hasWebGpuSupport?.() ?? true;
+
     let webGpuDevice: GPUDevice|null = null;
-    if ('webGpuDevice' in options) {
+    if (options.cpuOnly || options.webGpuDevice === null || !hasWebGpuSupport) {
+      webGpuDevice = null;
+    } else if (options.webGpuDevice !== undefined) {
       // Create a default webgpu device only if `webGpuDevice` is not a key in
       // the options. This allows the caller to pass in a custom webgpu device
       // and allows them to disable WebGPU entirely if they wish (e.g. not
@@ -77,11 +101,24 @@ export class Environment implements Deletable, EnvironmentOptions {
     return new Environment({
       ...options,
       webGpuDevice,
-    });
+      cpuOnly: webGpuDevice === null,
+    }, rt);
+  }
+
+  /**
+   * Helper to create a CPU-only environment without attempting to query or
+   * initialize WebGPU.
+   */
+  static createCpuOnly(liteRt?: LiteRt): Promise<Environment> {
+    return Environment.create({cpuOnly: true, webGpuDevice: null}, liteRt);
   }
 
   get webGpuDevice(): GPUDevice|null {
-    return this.options.webGpuDevice;
+    return this.options.webGpuDevice ?? null;
+  }
+
+  get cpuOnly(): boolean {
+    return this.webGpuDevice === null;
   }
 
   delete() {

@@ -224,7 +224,7 @@ def reshape_data_for_blockwise(
   return tensor_data.reshape(new_shape), quantized_dim + 1
 
 
-def _broadcast_scale_zp_for_blockwise(
+def broadcast_scale_zp_for_blockwise(
     tensor_content: np.ndarray,
     quant_params: qtyping.UniformQuantParams,
 ) -> qtyping.UniformQuantParams:
@@ -303,7 +303,7 @@ def uniform_quantize(
   # The reshaping for blockwise quantization is unique hence we do this here
   # to avoid unexpected broadcast behavior downstream.
   if is_blockwise_quant:
-    quantization_params = _broadcast_scale_zp_for_blockwise(
+    quantization_params = broadcast_scale_zp_for_blockwise(
         tensor_data, quantization_params
     )
 
@@ -349,9 +349,12 @@ def uniform_quantize(
     # Reshape the `tensor_data`, `scales`, and `zero_points` to just two
     # dimensions.
     output_shape = tensor_data.shape
-    tensor_data = tensor_data.reshape([-1, output_shape[-1]])
-    scales = np.broadcast_to(scales, tensor_data.shape)
-    zero_points = np.broadcast_to(zero_points, tensor_data.shape)
+    flat_2d_shape = [-1, output_shape[-1]]
+    tensor_data = tensor_data.reshape(flat_2d_shape)
+    scales = np.broadcast_to(scales, output_shape).reshape(flat_2d_shape)
+    zero_points = np.broadcast_to(zero_points, output_shape).reshape(
+        flat_2d_shape
+    )
     ret = np.zeros(shape=tensor_data.shape, dtype=_get_numpy_dtype(qtype))
 
     # Use a chunk size corresponding to 32 MiB of input data.
@@ -395,25 +398,27 @@ def uniform_dequantize(
     The dequantized tensor.
   """
   if quantization_params.block_size != 0:
-    # b/443830202: The quantized dimension is currently increased by 1 because
-    # AEQ expects 1 and XNNPack expects 0.
-    # We only increment it if it is XNNPack style (0) to avoid double increment
-    # if the caller already passed the actual AEQ style dimension (1).
-    if quantization_params.quantized_dimension == 0:
+    if quantization_params.quantized_dimension is not None:
+      # b/443830202: The quantized dimension is currently increased by 1 because
+      # LiteRTQ expects 1 and XNNPack expects 0.
+      # We only increment it if it is XNNPack style (0) to avoid double
+      # increment if the caller already passed the actual LiteRTQ style
+      # dimension (1).
+      if quantization_params.quantized_dimension == 0:
+        quantization_params = dataclasses.replace(
+            quantization_params,
+            quantized_dimension=quantization_params.quantized_dimension + 1,
+        )
+      scale_shape = list(tensor_data.shape)
+      scale_shape[quantization_params.quantized_dimension] = (  # pyrefly: ignore[unsupported-operation]
+          scale_shape[quantization_params.quantized_dimension]  # pyrefly: ignore[bad-index]
+          // quantization_params.block_size
+      )
       quantization_params = dataclasses.replace(
           quantization_params,
-          quantized_dimension=quantization_params.quantized_dimension + 1,
+          scale=quantization_params.scale.reshape(scale_shape),
       )
-    scale_shape = list(tensor_data.shape)
-    scale_shape[quantization_params.quantized_dimension] = (  # pyrefly: ignore[unsupported-operation]
-        scale_shape[quantization_params.quantized_dimension]  # pyrefly: ignore[bad-index]
-        // quantization_params.block_size
-    )
-    quantization_params = dataclasses.replace(
-        quantization_params,
-        scale=quantization_params.scale.reshape(scale_shape),
-    )
-    quantization_params = _broadcast_scale_zp_for_blockwise(
+    quantization_params = broadcast_scale_zp_for_blockwise(
         tensor_data, quantization_params
     )
 

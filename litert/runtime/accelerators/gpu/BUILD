@@ -261,6 +261,7 @@ macos_dylib(
     linkopts = [
         "-undefined dynamic_lookup",
         "-install_name @rpath/libLiteRtWebGpuAccelerator.dylib",
+        "-headerpad_max_install_names",
     ],
     minimum_os_version = "14.0",
     visibility = ["//visibility:private"],
@@ -341,6 +342,7 @@ litert_accelerator_library(
         "//litert/c/internal:litert_runtime_context_header",
         "//litert/c/options:litert_gpu_options",
         "//litert/cc:litert_macros",
+        "//litert/core:options",
         "//litert/runtime/accelerators:gpu_static_registry",
         "//ml_drift_delegate/delegate:buffer_handler_opencl",
         "//ml_drift_delegate/delegate:delegate_opencl",
@@ -416,6 +418,7 @@ macos_dylib(
     linkopts = [
         "-undefined dynamic_lookup",
         "-install_name @rpath/libLiteRtMetalAccelerator.dylib",
+        "-headerpad_max_install_names",
     ],
     minimum_os_version = "14.0",
     deps = [":ml_drift_metal_accelerator_runtimecapi"],
@@ -447,6 +450,7 @@ ios_framework(
     linkopts = [
         "-undefined dynamic_lookup",
         "-install_name @rpath/libLiteRtMetalAccelerator.dylib",
+        "-headerpad_max_install_names",
     ],
     minimum_os_version = "15.0",
     deps = [":ml_drift_metal_accelerator_runtimecapi"],

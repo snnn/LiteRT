@@ -177,6 +177,7 @@ cc_library(
         "@ml_drift//ml_drift/common:shape",
         "@ml_drift//ml_drift/common:tensor",
         "@ml_drift//ml_drift/common:types",
+        "@ml_drift//ml_drift/common/kernels/special:experts_remap",
         "@ml_drift//ml_drift/common/task:gpu_operation",
         "@ml_drift//ml_drift/common/task:tensor_desc",
         "@ml_drift//ml_drift/common/task:weights_layout",
@@ -192,13 +193,21 @@ cc_test(
         "//ml_drift_delegate/delegate/composite/ir:moe_experts_parser",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
+        "@flatbuffers",
+        "@ml_drift//ml_drift/common:access_type",
         "@ml_drift//ml_drift/common:data_type",
         "@ml_drift//ml_drift/common:gpu_info",
         "@ml_drift//ml_drift/common:gpu_model",
         "@ml_drift//ml_drift/common:gpu_model_builder",
+        "@ml_drift//ml_drift/common:gpu_model_cc_fbs",
         "@ml_drift//ml_drift/common:ir_model",
+        "@ml_drift//ml_drift/common:model",
         "@ml_drift//ml_drift/common:precision",
         "@ml_drift//ml_drift/common:shape",
+        "@ml_drift//ml_drift/common:types",
+        "@ml_drift//ml_drift/common:util",
+        "@ml_drift//ml_drift/common/task:gpu_operation",
+        "@ml_drift//ml_drift/common/task:gpu_tensor",
         "@ml_drift//ml_drift/common/task:tensor_desc",
     ],
 )
@@ -538,7 +547,9 @@ cc_library(
         "//tflite/c:common",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@flatbuffers",
         "@ml_drift//ml_drift/common:model",
     ],
@@ -834,10 +845,82 @@ cc_library(
         "@ml_drift//ml_drift/common:ir_model",
         "@ml_drift//ml_drift/common:kernel_info",
         "@ml_drift//ml_drift/common:model",
+        "@ml_drift//ml_drift/common:tensor_handle",
         "@ml_drift//ml_drift/common:types",
         "@ml_drift//ml_drift/common/task:gpu_operation",
         "@ml_drift//ml_drift/common/task:tensor_desc",
         "@ml_drift//ml_drift/common/task:tuning_type",
+    ],
+)
+
+mld_kernel_test(
+    name = "gated_delta_update_kernel_test",
+    srcs = ["gated_delta_update_kernel_test.cc"],
+    platforms = [
+        "opencl",
+        "webgpu",
+    ],
+    deps = [
+        ":gated_delta_update_kernel",
+        ":gated_delta_update_parser",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/strings",
+        "@ml_drift//ml_drift/common:data_type",
+        "@ml_drift//ml_drift/common:precision",
+        "@ml_drift//ml_drift/common:shape",
+        "@ml_drift//ml_drift/common/task:gpu_operation",
+        "@ml_drift//ml_drift/common/task:tensor_desc",
+        "@ml_drift//ml_drift/common/task:testing_util",
+    ],
+)
+
+# The Mac test targets are defined separately from mld_kernel_test to tag the
+# objc_library and cc_test with "manual", "notap", and "nobuilder" (see
+# short_conv_step_kernel_test_mac). Run with:
+# bazel test -c opt --config=darwin_arm64 //third_party/odml/litert/ml_drift/delegate/composite:gated_delta_update_kernel_test_mac
+objc_library(
+    name = "gated_delta_update_kernel_test_objc_lib",
+    testonly = True,
+    srcs = [
+        "gated_delta_update_kernel_test.cc",
+        "@ml_drift//ml_drift/common/kernels/tests:kernel_test.h",
+        "@ml_drift//ml_drift/common/kernels/tests:metal_kernel_test.mm",
+    ],
+    tags = [
+        "manual",
+        "nobuilder",
+        "notap",
+    ],
+    deps = [
+        ":gated_delta_update_kernel",
+        ":gated_delta_update_parser",
+        "@com_google_googletest//:gtest",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/strings",
+        # Dependency placeholder: apple_frameworks Metal,
+        "@ml_drift//ml_drift/common:data_type",
+        "@ml_drift//ml_drift/common:precision",
+        "@ml_drift//ml_drift/common:shape",
+        "@ml_drift//ml_drift/common/task:gpu_operation",
+        "@ml_drift//ml_drift/common/task:tensor_desc",
+        "@ml_drift//ml_drift/common/task:testing_util",
+        "@ml_drift//ml_drift/metal/testing:test_util",
+    ],
+)
+
+cc_test(
+    name = "gated_delta_update_kernel_test_mac",
+    tags = [
+        "mac",
+        "manual",
+        "nobuilder",
+        "notap",
+        "nozapfhahn",
+    ],
+    deps = [
+        ":gated_delta_update_kernel_test_objc_lib",
     ],
 )
 

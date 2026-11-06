@@ -52,16 +52,31 @@ limitations under the License.
 #include "tensor/tensor.h"
 #include "tensor/utils/macros.h"
 
+#if defined(LITERT_TENSOR_ENABLE_PERFETTO)
+#include "tensor/examples/utils/perfetto_session.h"
+#include "perfetto/tracing/track_event.h"  // from @perfetto
+#else
+#define TRACE_EVENT(...) ((void)0)
+#endif
+
 namespace litert::tensor::examples {
 
 namespace {
 
-// Creates a `SpanCpuBuffer` over the given data and wraps it in a `shared_ptr`.
+// Creates a `SpanCpuBuffer` over the given data and wraps it in a `shared_ptr`
+// when `data` satisfies `alignment`, or copies into an aligned
+// `OwningCpuBuffer` when contiguous safetensors packing leaves `data`
+// misaligned for its element type.
 //
 // `owner` is kept around in the `shared_ptr` to keep the data and the span
 // lifetimes in sync.
 std::shared_ptr<Buffer> MakeMappedBuffer(const std::shared_ptr<void>& owner,
-                                         const std::byte* data, size_t bytes) {
+                                         const std::byte* data, size_t bytes,
+                                         size_t alignment) {
+  if (bytes > 0 && alignment > 1 &&
+      reinterpret_cast<uintptr_t>(data) % alignment != 0) {
+    return OwningCpuBuffer::Copy(reinterpret_cast<const char*>(data), bytes);
+  }
   return std::shared_ptr<Buffer>(new SpanCpuBuffer(data, bytes),
                                  [owner](Buffer* buffer) {
                                    static_cast<void>(owner);
@@ -122,6 +137,20 @@ absl::StatusOr<size_t> NumElements(const std::vector<int64_t>& shape) {
   return num_elements;
 }
 
+absl::StatusOr<Shape> ToTensorShape(const std::vector<int64_t>& shape,
+                                    absl::string_view name) {
+  Shape result;
+  result.reserve(shape.size());
+  for (int64_t dim : shape) {
+    if (dim < 0 || dim > std::numeric_limits<int>::max()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Tensor `", name, "` has invalid shape dimension: ", dim));
+    }
+    result.push_back(static_cast<int>(dim));
+  }
+  return result;
+}
+
 absl::Status ValidateTensorRange(const SafetensorTensorInfo& info) {
   if (!info.storage) {
     return absl::FailedPreconditionError("No storage is set for tensor.");
@@ -133,6 +162,21 @@ absl::Status ValidateTensorRange(const SafetensorTensorInfo& info) {
   if (info.data_end > info.storage->data_size) {
     return absl::DataLossError(
         absl::StrCat("Tensor data out of range for: ", info.name));
+  }
+  LRT_TENSOR_ASSIGN_OR_RETURN(const size_t num_elements,
+                              NumElements(info.shape));
+  const size_t dtype_bytes = safetensors::get_dtype_bytes(info.dtype);
+  if (num_elements != 0 &&
+      dtype_bytes > std::numeric_limits<size_t>::max() / num_elements) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Tensor byte size overflows for: ", info.name));
+  }
+  const size_t expected_bytes = num_elements * dtype_bytes;
+  if (expected_bytes != info.data_end - info.data_start) {
+    return absl::DataLossError(absl::StrCat(
+        "Tensor byte size mismatch for ", info.name, ": expected ",
+        expected_bytes, " bytes from shape/dtype, got ",
+        info.data_end - info.data_start));
   }
   return absl::OkStatus();
 }
@@ -182,6 +226,9 @@ struct HasBoundCheck<From, To,
     };                                                                    \
   }
 
+inline float BoolByteToFloat(uint8_t val) { return val != 0 ? 1.0f : 0.0f; }
+inline int64_t BoolByteToInt64(uint8_t val) { return val != 0 ? 1 : 0; }
+
 CONVERT_INFO(FLOAT32, float, float, static_cast<float>);
 CONVERT_INFO(BFLOAT16, float, uint16_t, safetensors::bfloat16_to_float);
 CONVERT_INFO(FLOAT16, float, uint16_t, safetensors::fp16_to_float);
@@ -193,7 +240,7 @@ CONVERT_INFO(UINT8, float, uint8_t, static_cast<float>);
 CONVERT_INFO(UINT16, float, uint16_t, static_cast<float>);
 CONVERT_INFO(UINT32, float, uint32_t, static_cast<float>);
 CONVERT_INFO(UINT64, float, uint64_t, static_cast<float>);
-CONVERT_INFO(BOOL, float, bool, static_cast<float>);
+CONVERT_INFO(BOOL, float, uint8_t, BoolByteToFloat);
 
 CONVERT_INFO(INT8, int64_t, int8_t, static_cast<int64_t>);
 CONVERT_INFO(INT16, int64_t, int16_t, static_cast<int64_t>);
@@ -204,7 +251,7 @@ CONVERT_INFO(UINT16, int64_t, uint16_t, static_cast<int64_t>);
 CONVERT_INFO(UINT32, int64_t, uint32_t, static_cast<int64_t>);
 CONVERT_INFO(UINT64, int64_t, uint64_t, static_cast<int64_t>);
 CHECK_INFO(UINT64, int64_t, val <= std::numeric_limits<int64_t>::max());
-CONVERT_INFO(BOOL, int64_t, bool, static_cast<int64_t>);
+CONVERT_INFO(BOOL, int64_t, uint8_t, BoolByteToInt64);
 
 // Allows conversion directly into the owning tensor buffer.
 template <Type type>
@@ -239,20 +286,22 @@ absl::StatusOr<Container> ConvertTensorTo(const SafetensorTensorInfo& info) {
   case safetensors::dtype::k##ST_TYPE: {                                       \
     if constexpr (CanConvert<safetensors::dtype::k##ST_TYPE, T>::value) {      \
       using Info = ConvertInfo<safetensors::dtype::k##ST_TYPE, T>;             \
-      if (bytes != num_elements * sizeof(typename Info::Storage)) {            \
+      using Storage = typename Info::Storage;                                  \
+      if (bytes != num_elements * sizeof(Storage)) {                           \
         return absl::InvalidArgumentError(#ST_TYPE                             \
                                           " tensor byte size mismatch");       \
       }                                                                        \
       for (size_t i = 0; i < num_elements; ++i) {                              \
-        typename Info::Storage value;                                          \
-        std::memcpy(&value, data_ptr + i * sizeof(value), sizeof(value));      \
+        Storage src_val;                                                       \
+        std::memcpy(&src_val, data_ptr + i * sizeof(Storage),                  \
+                    sizeof(Storage));                                          \
         if constexpr (HasBoundCheck<safetensors::dtype::k##ST_TYPE,            \
                                     T>::value) {                               \
           LRT_TENSOR_RETURN_IF_ERROR(                                          \
               (ConvertBoundCheck<safetensors::dtype::k##ST_TYPE, T>::Check(    \
-                  value)));                                                    \
+                  src_val)));                                                  \
         }                                                                      \
-        values_data[i] = Info::Convert(value);                                 \
+        values_data[i] = Info::Convert(src_val);                               \
       }                                                                        \
     } else {                                                                   \
       return absl::InvalidArgumentError(                                       \
@@ -1046,7 +1095,8 @@ absl::StatusOr<TensorHandle> SafetensorLoader::LoadCompressedWeight(
   if (bits == 8) {
     buffer =
         MakeMappedBuffer(info.storage->file_data,
-                         reinterpret_cast<const std::byte*>(source), bytes);
+                         reinterpret_cast<const std::byte*>(source), bytes,
+                         /*alignment=*/alignof(int8_t));
   } else {
     auto unpacked = OwningCpuBuffer::Allocate<Type::kI4>(elements);
     auto* destination = reinterpret_cast<uint8_t*>(unpacked->data());
@@ -1188,7 +1238,14 @@ absl::Status SafetensorLoader::AddSafetensorFile(const std::string& path) {
     info.dtype = tensor_info.dtype;
 
     // Convert shape
-    info.shape.assign(tensor_info.shape.begin(), tensor_info.shape.end());
+    info.shape.reserve(tensor_info.shape.size());
+    for (size_t dim : tensor_info.shape) {
+      if (dim > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "Tensor `", name, "` shape dimension exceeds int64_t max: ", dim));
+      }
+      info.shape.push_back(static_cast<int64_t>(dim));
+    }
 
     info.data_start = tensor_info.data_offsets[0];
     info.data_end = tensor_info.data_offsets[1];
@@ -1368,13 +1425,15 @@ absl::StatusOr<TensorHandle> SafetensorLoader::LoadTensor(
   }
   const std::byte* data_ptr = storage.data_base + info.data_start;
   size_t data_size = info.data_end - info.data_start;
+  const size_t dtype_alignment = safetensors::get_dtype_bytes(info.dtype);
   std::shared_ptr<Buffer> buffer;
   std::shared_ptr<Quantization> quantization;
   switch (type) {
     case Type::kU8:
     case Type::kI8:
     case Type::kI32: {
-      buffer = MakeMappedBuffer(storage.file_data, data_ptr, data_size);
+      buffer = MakeMappedBuffer(storage.file_data, data_ptr, data_size,
+                                dtype_alignment);
 
       if (!quant_config_.has_value()) {
         break;
@@ -1454,10 +1513,25 @@ absl::StatusOr<TensorHandle> SafetensorLoader::LoadTensor(
       // Nibble-packed weights hold two elements per byte, so the shape on disk
       // is half as wide as the weight it represents.
       if (num_bits == 4 && info.shape.size() == 2) {
-        const size_t d_out = info.shape[0];
-        const size_t d_in_packed = info.shape[1];
+        if (info.shape[0] < 0 || info.shape[1] < 0) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("Tensor `", name, "` has negative shape dimension"));
+        }
+        const size_t d_out = static_cast<size_t>(info.shape[0]);
+        const size_t d_in_packed = static_cast<size_t>(info.shape[1]);
         const size_t packed_element_count = BufferSize(type, 1) * 2;
+        if (packed_element_count != 0 &&
+            d_in_packed >
+                std::numeric_limits<size_t>::max() / packed_element_count) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("Tensor `", name, "` unpacked dimension overflows"));
+        }
         const size_t d_in = d_in_packed * packed_element_count;
+        if (d_out > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+            d_in > static_cast<size_t>(std::numeric_limits<int>::max())) {
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Tensor `", name, "` unpacked shape exceeds int max"));
+        }
 
         return TensorHandle(TensorInit{
             .name = std::string(name),
@@ -1471,7 +1545,8 @@ absl::StatusOr<TensorHandle> SafetensorLoader::LoadTensor(
     case Type::kBF16:
     case Type::kFP16: {
       if (absl::EndsWith(name, "embed_tokens_per_layer.weight")) {
-        buffer = MakeMappedBuffer(storage.file_data, data_ptr, data_size);
+        buffer = MakeMappedBuffer(storage.file_data, data_ptr, data_size,
+                                  dtype_alignment);
       } else {
         LRT_TENSOR_ASSIGN_OR_RETURN(
             auto converted,
@@ -1489,20 +1564,36 @@ absl::StatusOr<TensorHandle> SafetensorLoader::LoadTensor(
     case Type::kU32:
     case Type::kU64:
     case Type::kBOOL:
-      buffer = MakeMappedBuffer(storage.file_data, data_ptr, data_size);
+      buffer = MakeMappedBuffer(storage.file_data, data_ptr, data_size,
+                                dtype_alignment);
       break;
     default:
       return absl::UnimplementedError(
           absl::StrCat("Unsupported type for loading: ", ToString(type)));
   }
 
-  return TensorHandle(TensorInit{
-      .name = std::string(name),
-      .type = type,
-      .shape = std::vector<int>(info.shape.begin(), info.shape.end()),
-      .buffer = buffer,
-      .quantization = quantization});
+  LRT_TENSOR_ASSIGN_OR_RETURN(Shape tensor_shape,
+                              ToTensorShape(info.shape, name));
+  return TensorHandle(TensorInit{.name = std::string(name),
+                                 .type = type,
+                                 .shape = std::move(tensor_shape),
+                                 .buffer = buffer,
+                                 .quantization = quantization});
 }
+
+template <typename T>
+absl::StatusOr<std::vector<T>> SafetensorLoader::ReadTensorAs(
+    absl::string_view name) const {
+  LRT_TENSOR_ASSIGN_OR_RETURN(const SafetensorTensorInfo& info,
+                              GetTensorInfo(name));
+  LRT_TENSOR_RETURN_IF_ERROR(ValidateTensorRange(info));
+  return ConvertTensorTo<std::vector<T>>(info);
+}
+
+template absl::StatusOr<std::vector<float>>
+SafetensorLoader::ReadTensorAs<float>(absl::string_view name) const;
+template absl::StatusOr<std::vector<int64_t>>
+SafetensorLoader::ReadTensorAs<int64_t>(absl::string_view name) const;
 
 absl::StatusOr<std::shared_ptr<Quantization>>
 SafetensorLoader::LoadQuantizationParams(
@@ -1588,10 +1679,18 @@ absl::StatusOr<TensorHandle> SafetensorLoader::LoadPackedTensor(
 
   LRT_TENSOR_ASSIGN_OR_RETURN(const size_t container_bits,
                               PackedContainerBits(info.dtype));
+  const int64_t fields_per_container =
+      static_cast<int64_t>(container_bits) / scheme->num_bits;
+  if (info.shape[0] < 0 || info.shape[0] > std::numeric_limits<int>::max() ||
+      info.shape[1] < 0 ||
+      info.shape[1] > std::numeric_limits<int>::max() / fields_per_container) {
+    return absl::InvalidArgumentError(
+        absl::StrCat(packed_name, ": packed shape exceeds supported bounds"));
+  }
   const int64_t num_rows = info.shape[0];
-  const int64_t packed_row_bytes = info.shape[1] * container_bits / 8;
-  const int64_t unpacked_cols =
-      info.shape[1] * static_cast<int64_t>(container_bits) / scheme->num_bits;
+  const int64_t packed_row_bytes =
+      info.shape[1] * static_cast<int64_t>(container_bits / 8);
+  const int64_t unpacked_cols = info.shape[1] * fields_per_container;
 
   // The packed shape rounds the weight up to a whole number of containers;
   // `weight_shape` records the shape before that padding.
@@ -1607,7 +1706,8 @@ absl::StatusOr<TensorHandle> SafetensorLoader::LoadPackedTensor(
       return absl::InvalidArgumentError(absl::StrCat(
           shape_name, ": expected 2 dimensions, got ", logical_shape.size()));
     }
-    if (logical_shape[0] != num_rows || logical_shape[1] > unpacked_cols) {
+    if (logical_shape[0] != num_rows || logical_shape[1] < 0 ||
+        logical_shape[1] > unpacked_cols) {
       return absl::InvalidArgumentError(
           absl::StrCat(shape_name, ": logical shape [", logical_shape[0], ", ",
                        logical_shape[1], "] does not fit the packed shape [",

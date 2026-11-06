@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-import {abs, add, argMax, author, AuthoredModel, avgPool2d, batchMatMul, ceil, CompiledModel, concat, conv2d, cos, cumsum, depthToSpace, depthwiseConv2d, div, elu, embeddingLookup, Environment, equal, exp, expandDims, floor, floorDiv, floorMod, fullyConnected, gather, gatherNd, gelu, greater, greaterEqual, hardSwish, leakyRelu, less, lessEqual, LiteRt, loadAndCompile, loadLiteRt, type LoadLiteRtOptions, loadModelAndWeights, log, logicalAnd, logicalNot, logicalOr, logistic, logSoftmax, maximum, maxPool2d, mean, minimum, mul, neg, nonMaxSuppression, notEqual, oneHot, pack, pad, pow, reduceMax, relu, relu6, reshape, resizeBilinear, resizeNearestNeighbor, reverse, round, rsqrt, select, sin, slice, softmax, spaceToDepth, split, sqrt, squeeze, sub, sum, supportsFeature, tanh, Tensor, TensorBufferType, tile, topK, transpose, transposeConv2d, type TypedArray, unloadLiteRt, unpack} from '@litertjs/core';
+import {abs, add, argMax, author, AuthoredModel, avgPool2d, batchMatMul, ceil, CompiledModel, concat, conv2d, cos, cumsum, depthToSpace, depthwiseConv2d, div, elu, embeddingLookup, Environment, equal, exp, expandDims, floor, floorDiv, floorMod, fullyConnected, gather, gatherNd, gelu, greater, greaterEqual, hardSwish, initFromWasmModule, leakyRelu, less, lessEqual, LiteRt, loadAndCompile, loadLiteRt, type LoadLiteRtOptions, loadModelAndWeights, log, logicalAnd, logicalNot, logicalOr, logistic, logSoftmax, maximum, maxPool2d, mean, minimum, mul, neg, nonMaxSuppression, notEqual, oneHot, pack, pad, pow, reduceMax, relu, relu6, reshape, resizeBilinear, resizeNearestNeighbor, reverse, round, rsqrt, select, sin, slice, softmax, spaceToDepth, split, sqrt, squeeze, sub, sum, supportsFeature, tanh, Tensor, TensorBufferType, tile, topK, transpose, transposeConv2d, type TypedArray, unloadLiteRt, unpack} from '@litertjs/core';
 // Placeholder for internal dependency on trusted resource url
 import {type BigIntTypedArray, type NumberTypedArray} from './datatypes';
+import {unwrapWasmResult} from './wasm_binding_types';
 
 declare global {
   interface ArrayConstructor {
@@ -58,6 +59,111 @@ describe('LiteRt', () => {
   it('reloads the WASM module', async () => {
     await resetLiteRt();
     expect(liteRt).toBeDefined();
+  });
+
+  describe('initFromWasmModule and CPU-only environment', () => {
+    it('initializes from an existing WasmModule with cpuOnly option', async () => {
+      await resetLiteRt();
+      const wasmModule = liteRt.liteRtWasm;
+      unloadLiteRt();
+
+      const cpuLiteRt = await initFromWasmModule(wasmModule, {cpuOnly: true});
+      try {
+        expect(cpuLiteRt).toBeDefined();
+        const env = cpuLiteRt.getDefaultEnvironment();
+        expect(env.webGpuDevice).toBeNull();
+        expect(env.cpuOnly).toBeTrue();
+      } finally {
+        unloadLiteRt();
+        await resetLiteRt();
+      }
+    });
+
+    it('creates a CPU-only environment without WebGPU device', async () => {
+      await resetLiteRt();
+      const env = await Environment.createCpuOnly(liteRt);
+      expect(env.webGpuDevice).toBeNull();
+      expect(env.cpuOnly).toBeTrue();
+      env.delete();
+    });
+
+    it('loads and runs a model on CPU with cpuOnly environment', async () => {
+      await resetLiteRt();
+      const wasmModule = liteRt.liteRtWasm;
+      unloadLiteRt();
+
+      const cpuLiteRt = await initFromWasmModule(wasmModule, {cpuOnly: true});
+      try {
+        const model = await cpuLiteRt.loadAndCompile('/testdata/add_10x10.tflite');
+        expect(model).toBeDefined();
+
+        const onesData = new Float32Array(100).fill(1.0);
+        const a = new Tensor(onesData, [10, 10]);
+
+        const rangeData = new Float32Array(100);
+        for (let i = 0; i < 100; i++) {
+          rangeData[i] = i;
+        }
+        const b = new Tensor(rangeData, [10, 10]);
+
+        const outputs = await model.run({'a': a, 'b': b});
+        const outputData = await outputs['Identity'].data();
+
+        const expectedData = new Float32Array(100);
+        for (let i = 0; i < 100; i++) {
+          expectedData[i] = onesData[i] + rangeData[i];
+        }
+        expect(outputData).toEqual(expectedData);
+
+        a.delete();
+        b.delete();
+        outputs['Identity'].delete();
+        model.delete();
+      } finally {
+        unloadLiteRt();
+        await resetLiteRt();
+      }
+    });
+
+    it('throws if LiteRT is already loading or loaded', async () => {
+      await resetLiteRt();
+      const wasmModule = liteRt.liteRtWasm;
+      expect(() => initFromWasmModule(wasmModule))
+          .toThrowError(/LiteRT is already loading \/ loaded/);
+    });
+
+    it('runs inference against litert_wasm_cpu_only without WebGPU', async () => {
+      unloadLiteRt();
+      // Load the CPU-only WASM binary directly.
+      const cpuLiteRt = await loadLiteRt(
+          trustedResourceUrl`/wasm/litert_wasm_cpu_only_internal.js`);
+      try {
+        expect(cpuLiteRt).toBeDefined();
+        expect(cpuLiteRt.liteRtWasm.hasWebGpuSupport?.()).toBeFalse();
+        const env = cpuLiteRt.getDefaultEnvironment();
+        expect(env.webGpuDevice).toBeNull();
+        expect(env.cpuOnly).toBeTrue();
+
+        // Model compiles and runs on CPU without WebGPU device.
+        const model = await cpuLiteRt.loadAndCompile('/testdata/add_10x10.tflite');
+        expect(model).toBeDefined();
+
+        const a = new Tensor(new Float32Array(100).fill(1.0), [10, 10]);
+        const b = new Tensor(new Float32Array(100).fill(2.0), [10, 10]);
+        const outputs = await model.run({'a': a, 'b': b});
+        const outputData = await outputs['Identity'].data();
+
+        expect(outputData).toEqual(new Float32Array(100).fill(3.0));
+
+        a.delete();
+        b.delete();
+        outputs['Identity'].delete();
+        model.delete();
+      } finally {
+        unloadLiteRt();
+        await resetLiteRt();
+      }
+    });
   });
 
   describe('threaded wasm', () => {
@@ -179,15 +285,15 @@ describe('LiteRt', () => {
         wasmModule.HEAPU8.set(modelData, ptr);
 
         const environment = liteRt.getDefaultEnvironment();
-        const wasmModel = wasmModule.loadModel(
-            environment.liteRtEnvironment, ptr, modelData.byteLength);
+        const wasmModel = unwrapWasmResult(wasmModule.loadModel(
+            environment.liteRtEnvironment, ptr, modelData.byteLength));
 
         const compileOptions = {};
         const result = wasmModule.compileModel(
             environment.liteRtEnvironment, wasmModel, compileOptions);
 
         expect(result).toBeInstanceOf(Promise);
-        const compiledModel = await result;
+        const compiledModel = unwrapWasmResult(await result);
         expect(compiledModel).toBeDefined();
 
         compiledModel.delete();
@@ -213,8 +319,8 @@ describe('LiteRt', () => {
       wasmModule.HEAPU8.set(modelData, ptr);
 
       const environment = liteRt.getDefaultEnvironment();
-      const wasmModel = wasmModule.loadModel(
-          environment.liteRtEnvironment, ptr, modelData.byteLength);
+      const wasmModel = unwrapWasmResult(wasmModule.loadModel(
+          environment.liteRtEnvironment, ptr, modelData.byteLength));
 
       const compileOptions = {};
       const result = wasmModule.compileModel(
@@ -618,6 +724,32 @@ describe('LiteRt', () => {
 
       await expectAsync(loadAndCompile(badModel))
           .toBeRejectedWithError(/Failed to load model from buffer/);
+    });
+
+    it('fails many times without corrupting the Wasm module', async () => {
+      // Errors from C++ bindings used to be thrown as JS exceptions from inside
+      // Wasm. That skipped C++ destructors and never restored the Wasm stack
+      // pointer, so each error leaked Wasm stack until it overflowed.
+      const badModel =
+          new TextEncoder().encode('****BADM and some extra data here.');
+      let unexpected: unknown = undefined;
+      for (let i = 0; i < 5000 && unexpected === undefined; ++i) {
+        try {
+          const model = await loadAndCompile(badModel);
+          model.delete();
+          unexpected = `Iteration ${i}: loadAndCompile did not throw.`;
+        } catch (e) {
+          if (!(e instanceof Error) ||
+              !/Failed to load model from buffer/.test(e.message)) {
+            unexpected = e;
+          }
+        }
+      }
+      expect(unexpected).toBeUndefined();
+
+      const model = await loadAndCompile(modelPath);
+      expect(model).toBeDefined();
+      model.delete();
     });
 
     it('loads two models', async () => {
@@ -3220,7 +3352,8 @@ describe('LiteRt', () => {
          const data = new Float32Array([1.234, 2.345, 3.456]);
          const tensor = new Tensor(data);
          const gpuTensor = await tensor.moveTo('webgpu');
-         const bufferPtr = gpuTensor.liteRtTensorHandle.getWebGpuBuffer();
+         const bufferPtr =
+             unwrapWasmResult(gpuTensor.liteRtTensorHandle.getWebGpuBuffer());
 
          // This is a private property of the WebGPU module, but we need to
          // access it to test that the buffer is removed from the map when the

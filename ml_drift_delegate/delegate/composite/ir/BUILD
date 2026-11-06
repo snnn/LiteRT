@@ -50,6 +50,7 @@ cc_library(
         "//ml_drift_delegate/tflite:custom_ir_operation_parser",
         "//ml_drift_delegate/tflite:ir_model_builder_helper",
         "//ml_drift_delegate/tflite:model_builder_helper",
+        "//ml_drift_delegate/tflite/convert:convert_aux",
         "//tflite:builtin_ops",
         "//tflite/c:common",
         "//tflite/kernels:kernel_util",
@@ -163,7 +164,6 @@ cc_library(
         "//tflite/c:common",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
-        "@com_google_absl//absl/strings",
         "@ml_drift//ml_drift/common:ir_model",
     ],
 )
@@ -324,6 +324,9 @@ cc_test(
     deps = [
         ":moe_experts_parser",
         "//ml_drift_delegate/tflite:custom_ir_operation_parser",
+        "//ml_drift_delegate/tflite:ir_model_builder",
+        "//ml_drift_delegate/tflite:ir_model_builder_helper",
+        "//ml_drift_delegate/tflite:shared_const_tensor_map",
         "//ml_drift_delegate/tflite/convert:convert_testing_utils",
         "//ml_drift_delegate/tflite/convert:stub_delegate",
         "//tflite:builtin_ops",
@@ -333,6 +336,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@flatbuffers",
         "@ml_drift//ml_drift/common:ir_model",
+        "@ml_drift//ml_drift/common:operations",
     ],
 )
 
@@ -443,6 +447,24 @@ cc_test(
     deps = [
         ":gated_delta_update_parser",
         "//ml_drift_delegate/delegate/composite:gated_delta_update_parser",
+        "//ml_drift_delegate/tflite:custom_ir_operation_parser",
+        "//ml_drift_delegate/tflite/convert:convert_testing_utils",
+        "//ml_drift_delegate/tflite/convert:stub_delegate",
+        "//tflite:builtin_ops",
+        "//tflite:framework_stable",
+        "//tflite/c:common",
+        "@com_google_googletest//:gtest_main",
+        "@flatbuffers",
+        "@ml_drift//ml_drift/common:ir_model",
+    ],
+)
+
+cc_test(
+    name = "short_conv_step_parser_test",
+    srcs = ["short_conv_step_parser_test.cc"],
+    deps = [
+        ":short_conv_step_parser",
+        "//ml_drift_delegate/delegate/composite:short_conv_step_parser",
         "//ml_drift_delegate/tflite:custom_ir_operation_parser",
         "//ml_drift_delegate/tflite/convert:convert_testing_utils",
         "//ml_drift_delegate/tflite/convert:stub_delegate",

@@ -25,6 +25,7 @@
 #include <variant>
 #include <vector>
 
+#include "litert/c/litert_event_type.h"
 #include "litert/c/litert_opencl_types.h"
 
 #ifndef LITERT_DISABLE_CPU
@@ -48,10 +49,6 @@
 #include "litert/runtime/custom_buffer.h"
 #include "litert/runtime/event.h"
 
-#if LITERT_HAS_OPENCL_SUPPORT
-#include "litert/runtime/open_cl_memory.h"
-#include <CL/cl.h>
-#endif  // LITERT_HAS_OPENCL_SUPPORT
 
 #if LITERT_HAS_OPENGL_SUPPORT
 #include "litert/c/litert_gl_types.h"
@@ -278,8 +275,7 @@ LiteRtTensorBufferT::CreateManagedOnHostMemory(
     return Unexpected(kLiteRtStatusErrorRuntimeFailure,
                       "Failed to allocate aligned memory");
   }
-  std::memset(static_cast<uint8_t*>(host_memory_ptr) + buffer_size, 0,
-              XNN_EXTRA_BYTES);
+  std::memset(host_memory_ptr, 0, buffer_size + XNN_EXTRA_BYTES);
 
   LiteRtHostMemoryDeallocator deallocator = FreeHostMemory;
   LITERT_ASSIGN_OR_RETURN(
@@ -1071,8 +1067,10 @@ Expected<void*> LiteRtTensorBufferT::Lock(LiteRtTensorBufferLockMode mode) {
   lock_mode_ = mode;
   if (event_ != nullptr) {
     // Only AHWB supports waiting on an input sync fence when locking the
-    // buffer. For all other buffer types we wait here.
-    if (buffer_type() != kLiteRtTensorBufferTypeAhwb) {
+    // buffer. For all other buffer types and non-sync-fence events we wait
+    // here.
+    if (buffer_type() != kLiteRtTensorBufferTypeAhwb ||
+        event_->type != LiteRtEventTypeSyncFenceFd) {
       LITERT_RETURN_IF_ERROR(event_->Wait(/*timeout_in_ms=*/-1));
     }
   }
@@ -1086,7 +1084,10 @@ Expected<void*> LiteRtTensorBufferT::Lock(LiteRtTensorBufferLockMode mode) {
 #if LITERT_HAS_AHWB_SUPPORT
       LITERT_ASSIGN_OR_ABORT(auto ahwb_buffer, GetAhwbBuffer());
       return litert::internal::AhwbBuffer::Lock(
-          ahwb_buffer, event_ != nullptr ? event_.get() : nullptr);
+          ahwb_buffer, (event_ != nullptr &&
+                        event_->type == LiteRtEventTypeSyncFenceFd)
+                           ? event_.get()
+                           : nullptr);
 #else
       return Unexpected(kLiteRtStatusErrorRuntimeFailure,
                          "AHardwareBuffer is not supported");
