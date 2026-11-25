@@ -24,6 +24,7 @@
 #include <string>
 #include <utility>
 
+#include "absl/base/attributes.h"  // from @com_google_absl
 #include "absl/base/no_destructor.h"  // from @com_google_absl
 #include "absl/container/flat_hash_set.h"  // from @com_google_absl
 #include "absl/log/absl_log.h"  // from @com_google_absl
@@ -231,6 +232,17 @@ bool HasOpenClEnvOptions(const LiteRtRuntimeContext* runtime_context,
              &command_queue) == kLiteRtStatusOk;
 }
 
+ABSL_ATTRIBUTE_NO_SANITIZE_CFI
+void SetQcomPerfHintHigh(cl_platform_id cl_plat_id, cl_context cl_ctx) {
+  auto pfn_set_perf_hint = reinterpret_cast<SetPerfHintQcomFn>(
+      ml_drift::cl::clGetExtensionFunctionAddressForPlatform(
+          cl_plat_id, "clSetPerfHintQCOM"));
+  if (pfn_set_perf_hint) {
+    LITERT_LOG(LITERT_INFO, "Setting QCOM GPU perf hint to HIGH.");
+    pfn_set_perf_hint(cl_ctx, CL_PERF_HINT_HIGH_QCOM);
+  }
+}
+
 absl::StatusOr<DelegateEnvironment*> WrapExistingClEnvironment(
     const LiteRtRuntimeContext* runtime_context, LiteRtEnvironment litert_env,
     LiteRtEnvironmentOptions env_options,
@@ -260,13 +272,7 @@ absl::StatusOr<DelegateEnvironment*> WrapExistingClEnvironment(
   cl_context cl_ctx = reinterpret_cast<cl_context>(context_id.int_value);
   if (context_options.performance == ml_drift::cl::PerformanceHint::kHigh &&
       device.GetInfo().SupportsExtension("cl_qcom_perf_hint")) {
-    auto pfn_set_perf_hint = reinterpret_cast<SetPerfHintQcomFn>(
-        ml_drift::cl::clGetExtensionFunctionAddressForPlatform(
-            cl_plat_id, "clSetPerfHintQCOM"));
-    if (pfn_set_perf_hint) {
-      LITERT_LOG(LITERT_INFO, "Setting QCOM GPU perf hint to HIGH.");
-      pfn_set_perf_hint(cl_ctx, CL_PERF_HINT_HIGH_QCOM);
-    }
+    SetQcomPerfHintHigh(cl_plat_id, cl_ctx);
   }
 
   ml_drift::cl::CLContext context(cl_ctx, /*has_ownership=*/false, device);
@@ -795,19 +801,6 @@ TfLiteDelegatePtr CreateMlDriftClDelegate(MlDriftDelegateOptionsPtr options,
       delegate_data->options->hint_fully_delegated_to_single_delegate;
   if (delegate_data->options->kernel_batch_size > 0) {
     backend->set_kernel_batch_size(delegate_data->options->kernel_batch_size);
-  } else if (const auto& gpu_info =
-                 backend->cl_env()->GetDevicePtr()->GetInfo();
-             gpu_info.IsAdreno() && gpu_info.adreno_info.IsAdreno8xx() &&
-             delegate_data->calculation_precision !=
-                 ::ml_drift::CalculationsPrecision::kF16) {
-    // On Adreno Gen 8 (8xx), `cl_qcom_recordable_queues` packs the entire
-    // graph into a single IB1 submission (`ts`), which triggers the GMU
-    // long-IB hardware watchdog (`adreno-gen8-gmu: gpu timeout`, `Fault id: 2`)
-    // on large FP32 graphs such as high-resolution ViT encoders (`vision_1120`,
-    // 1,347 nodes, T=10,080). Flushing in batches of 64 kernels splits the
-    // execution across multiple IB timestamps while adding negligible host
-    // overhead.
-    backend->set_kernel_batch_size(64);
   }
 
   // Initialize the ml_drift cl delegate.

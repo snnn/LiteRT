@@ -30,11 +30,13 @@ limitations under the License.
 #include "absl/types/span.h"  // from @com_google_absl
 #include "ml_drift/common/data_type.h"  // from @ml_drift
 #include "ml_drift/common/shape.h"  // from @ml_drift
+#include "ml_drift/common/task/tensor_desc.h"  // from @ml_drift
 #include "ml_drift/common/task/weights_conversion.h"  // from @ml_drift
 #include "ml_drift/common/task/weights_layout.h"  // from @ml_drift
 #include "ml_drift/common/tensor.h"  // from @ml_drift
 #include "ml_drift/common/util.h"  // from @ml_drift
 #include "tensor/runners/ml_drift/compiled_ml_drift_model_runner.h"
+#include "tensor/runners/ml_drift/ml_drift_dummy_weight_creator.h"
 #include "tensor/utils/matchers.h"
 
 namespace litert::tensor::ml_drift_runner_internal {
@@ -105,11 +107,14 @@ INSTANTIATE_TEST_SUITE_P(
         Int4Case{6, 7, ml_drift::WeightsLayout::kOSpatialIOGroupI4O4},
         Int4Case{5, 9, ml_drift::WeightsLayout::kOSpatialIOGroupI4O4},
         Int4Case{8, 32, ml_drift::WeightsLayout::kOSpatialIOGroupI4O4},
+        Int4Case{6, 12, ml_drift::WeightsLayout::kOSpatialIOGroupI4O4},
         Int4Case{6, 7,
                  ml_drift::WeightsLayout::k2DYIsSpatialIOAndXIsOGroupI4O4},
         Int4Case{5, 9,
                  ml_drift::WeightsLayout::k2DYIsSpatialIOAndXIsOGroupI4O4},
         Int4Case{8, 32,
+                 ml_drift::WeightsLayout::k2DYIsSpatialIOAndXIsOGroupI4O4},
+        Int4Case{6, 12,
                  ml_drift::WeightsLayout::k2DYIsSpatialIOAndXIsOGroupI4O4}),
     [](const ::testing::TestParamInfo<Int4Case>& info) {
       return absl::StrCat(
@@ -131,6 +136,90 @@ TEST(RearrangeInt4WeightsTest, RejectsAShortBuffer) {
                            ml_drift::GetTotalElementsCountForLayout(desc, ohwi),
                            /*want_sum_i=*/false),
       ::absl_testing::StatusIs(absl::StatusCode::kInvalidArgument));
+}
+
+// GPU weight conversion (`SetConvertWeightsOnGpu`) writes ML Drift's canonical
+// weight tensors (`GetTensorDescriptorsForWeightsLayout`) in place of the CPU
+// packed bytes: they must hold exactly the packed INT4 bytes.
+TEST_P(RearrangeInt4WeightsTest, CanonicalTensorHoldsThePackedBytes) {
+  const Int4Case& c = GetParam();
+  if (c.i % 4 != 0) GTEST_SKIP() << "Kept on the CPU path";
+  const ml_drift::OHWI ohwi(c.o, 1, 1, c.i);
+  ml_drift::WeightsDescription desc;
+  desc.type = ml_drift::DataType::kUint4;
+  desc.layout = c.layout;
+  desc.output_group_size = ml_drift::DivideRoundUp(c.o, 4);
+  const int elements_count =
+      ml_drift::GetTotalElementsCountForLayout(desc, ohwi);
+  ASSERT_OK_AND_ASSIGN(
+      const RearrangedInt4Weights packed,
+      RearrangeInt4Weights(PackedInt4(c.o * c.i), ohwi, desc, elements_count,
+                           /*want_sum_i=*/false));
+  const std::vector<ml_drift::TensorDescriptor> tensors =
+      ml_drift::GetTensorDescriptorsForWeightsLayout(ohwi, desc);
+  ASSERT_EQ(tensors.size(), 1);
+  EXPECT_EQ(tensors[0].GetMemorySizeInBytes(), packed.data.size());
+
+  const ml_drift::TensorDescriptor packed_td =
+      CreatePackedWeightsTensorDescriptor(desc, ohwi, elements_count,
+                                          /*is_embedding=*/false);
+  EXPECT_EQ(packed_td.GetMemorySizeInBytes(), packed.data.size());
+  const ml_drift::TensorDescriptor emb_td = CreatePackedWeightsTensorDescriptor(
+      desc, ohwi, elements_count, /*is_embedding=*/true);
+  EXPECT_EQ(emb_td.GetMemorySizeInBytes(), packed.data.size());
+  // Linear buffers hold exactly the packed bytes (`GetMemorySizeInBytes()`
+  // rounds up to whole 4-channel slices).
+  for (const ml_drift::TensorDescriptor* td : {&packed_td, &emb_td}) {
+    EXPECT_EQ(td->GetStorageType(),
+              desc.IsLinearLayout() ? ml_drift::TensorStorageType::kBuffer
+                                    : ml_drift::TensorStorageType::kTexture2D);
+    if (td->GetStorageType() == ml_drift::TensorStorageType::kBuffer) {
+      EXPECT_EQ(static_cast<size_t>(td->GetBHWDCShape().c), packed.data.size());
+    }
+  }
+}
+
+// Embedding weights keep a linear buffer for 2D texture layouts other than
+// `k2DYIsSpatialIOAndXIsOGroupI4O4`; other weights use a 2D texture.
+TEST(CreatePackedWeightsTensorDescriptorTest,
+     EmbeddingsUseABufferForUnsupportedTextureLayouts) {
+  const ml_drift::OHWI ohwi(8, 1, 1, 32);
+  ml_drift::WeightsDescription desc;
+  desc.type = ml_drift::DataType::kUint4;
+  desc.layout = ml_drift::WeightsLayout::k2DX4I4YIsSpatialIAndXIsOOGroupO4;
+  desc.output_group_size = ml_drift::DivideRoundUp(ohwi.o, 4);
+  ASSERT_FALSE(desc.IsLinearLayout());
+  const size_t elements_count =
+      static_cast<size_t>(ml_drift::GetTotalElementsCountForLayout(desc, ohwi));
+
+  const ml_drift::TensorDescriptor emb_td = CreatePackedWeightsTensorDescriptor(
+      desc, ohwi, elements_count, /*is_embedding=*/true);
+  EXPECT_EQ(emb_td.GetStorageType(), ml_drift::TensorStorageType::kBuffer);
+  EXPECT_EQ(static_cast<size_t>(emb_td.GetBHWDCShape().c),
+            (elements_count * 4 + 7) / 8);
+
+  const ml_drift::TensorDescriptor fc_td = CreatePackedWeightsTensorDescriptor(
+      desc, ohwi, elements_count, /*is_embedding=*/false);
+  EXPECT_EQ(fc_td.GetStorageType(), ml_drift::TensorStorageType::kTexture2D);
+}
+
+// Linear buffers of 8-bit and wider types hold one element per channel.
+TEST(CreatePackedWeightsTensorDescriptorTest, WideTypesAreNotPacked) {
+  const ml_drift::OHWI ohwi(8, 1, 1, 32);
+  for (const ml_drift::DataType type :
+       {ml_drift::DataType::kFloat16, ml_drift::DataType::kFloat32}) {
+    ml_drift::WeightsDescription desc;
+    desc.type = type;
+    desc.layout = ml_drift::WeightsLayout::kOSpatialIOGroupI4O4;
+    desc.output_group_size = ml_drift::DivideRoundUp(ohwi.o, 4);
+    ASSERT_TRUE(desc.IsLinearLayout());
+    const size_t elements_count = static_cast<size_t>(
+        ml_drift::GetTotalElementsCountForLayout(desc, ohwi));
+    const ml_drift::TensorDescriptor td = CreatePackedWeightsTensorDescriptor(
+        desc, ohwi, elements_count, /*is_embedding=*/false);
+    EXPECT_EQ(td.GetStorageType(), ml_drift::TensorStorageType::kBuffer);
+    EXPECT_EQ(static_cast<size_t>(td.GetBHWDCShape().c), elements_count);
+  }
 }
 
 }  // namespace

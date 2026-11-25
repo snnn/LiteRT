@@ -16,10 +16,12 @@ limitations under the License.
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <initializer_list>
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <string>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -30,12 +32,25 @@ limitations under the License.
 #include "tflite/kernels/reduce_test_common.h"
 #include "tflite/kernels/test_util.h"
 #include "tflite/schema/schema_generated.h"
+#include "tflite/types/half.h"
 
 namespace tflite {
 namespace ops {
 namespace builtin {
+TfLiteRegistration* Register_MEAN_OPT();
 TfLiteRegistration* Register_MEAN_REF();
+TfLiteRegistration* Register_SUM_OPT();
 TfLiteRegistration* Register_SUM_REF();
+TfLiteRegistration* Register_REDUCE_PROD_OPT();
+TfLiteRegistration* Register_REDUCE_PROD_REF();
+TfLiteRegistration* Register_REDUCE_MAX_OPT();
+TfLiteRegistration* Register_REDUCE_MAX_REF();
+TfLiteRegistration* Register_REDUCE_MIN_OPT();
+TfLiteRegistration* Register_REDUCE_MIN_REF();
+TfLiteRegistration* Register_REDUCE_ANY_OPT();
+TfLiteRegistration* Register_REDUCE_ANY_REF();
+TfLiteRegistration* Register_REDUCE_ALL_OPT();
+TfLiteRegistration* Register_REDUCE_ALL_REF();
 }  // namespace builtin
 }  // namespace ops
 
@@ -966,6 +981,285 @@ TEST(DynamicFloatSumOpTest, Scale) {
   ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({1}));
   EXPECT_THAT(m.GetOutput<float>(), ElementsAreArray(ArrayFloatNear({9.527})));
+}
+
+TEST(ConstFloat16SumOpTest, NotKeepDims) {
+  std::vector<half> data = {half(1.0f),  half(2.0f),  half(3.0f),  half(4.0f),
+                            half(5.0f),  half(6.0f),  half(7.0f),  half(8.0f),
+                            half(9.0f),  half(10.0f), half(11.0f), half(12.0f),
+                            half(13.0f), half(14.0f), half(15.0f), half(16.0f),
+                            half(17.0f), half(18.0f), half(19.0f), half(20.0f),
+                            half(21.0f), half(22.0f), half(23.0f), half(24.0f)};
+  SumOpConstModel m({TensorType_FLOAT16, {4, 3, 2}}, {TensorType_FLOAT16, {2}},
+                    {4}, {1, 0, -3, -3}, false);
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({144.0f, 156.0f})));
+}
+
+TEST(ConstFloat16SumOpTest, KeepDims) {
+  std::vector<half> data = {half(1.0f),  half(2.0f),  half(3.0f),  half(4.0f),
+                            half(5.0f),  half(6.0f),  half(7.0f),  half(8.0f),
+                            half(9.0f),  half(10.0f), half(11.0f), half(12.0f),
+                            half(13.0f), half(14.0f), half(15.0f), half(16.0f),
+                            half(17.0f), half(18.0f), half(19.0f), half(20.0f),
+                            half(21.0f), half(22.0f), half(23.0f), half(24.0f)};
+  SumOpConstModel m({TensorType_FLOAT16, {4, 3, 2}},
+                    {TensorType_FLOAT16, {1, 3, 1}}, {2}, {0, 2}, true);
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({1, 3, 1}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({84.0f, 100.0f, 116.0f})));
+}
+
+TEST(ConstFloat16SumOpTest, FractionalAndNegative) {
+  std::vector<half> data = {half(-1.5f), half(0.25f), half(2.75f),
+                            half(-0.5f), half(1.25f), half(-3.5f)};
+  SumOpConstModel m({TensorType_FLOAT16, {2, 3}}, {TensorType_FLOAT16, {2}},
+                    {1}, {1}, false);
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({1.5f, -2.75f})));
+}
+
+TEST(ConstFloat16SumOpTest, Float32AccumulationAvoidsStagnationAndOverflow) {
+  std::vector<half> ones(4096, half(1.0f));
+  SumOpConstModel ones_model({TensorType_FLOAT16, {4096}},
+                             {TensorType_FLOAT16, {}}, {1}, {0}, false);
+  ones_model.SetInput(ones);
+  ASSERT_EQ(ones_model.Invoke(), kTfLiteOk);
+  EXPECT_THAT(ones_model.GetOutputShape(), IsEmpty());
+  EXPECT_THAT(ones_model.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({4096.0f})));
+
+  std::vector<half> cancel = {half(65504.0f), half(65504.0f), half(-65504.0f)};
+  SumOpConstModel cancel_model({TensorType_FLOAT16, {3}},
+                               {TensorType_FLOAT16, {}}, {1}, {0}, false);
+  cancel_model.SetInput(cancel);
+  ASSERT_EQ(cancel_model.Invoke(), kTfLiteOk);
+  EXPECT_THAT(cancel_model.GetOutputShape(), IsEmpty());
+  EXPECT_THAT(cancel_model.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({65504.0f})));
+}
+
+TEST(ConstFloat16SumOpTest, EmptyAxis) {
+  std::vector<half> data = {half(-1.25f), half(0.5f), half(3.75f), half(2.0f)};
+  SumOpConstModel m({TensorType_FLOAT16, {2, 2}}, {TensorType_FLOAT16, {2, 2}},
+                    {0}, {}, false);
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2, 2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({-1.25f, 0.5f, 3.75f, 2.0f})));
+}
+
+TEST(ConstFloat16SumOpTest, ZeroInputDim) {
+  if (SingleOpModel::GetForceUseNnapi()) {
+    return;
+  }
+  SumOpConstModel m({TensorType_FLOAT16, {4, 0, 2}},
+                    {TensorType_FLOAT16, {4, 2}}, {1}, {1}, false);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({4, 2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear(
+                  {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f})));
+}
+
+TEST(ConstFloat16SumOpTest, EmptyInputToScalarOutput) {
+  if (SingleOpModel::GetForceUseNnapi()) {
+    return;
+  }
+  SumOpConstModel m({TensorType_FLOAT16, {0}}, {TensorType_FLOAT16, {}}, {1},
+                    {0}, false);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), IsEmpty());
+  EXPECT_THAT(m.GetOutput<half>(), ElementsAreArray(ArrayFloatNear({0.0f})));
+}
+
+TEST(DynamicFloat16SumOpTest, NotKeepDims) {
+  std::vector<half> data = {half(1.0f),  half(2.0f),  half(3.0f),  half(4.0f),
+                            half(5.0f),  half(6.0f),  half(7.0f),  half(8.0f),
+                            half(9.0f),  half(10.0f), half(11.0f), half(12.0f),
+                            half(13.0f), half(14.0f), half(15.0f), half(16.0f),
+                            half(17.0f), half(18.0f), half(19.0f), half(20.0f),
+                            half(21.0f), half(22.0f), half(23.0f), half(24.0f)};
+  SumOpDynamicModel m({TensorType_FLOAT16, {4, 3, 2}},
+                      {TensorType_FLOAT16, {2}}, {TensorType_INT32, {4}},
+                      false);
+  m.SetAxis({1, 0, -3, -3});
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({144.0f, 156.0f})));
+}
+
+TEST(DynamicFloat16SumOpTest, KeepDims) {
+  std::vector<half> data = {half(1.0f),  half(2.0f),  half(3.0f),  half(4.0f),
+                            half(5.0f),  half(6.0f),  half(7.0f),  half(8.0f),
+                            half(9.0f),  half(10.0f), half(11.0f), half(12.0f),
+                            half(13.0f), half(14.0f), half(15.0f), half(16.0f),
+                            half(17.0f), half(18.0f), half(19.0f), half(20.0f),
+                            half(21.0f), half(22.0f), half(23.0f), half(24.0f)};
+  SumOpDynamicModel m({TensorType_FLOAT16, {4, 3, 2}},
+                      {TensorType_FLOAT16, {1, 3, 1}}, {TensorType_INT32, {2}},
+                      true);
+  m.SetAxis({0, 2});
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({1, 3, 1}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({84.0f, 100.0f, 116.0f})));
+}
+
+TEST(DynamicFloat16SumOpTest, ReduceAllDims) {
+  std::vector<half> data = {half(1.0f), half(2.0f), half(3.0f), half(4.0f)};
+  SumOpDynamicModel m({TensorType_FLOAT16, {2, 2}}, {TensorType_FLOAT16, {}},
+                      {TensorType_INT32, {2}}, false);
+  m.SetAxis({0, 1});
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), IsEmpty());
+  EXPECT_THAT(m.GetOutput<half>(), ElementsAreArray(ArrayFloatNear({10.0f})));
+}
+
+TEST(DynamicFloat16SumOpTest, EmptyAxis) {
+  std::vector<half> data = {half(-1.25f), half(0.5f), half(3.75f), half(2.0f)};
+  SumOpDynamicModel m({TensorType_FLOAT16, {2, 2}},
+                      {TensorType_FLOAT16, {2, 2}}, {TensorType_INT32, {0}},
+                      false);
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2, 2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({-1.25f, 0.5f, 3.75f, 2.0f})));
+}
+
+TEST(DynamicFloat16SumOpTest, EmptyInputToScalarOutput) {
+  SumOpDynamicModel m({TensorType_FLOAT16, {0}}, {TensorType_FLOAT16, {}},
+                      {TensorType_INT32, {1}}, false);
+  m.SetAxis({0});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), IsEmpty());
+  EXPECT_THAT(m.GetOutput<half>(), ElementsAreArray(ArrayFloatNear({0.0f})));
+}
+
+TEST(ReferenceDynamicFloat16SumOpTest, NotKeepDims) {
+  std::vector<half> data = {half(1.0f), half(2.0f), half(3.0f),
+                            half(4.0f), half(5.0f), half(6.0f)};
+  ReferenceDynamicSumOpModel m({TensorType_FLOAT16, {3, 2}},
+                               {TensorType_FLOAT16, {2}},
+                               {TensorType_INT32, {1}}, false);
+  m.SetAxis({0});
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({9.0f, 12.0f})));
+}
+
+TEST(ReferenceDynamicFloat16SumOpTest, KeepDims) {
+  std::vector<half> data = {half(1.0f), half(2.0f), half(3.0f),
+                            half(4.0f), half(5.0f), half(6.0f)};
+  ReferenceDynamicSumOpModel m({TensorType_FLOAT16, {3, 2}},
+                               {TensorType_FLOAT16, {3, 1}},
+                               {TensorType_INT32, {1}}, true);
+  m.SetAxis({1});
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({3, 1}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({3.0f, 7.0f, 11.0f})));
+}
+
+TEST(ReferenceDynamicFloat16SumOpTest, FractionalAndNegative) {
+  std::vector<half> data = {half(-1.5f), half(0.25f), half(2.75f),
+                            half(-0.5f), half(1.25f), half(-3.5f)};
+  ReferenceDynamicSumOpModel m({TensorType_FLOAT16, {2, 3}},
+                               {TensorType_FLOAT16, {2}},
+                               {TensorType_INT32, {1}}, false);
+  m.SetAxis({1});
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({1.5f, -2.75f})));
+}
+
+TEST(ReferenceDynamicFloat16SumOpTest,
+     Float32AccumulationAvoidsStagnationAndOverflow) {
+  std::vector<half> ones(4096, half(1.0f));
+  ReferenceDynamicSumOpModel ones_model({TensorType_FLOAT16, {4096}},
+                                        {TensorType_FLOAT16, {}},
+                                        {TensorType_INT32, {1}}, false);
+  ones_model.SetAxis({0});
+  ones_model.SetInput(ones);
+  ASSERT_EQ(ones_model.Invoke(), kTfLiteOk);
+  EXPECT_THAT(ones_model.GetOutputShape(), IsEmpty());
+  EXPECT_THAT(ones_model.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({4096.0f})));
+
+  std::vector<half> cancel = {half(65504.0f), half(65504.0f), half(-65504.0f)};
+  ReferenceDynamicSumOpModel cancel_model({TensorType_FLOAT16, {3}},
+                                          {TensorType_FLOAT16, {}},
+                                          {TensorType_INT32, {1}}, false);
+  cancel_model.SetAxis({0});
+  cancel_model.SetInput(cancel);
+  ASSERT_EQ(cancel_model.Invoke(), kTfLiteOk);
+  EXPECT_THAT(cancel_model.GetOutputShape(), IsEmpty());
+  EXPECT_THAT(cancel_model.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({65504.0f})));
+}
+
+TEST(ReferenceDynamicFloat16SumOpTest, ReduceAllDims) {
+  std::vector<half> data = {half(1.0f), half(2.0f), half(3.0f), half(4.0f)};
+  ReferenceDynamicSumOpModel m({TensorType_FLOAT16, {2, 2}},
+                               {TensorType_FLOAT16, {}},
+                               {TensorType_INT32, {2}}, false);
+  m.SetAxis({0, 1});
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), IsEmpty());
+  EXPECT_THAT(m.GetOutput<half>(), ElementsAreArray(ArrayFloatNear({10.0f})));
+}
+
+TEST(ReferenceDynamicFloat16SumOpTest, EmptyAxis) {
+  std::vector<half> data = {half(-1.25f), half(0.5f), half(3.75f), half(2.0f)};
+  ReferenceDynamicSumOpModel m({TensorType_FLOAT16, {2, 2}},
+                               {TensorType_FLOAT16, {2, 2}},
+                               {TensorType_INT32, {0}}, false);
+  m.SetInput(data);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2, 2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({-1.25f, 0.5f, 3.75f, 2.0f})));
+}
+
+TEST(ReferenceDynamicFloat16SumOpTest, ZeroInputDim) {
+  ReferenceDynamicSumOpModel m({TensorType_FLOAT16, {2, 0}},
+                               {TensorType_FLOAT16, {2}},
+                               {TensorType_INT32, {1}}, false);
+  m.SetAxis({1});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2}));
+  EXPECT_THAT(m.GetOutput<half>(),
+              ElementsAreArray(ArrayFloatNear({0.0f, 0.0f})));
+}
+
+TEST(ReferenceDynamicFloat16SumOpTest, EmptyInputToScalarOutput) {
+  ReferenceDynamicSumOpModel m({TensorType_FLOAT16, {0}},
+                               {TensorType_FLOAT16, {}},
+                               {TensorType_INT32, {1}}, false);
+  m.SetAxis({0});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutputShape(), IsEmpty());
+  EXPECT_THAT(m.GetOutput<half>(), ElementsAreArray(ArrayFloatNear({0.0f})));
 }
 
 TEST(ConstUint8SumOpTest, NotKeepDims) {
@@ -2229,6 +2523,366 @@ TEST(ConstInt8MeanOpTest, AxisCountExceedsMaxLimitNoCrash) {
                      false);
   m.QuantizeAndPopulate<int8_t>(m.Input(), data);
   EXPECT_EQ(m.Invoke(), kTfLiteOk);
+}
+
+enum class ReduceInputMode {
+  kRuntime,
+  kConstFloat16,
+};
+
+enum class ReduceAxisMode {
+  kConstInt32,
+  kDynamicInt32,
+  kConstInt64,
+};
+
+// Builds a single reduction op without calling AllocateTensors(), allowing
+// direct assertions on prepare-time type checks and subgraph tensor counts.
+class DeferredAllocationReduceOpModel : public SingleOpModel {
+ public:
+  DeferredAllocationReduceOpModel(
+      BuiltinOperator op_code, TfLiteRegistration* registration,
+      TensorType input_type, TensorType output_type, ReduceAxisMode axis_mode,
+      ReduceInputMode input_mode = ReduceInputMode::kRuntime) {
+    std::vector<std::vector<int>> input_shapes;
+    if (input_mode == ReduceInputMode::kConstFloat16) {
+      // 0x3c00 is IEEE-754 float16 1.0.
+      AddConstInput<uint16_t>({input_type, {2, 3}},
+                              std::vector<uint16_t>(6, 0x3c00));
+      input_shapes.push_back({});
+    } else {
+      const int input = AddInput({input_type, {2, 3}});
+      input_shapes.push_back(GetShape(input));
+    }
+
+    switch (axis_mode) {
+      case ReduceAxisMode::kConstInt32:
+        AddConstInput(TensorType_INT32, /*data=*/{1}, /*shape=*/{1});
+        break;
+      case ReduceAxisMode::kDynamicInt32: {
+        const int axis = AddInput({TensorType_INT32, {1}});
+        input_shapes.push_back(GetShape(axis));
+        break;
+      }
+      case ReduceAxisMode::kConstInt64:
+        AddConstInput<int64_t>(TensorType_INT64, /*data=*/{1}, /*shape=*/{1});
+        break;
+    }
+
+    AddOutput({output_type, {}});
+    SetBuiltinOp(op_code, BuiltinOptions_ReducerOptions,
+                 CreateReducerOptions(builder_, /*keep_dims=*/false).Union());
+    SetResolver(std::make_unique<SingleOpResolver>(op_code, registration));
+    BuildInterpreter(input_shapes, /*num_threads=*/1,
+                     /*allow_fp32_relax_to_fp16=*/false,
+                     /*apply_delegate=*/false,
+                     /*allocate_and_delegate=*/false);
+  }
+
+  size_t NumTensors() const { return interpreter_->tensors_size(); }
+};
+
+struct ReduceRegistrationVariant {
+  std::string op_name;
+  std::string variant_name;
+  BuiltinOperator op_code;
+  TfLiteRegistration* (*registration_fn)();
+};
+
+struct ReduceInputTypeValidationParam {
+  std::string op_name;
+  std::string variant_name;
+  BuiltinOperator op_code;
+  TfLiteRegistration* (*registration_fn)();
+  TensorType input_type;
+  TensorType output_type;
+  ReduceAxisMode axis_mode;
+  ReduceInputMode input_mode = ReduceInputMode::kRuntime;
+};
+
+std::string TensorTypeParamName(TensorType type) {
+  switch (type) {
+    case TensorType_FLOAT32:
+      return "Float32";
+    case TensorType_FLOAT16:
+      return "Float16";
+    case TensorType_FLOAT64:
+      return "Float64";
+    case TensorType_INT8:
+      return "Int8";
+    case TensorType_BOOL:
+      return "Bool";
+    default:
+      return "OtherType";
+  }
+}
+
+std::string AxisModeParamName(ReduceAxisMode axis_mode) {
+  switch (axis_mode) {
+    case ReduceAxisMode::kConstInt32:
+      return "ConstInt32Axis";
+    case ReduceAxisMode::kDynamicInt32:
+      return "DynamicInt32Axis";
+    case ReduceAxisMode::kConstInt64:
+      return "ConstInt64Axis";
+  }
+  return "UnknownAxis";
+}
+
+std::string ReduceInputTypeValidationParamName(
+    const testing::TestParamInfo<ReduceInputTypeValidationParam>& info) {
+  std::string name = info.param.op_name + "_" + info.param.variant_name + "_" +
+                     TensorTypeParamName(info.param.input_type) + "_" +
+                     AxisModeParamName(info.param.axis_mode);
+  if (info.param.output_type != info.param.input_type) {
+    name += "_Out" + TensorTypeParamName(info.param.output_type);
+  }
+  if (info.param.input_mode == ReduceInputMode::kConstFloat16) {
+    name += "_ConstInput";
+  }
+  return name;
+}
+
+std::vector<ReduceRegistrationVariant> BasicReduceRegistrations() {
+  return {
+      {"Mean", "Opt", BuiltinOperator_MEAN, ops::builtin::Register_MEAN_OPT},
+      {"Mean", "Ref", BuiltinOperator_MEAN, ops::builtin::Register_MEAN_REF},
+      {"Sum", "Opt", BuiltinOperator_SUM, ops::builtin::Register_SUM_OPT},
+      {"Sum", "Ref", BuiltinOperator_SUM, ops::builtin::Register_SUM_REF},
+      {"ReduceProd", "Opt", BuiltinOperator_REDUCE_PROD,
+       ops::builtin::Register_REDUCE_PROD_OPT},
+      {"ReduceProd", "Ref", BuiltinOperator_REDUCE_PROD,
+       ops::builtin::Register_REDUCE_PROD_REF},
+      {"ReduceMax", "Opt", BuiltinOperator_REDUCE_MAX,
+       ops::builtin::Register_REDUCE_MAX_OPT},
+      {"ReduceMax", "Ref", BuiltinOperator_REDUCE_MAX,
+       ops::builtin::Register_REDUCE_MAX_REF},
+      {"ReduceMin", "Opt", BuiltinOperator_REDUCE_MIN,
+       ops::builtin::Register_REDUCE_MIN_OPT},
+      {"ReduceMin", "Ref", BuiltinOperator_REDUCE_MIN,
+       ops::builtin::Register_REDUCE_MIN_REF},
+  };
+}
+
+std::vector<ReduceRegistrationVariant> LogicalReduceRegistrations() {
+  return {
+      {"ReduceAny", "Opt", BuiltinOperator_REDUCE_ANY,
+       ops::builtin::Register_REDUCE_ANY_OPT},
+      {"ReduceAny", "Ref", BuiltinOperator_REDUCE_ANY,
+       ops::builtin::Register_REDUCE_ANY_REF},
+      {"ReduceAll", "Opt", BuiltinOperator_REDUCE_ALL,
+       ops::builtin::Register_REDUCE_ALL_OPT},
+      {"ReduceAll", "Ref", BuiltinOperator_REDUCE_ALL,
+       ops::builtin::Register_REDUCE_ALL_REF},
+  };
+}
+
+std::vector<ReduceInputTypeValidationParam> BuildRejectionParams() {
+  std::vector<ReduceInputTypeValidationParam> params;
+  for (const ReduceRegistrationVariant& registration :
+       BasicReduceRegistrations()) {
+    if (registration.op_code == BuiltinOperator_SUM) {
+      continue;
+    }
+    // Reject FLOAT16 on both constant and dynamic INT32 axes for sibling
+    // reduction ops that do not support FLOAT16.
+    params.push_back({registration.op_name, registration.variant_name,
+                      registration.op_code, registration.registration_fn,
+                      TensorType_FLOAT16, TensorType_FLOAT16,
+                      ReduceAxisMode::kConstInt32});
+    params.push_back({registration.op_name, registration.variant_name,
+                      registration.op_code, registration.registration_fn,
+                      TensorType_FLOAT16, TensorType_FLOAT16,
+                      ReduceAxisMode::kDynamicInt32});
+  }
+  for (const ReduceRegistrationVariant& registration :
+       LogicalReduceRegistrations()) {
+    // Reject non-BOOL inputs on both constant and dynamic INT32 axes.
+    params.push_back({registration.op_name, registration.variant_name,
+                      registration.op_code, registration.registration_fn,
+                      TensorType_FLOAT32, TensorType_FLOAT32,
+                      ReduceAxisMode::kConstInt32});
+    params.push_back({registration.op_name, registration.variant_name,
+                      registration.op_code, registration.registration_fn,
+                      TensorType_FLOAT16, TensorType_FLOAT16,
+                      ReduceAxisMode::kConstInt32});
+    params.push_back({registration.op_name, registration.variant_name,
+                      registration.op_code, registration.registration_fn,
+                      TensorType_FLOAT32, TensorType_FLOAT32,
+                      ReduceAxisMode::kDynamicInt32});
+  }
+  // Reject additional unsupported input type (FLOAT64).
+  params.push_back({"Sum", "Opt", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_OPT, TensorType_FLOAT64,
+                    TensorType_FLOAT64, ReduceAxisMode::kConstInt32});
+  params.push_back({"Sum", "Ref", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_REF, TensorType_FLOAT64,
+                    TensorType_FLOAT64, ReduceAxisMode::kConstInt32});
+  params.push_back({"ReduceAny", "Opt", BuiltinOperator_REDUCE_ANY,
+                    ops::builtin::Register_REDUCE_ANY_OPT, TensorType_FLOAT64,
+                    TensorType_FLOAT64, ReduceAxisMode::kConstInt32});
+  params.push_back({"ReduceAny", "Ref", BuiltinOperator_REDUCE_ANY,
+                    ops::builtin::Register_REDUCE_ANY_REF, TensorType_FLOAT64,
+                    TensorType_FLOAT64, ReduceAxisMode::kConstInt32});
+  // Reject mismatched input and output tensor element types before allocating
+  // scratch tensors.
+  params.push_back({"Sum", "Opt", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_OPT, TensorType_FLOAT16,
+                    TensorType_INT8, ReduceAxisMode::kConstInt32});
+  params.push_back({"Sum", "Ref", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_REF, TensorType_FLOAT16,
+                    TensorType_INT8, ReduceAxisMode::kConstInt32});
+  params.push_back({"Sum", "Opt", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_OPT, TensorType_FLOAT16,
+                    TensorType_FLOAT32, ReduceAxisMode::kDynamicInt32});
+  params.push_back({"Mean", "Opt", BuiltinOperator_MEAN,
+                    ops::builtin::Register_MEAN_OPT, TensorType_FLOAT32,
+                    TensorType_INT8, ReduceAxisMode::kConstInt32});
+  // Reject constant FLOAT16 REDUCE_PROD before constant folding (`data->noop`).
+  params.push_back({"ReduceProd", "Opt", BuiltinOperator_REDUCE_PROD,
+                    ops::builtin::Register_REDUCE_PROD_OPT, TensorType_FLOAT16,
+                    TensorType_FLOAT16, ReduceAxisMode::kConstInt32,
+                    ReduceInputMode::kConstFloat16});
+  params.push_back({"ReduceProd", "Ref", BuiltinOperator_REDUCE_PROD,
+                    ops::builtin::Register_REDUCE_PROD_REF, TensorType_FLOAT16,
+                    TensorType_FLOAT16, ReduceAxisMode::kConstInt32,
+                    ReduceInputMode::kConstFloat16});
+  // Reject non-INT32 axis before allocating scratch tensors.
+  params.push_back({"Sum", "Opt", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_OPT, TensorType_FLOAT32,
+                    TensorType_FLOAT32, ReduceAxisMode::kConstInt64});
+  params.push_back({"ReduceProd", "Opt", BuiltinOperator_REDUCE_PROD,
+                    ops::builtin::Register_REDUCE_PROD_OPT, TensorType_FLOAT32,
+                    TensorType_FLOAT32, ReduceAxisMode::kConstInt64});
+  params.push_back({"ReduceMax", "Opt", BuiltinOperator_REDUCE_MAX,
+                    ops::builtin::Register_REDUCE_MAX_OPT, TensorType_FLOAT32,
+                    TensorType_FLOAT32, ReduceAxisMode::kConstInt64});
+  params.push_back({"ReduceAny", "Opt", BuiltinOperator_REDUCE_ANY,
+                    ops::builtin::Register_REDUCE_ANY_OPT, TensorType_BOOL,
+                    TensorType_BOOL, ReduceAxisMode::kConstInt64});
+  return params;
+}
+
+std::vector<ReduceInputTypeValidationParam> BuildAdmissionParams() {
+  std::vector<ReduceInputTypeValidationParam> params;
+  for (const ReduceRegistrationVariant& registration :
+       BasicReduceRegistrations()) {
+    params.push_back({registration.op_name, registration.variant_name,
+                      registration.op_code, registration.registration_fn,
+                      TensorType_FLOAT32, TensorType_FLOAT32,
+                      ReduceAxisMode::kConstInt32});
+  }
+  // Admit FLOAT16 on SUM for both constant and dynamic INT32 axes.
+  params.push_back({"Sum", "Opt", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_OPT, TensorType_FLOAT16,
+                    TensorType_FLOAT16, ReduceAxisMode::kConstInt32});
+  params.push_back({"Sum", "Ref", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_REF, TensorType_FLOAT16,
+                    TensorType_FLOAT16, ReduceAxisMode::kConstInt32});
+  params.push_back({"Sum", "Opt", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_OPT, TensorType_FLOAT16,
+                    TensorType_FLOAT16, ReduceAxisMode::kDynamicInt32});
+  params.push_back({"Sum", "Ref", BuiltinOperator_SUM,
+                    ops::builtin::Register_SUM_REF, TensorType_FLOAT16,
+                    TensorType_FLOAT16, ReduceAxisMode::kDynamicInt32});
+  for (const ReduceRegistrationVariant& registration :
+       LogicalReduceRegistrations()) {
+    params.push_back({registration.op_name, registration.variant_name,
+                      registration.op_code, registration.registration_fn,
+                      TensorType_BOOL, TensorType_BOOL,
+                      ReduceAxisMode::kConstInt32});
+  }
+  // Preserve historical prepare-time BOOL admission for MEAN.
+  params.push_back({"Mean", "Opt", BuiltinOperator_MEAN,
+                    ops::builtin::Register_MEAN_OPT, TensorType_BOOL,
+                    TensorType_BOOL, ReduceAxisMode::kConstInt32});
+  params.push_back({"Mean", "Ref", BuiltinOperator_MEAN,
+                    ops::builtin::Register_MEAN_REF, TensorType_BOOL,
+                    TensorType_BOOL, ReduceAxisMode::kConstInt32});
+  return params;
+}
+
+class ReduceInputTypeRejectionTest
+    : public testing::TestWithParam<ReduceInputTypeValidationParam> {};
+
+TEST_P(ReduceInputTypeRejectionTest,
+       RejectsUnsupportedInputOrAxisWithoutAddingScratchTensors) {
+  const ReduceInputTypeValidationParam& param = GetParam();
+  DeferredAllocationReduceOpModel model(param.op_code, param.registration_fn(),
+                                        param.input_type, param.output_type,
+                                        param.axis_mode, param.input_mode);
+  const size_t initial_num_tensors = model.NumTensors();
+  EXPECT_EQ(model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(model.NumTensors(), initial_num_tensors);
+}
+
+INSTANTIATE_TEST_SUITE_P(ReduceInputTypeValidation,
+                         ReduceInputTypeRejectionTest,
+                         testing::ValuesIn(BuildRejectionParams()),
+                         ReduceInputTypeValidationParamName);
+
+class ReduceInputTypeAdmissionTest
+    : public testing::TestWithParam<ReduceInputTypeValidationParam> {};
+
+TEST_P(ReduceInputTypeAdmissionTest, AdmitsSupportedInputType) {
+  const ReduceInputTypeValidationParam& param = GetParam();
+  DeferredAllocationReduceOpModel model(param.op_code, param.registration_fn(),
+                                        param.input_type, param.output_type,
+                                        param.axis_mode, param.input_mode);
+  EXPECT_EQ(model.AllocateTensors(), kTfLiteOk);
+}
+
+INSTANTIATE_TEST_SUITE_P(ReduceInputTypeValidation,
+                         ReduceInputTypeAdmissionTest,
+                         testing::ValuesIn(BuildAdmissionParams()),
+                         ReduceInputTypeValidationParamName);
+
+TEST(ReduceInputTypeValidationTest,
+     RepeatedFailedAllocateTensorsLeavesTensorCountUnchanged) {
+  DeferredAllocationReduceOpModel sum_model(
+      BuiltinOperator_SUM, ops::builtin::Register_SUM_OPT(), TensorType_FLOAT64,
+      TensorType_FLOAT64, ReduceAxisMode::kConstInt32);
+  const size_t sum_initial_tensors = sum_model.NumTensors();
+  EXPECT_EQ(sum_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(sum_model.NumTensors(), sum_initial_tensors);
+  EXPECT_EQ(sum_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(sum_model.NumTensors(), sum_initial_tensors);
+
+  DeferredAllocationReduceOpModel sum_mismatch_model(
+      BuiltinOperator_SUM, ops::builtin::Register_SUM_OPT(), TensorType_FLOAT16,
+      TensorType_INT8, ReduceAxisMode::kConstInt32);
+  const size_t sum_mismatch_initial_tensors = sum_mismatch_model.NumTensors();
+  EXPECT_EQ(sum_mismatch_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(sum_mismatch_model.NumTensors(), sum_mismatch_initial_tensors);
+  EXPECT_EQ(sum_mismatch_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(sum_mismatch_model.NumTensors(), sum_mismatch_initial_tensors);
+
+  DeferredAllocationReduceOpModel prod_model(
+      BuiltinOperator_REDUCE_PROD, ops::builtin::Register_REDUCE_PROD_OPT(),
+      TensorType_FLOAT16, TensorType_FLOAT16, ReduceAxisMode::kConstInt32);
+  const size_t prod_initial_tensors = prod_model.NumTensors();
+  EXPECT_EQ(prod_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(prod_model.NumTensors(), prod_initial_tensors);
+  EXPECT_EQ(prod_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(prod_model.NumTensors(), prod_initial_tensors);
+
+  DeferredAllocationReduceOpModel max_model(
+      BuiltinOperator_REDUCE_MAX, ops::builtin::Register_REDUCE_MAX_OPT(),
+      TensorType_FLOAT16, TensorType_FLOAT16, ReduceAxisMode::kConstInt32);
+  const size_t max_initial_tensors = max_model.NumTensors();
+  EXPECT_EQ(max_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(max_model.NumTensors(), max_initial_tensors);
+  EXPECT_EQ(max_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(max_model.NumTensors(), max_initial_tensors);
+
+  DeferredAllocationReduceOpModel all_model(
+      BuiltinOperator_REDUCE_ALL, ops::builtin::Register_REDUCE_ALL_OPT(),
+      TensorType_FLOAT32, TensorType_FLOAT32, ReduceAxisMode::kConstInt32);
+  const size_t all_initial_tensors = all_model.NumTensors();
+  EXPECT_EQ(all_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(all_model.NumTensors(), all_initial_tensors);
+  EXPECT_EQ(all_model.AllocateTensors(), kTfLiteError);
+  EXPECT_EQ(all_model.NumTensors(), all_initial_tensors);
 }
 
 }  // namespace

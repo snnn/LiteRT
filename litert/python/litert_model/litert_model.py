@@ -646,15 +646,16 @@ class Model:
     """Removes subgraphs not reachable from any signature (or main subgraph).
 
     Reachability follows signatures (or subgraph 0 when the model is
-    signatureless) and `STABLEHLO_COMPOSITE` `decompositionSubgraphIndex`
-    references. Remaining `STABLEHLO_COMPOSITE` ops have their
-    `decompositionSubgraphIndex` attributes remapped to the new subgraph
-    positions. Handles to removed subgraphs, ops and tensors become invalid and
-    raise `LiteRtError` when used.
+    signatureless) and the subgraph references held by ops: control-flow
+    branches (`WHILE`, `IF`, ...), StableHLO region bodies and
+    `STABLEHLO_COMPOSITE` `decompositionSubgraphIndex`. Remaining ops have
+    their subgraph references remapped to the new subgraph positions. Handles
+    to removed subgraphs, ops and tensors become invalid and raise
+    `LiteRtError` when used.
 
     Returns:
       The number of removed subgraphs (`0` if nothing was unreachable or if
-      control-flow operators such as `WHILE` or `IF` prevented pruning).
+      the model's subgraph references are invalid or cyclic).
     """
     return self._handle.prune_unreachable_subgraphs()
 
@@ -839,17 +840,26 @@ class Model:
     """Attaches buffer `buffer_id` to dispatch op `op` as entry point `name`."""
     self._handle.attach_asset(op._handle, buffer_id, name)  # pylint: disable=protected-access
 
-  def set_build_stamp(self, soc_manufacturer: str, soc_model: str) -> None:
+  def set_build_stamp(
+      self,
+      soc_manufacturer: str,
+      soc_model: str,
+      *,
+      overwrite: bool = False,
+  ) -> None:
     """Records the compiler target in the model metadata.
 
     Args:
       soc_manufacturer: Target SoC manufacturer identifier.
       soc_model: Target SoC model identifier.
+      overwrite: When `True`, replaces an existing build stamp instead of
+        raising `LiteRtError`.
 
     Raises:
-      LiteRtError: If a build stamp exists or the strings are too long.
+      LiteRtError: If a build stamp exists (and `overwrite=False`) or the
+        strings are too long.
     """
-    self._handle.set_build_stamp(soc_manufacturer, soc_model)
+    self._handle.set_build_stamp(soc_manufacturer, soc_model, overwrite)
 
   def build_stamp(self) -> tuple[str, str] | None:
     """Returns (soc_manufacturer, soc_model) of the build stamp, or None."""

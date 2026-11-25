@@ -53,6 +53,7 @@ cc_library(
         ":delegate_utils",
         ":gpu_backend",
         ":unowned_tensor_desc",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
@@ -116,6 +117,7 @@ cc_library(
         "//ml_drift_delegate/delegate/shared_memory_manager:shared_memory_manager_cl_litert",
         "//tflite:framework",
         "//tflite/c:common",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/log:die_if_null",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
@@ -126,15 +128,40 @@ cc_library(
         "@ml_drift//ml_drift/cl:environment",
         "@ml_drift//ml_drift/cl:memory_manager",
         "@ml_drift//ml_drift/cl:opencl_wrapper",
+        "@ml_drift//ml_drift/cl:serialization_cc_fbs",
         "@ml_drift//ml_drift/common:data_type",
+        "@ml_drift//ml_drift/common:gpu_info",
         "@ml_drift//ml_drift/common:gpu_model",
+        "@ml_drift//ml_drift/common:gpu_model_cc_fbs",
         "@ml_drift//ml_drift/common:model",
+        "@ml_drift//ml_drift/common:precision",
+        "@ml_drift//ml_drift/common/task:gpu_operation",
+        "@ml_drift//ml_drift/common/task:serialization_base_cc_fbs",
         "@ml_drift//ml_drift/common/task:tensor_desc",
         "@opencl_headers",
     ] + select({
         "@org_tensorflow//tensorflow:android": ["@ml_drift//ml_drift/cl:gl_interop"],
         "//conditions:default": [],
     }) + gles_deps(),
+)
+
+cc_test(
+    name = "gpu_backend_opencl_litert_test",
+    srcs = ["gpu_backend_opencl_litert_test.cc"],
+    tags = [
+        # `gpu_backend_opencl_litert` transitively links `libEGL.so.1` and
+        # `libGLESv2.so.2` via `//third_party/ml_drift/pelong:portable`, which
+        # are unavailable on CPU-only Forge executors.
+        "requires-accel-or-fail-optout",
+        "requires-gpu-sm90",  # OpenCL/MIG-compatible
+    ],
+    deps = [
+        ":gpu_backend_opencl_litert",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
+        "@ml_drift//ml_drift/common:gpu_info",
+        "@ml_drift//ml_drift/common:precision",
+    ],
 )
 
 cc_library(
@@ -230,6 +257,7 @@ cc_test(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",
+        "@com_google_absl//absl/types:span",
         "@ml_drift//ml_drift/common:data_type",
         "@ml_drift//ml_drift/common:gpu_model",
         "@ml_drift//ml_drift/common:gpu_model_builder",
@@ -418,12 +446,34 @@ objc_library(
 #     srcs = ["shared_vulkan_env.cc"],
 #     hdrs = ["shared_vulkan_env.h"],
 #     deps = [
+#         "@com_google_absl//absl/functional:function_ref",
+#         "@com_google_absl//absl/log:absl_log",
 #         "@com_google_absl//absl/status",
 #         "@com_google_absl//absl/status:status_macros",
 #         "@com_google_absl//absl/status:statusor",
 #         "@ml_drift//ml_drift/syrtis:command_buffer",
 #         "@ml_drift//ml_drift/syrtis:environment",
+#         "@ml_drift//ml_drift/syrtis:queue",
+#         "@ml_drift//ml_drift/syrtis:vulkan_device",
 #         "@ml_drift//ml_drift/syrtis:vulkan_wrapper",
+#     ],
+# )
+#
+# cc_test(
+#     name = "shared_vulkan_env_test",
+#     srcs = ["shared_vulkan_env_test.cc"],
+#     tags = ["requires-gpu-sm90-full"],  # Vulkan/WebGPU: no driver on MIG
+#     deps = [
+#         ":shared_vulkan_env",
+#         "@com_google_googletest//:gtest_main_no_heapcheck",
+#         "@com_google_absl//absl/cleanup",
+#         "@com_google_absl//absl/status",
+#         "@com_google_absl//absl/status:status_matchers",
+#         "@ml_drift//ml_drift/common:gpu_info",
+#         "@ml_drift//ml_drift/syrtis:environment",
+#         "@ml_drift//ml_drift/syrtis:vulkan_wrapper",
+#         "@arm_vulkan_ml_dep_vulkan_headers//:vulkan_headers",
+#         # copybara:uncomment "//third_party/vulkan_loader",
 #     ],
 # )
 #
@@ -791,6 +841,7 @@ cc_library(
         "//tflite/c:c_api_types",
         "//tflite/c:common",
         "//tflite/profiling:time",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log:absl_check",
@@ -1251,7 +1302,6 @@ objc_library(
 #         "@com_google_absl//absl/synchronization",
 #         "@ml_drift//ml_drift/common:precision",
 #         "@ml_drift//ml_drift/syrtis:environment",
-#         "@ml_drift//ml_drift/syrtis:vulkan_wrapper",
 #         "//litert/c:litert_any",
 #         "//litert/c:litert_common",
 #         "//litert/c:litert_environment_options_header",
@@ -1336,6 +1386,41 @@ cc_library(
 #         "//litert/runtime:tensor_buffer_lockstate",
 #     ],
 # )
+#
+# cc_test(
+#     name = "delegate_vulkan_test",
+#     srcs = ["delegate_vulkan_test.cc"],
+#     tags = ["requires-gpu-sm90-full"],  # Vulkan/WebGPU: no driver on MIG
+#     deps = [
+#         ":delegate_options",
+#         ":delegate_types",
+#         ":delegate_vulkan",
+#         ":precision",
+#         ":shared_vulkan_env",
+#         "@com_google_googletest//:gtest_main_no_heapcheck",
+#         "@com_google_absl//absl/cleanup",
+#         "@com_google_absl//absl/status",
+#         "@com_google_absl//absl/status:status_matchers",
+#         "@com_google_absl//absl/types:span",
+#         "@ml_drift//ml_drift/syrtis:environment",
+#         "@ml_drift//ml_drift/syrtis:vulkan_wrapper",
+#         "//third_party/odml/infra/ml_drift_delegate/testdata:simple_add",
+#         "//litert/c:litert_any",
+#         "//litert/c:litert_common",
+#         "//litert/c:litert_environment",
+#         "//litert/c:litert_environment_options",
+#         "//litert/c/internal:litert_runtime_context_header",
+#         "//litert/cc:litert_expected",
+#         "//litert/runtime:external_litert_buffer_context",
+#         "//litert/runtime:tensor_identifier",
+#         "//litert/runtime:tfl_utils",
+#         "//litert/runtime/accelerators/gpu:ml_drift_vulkan_accelerator",
+#         "//tflite:framework",
+#         "//tflite/c:common",
+#         "//tflite/kernels:builtin_ops",
+#         "//third_party/vulkan_loader",
+#     ],
+# )
 # copybara:uncomment_end
 
 cc_library(
@@ -1368,11 +1453,9 @@ cc_library(
         "//litert/cc:litert_macros",
         "//litert/cc/internal:litert_tensor_buffer_utils",
         "//litert/runtime:tensor_buffer_lockstate",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/log:absl_log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:status_macros",
-        "@com_google_absl//absl/status:statusor",
         "@ml_drift//ml_drift/cl:cl_command_queue",
         "@ml_drift//ml_drift/cl:cl_context",
         "@ml_drift//ml_drift/cl:cl_memory",
@@ -1525,6 +1608,9 @@ ios_unit_test(
 
 macos_unit_test(
     name = "buffer_handler_metal_test_macos",
+    # Metal API validation turns invalid blits (e.g. out-of-bounds buffer
+    # reads, which otherwise go unnoticed) into test failures.
+    env = {"MTL_DEBUG_LAYER": "1"},
     minimum_os_version = "12.0",
     deps = [":buffer_handler_metal_test_lib"],
 )

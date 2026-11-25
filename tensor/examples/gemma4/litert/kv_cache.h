@@ -15,12 +15,14 @@ limitations under the License.
 
 #ifndef LITERT_TENSOR_EXAMPLES_GEMMA4_LITERT_KV_CACHE_H_
 #define LITERT_TENSOR_EXAMPLES_GEMMA4_LITERT_KV_CACHE_H_
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "tensor/arithmetic.h"
 #include "tensor/tensor.h"
+#include "tensor/utils/macros.h"
 namespace litert::tensor::examples::gemma4::cpu {
 struct KvOwnerSpec {
   int owner;
@@ -49,10 +51,14 @@ Tensor<M...> MakeInt8KeyCache(std::string name, int rows, int dim,
 }
 template <class... M>
 Tensor<M...> QuantizeInt8Kv(Tensor<M...> input, const Tensor<M...>& cache) {
-  const auto& quantization =
+  const PerChannelAffineQuantization& quantization =
       *cache.GetQuantization()->template As<PerChannelAffineQuantization>();
+  LRT_TENSOR_ASSIGN_OR_RETURN(
+      std::vector<int64_t> zero_points,
+      quantization.zero_points.template CopyAs<int64_t>(
+          quantization.scales.size()));
   return Quantize(input, Type::kI8, quantization.scales,
-                  quantization.zero_points);
+                  std::move(zero_points));
 }
 }  // namespace litert::tensor::examples::gemma4::cpu
 #endif

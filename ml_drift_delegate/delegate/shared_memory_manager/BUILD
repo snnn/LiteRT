@@ -122,6 +122,32 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "shared_memory_manager_test",
+    srcs = ["shared_memory_manager_test.cc"],
+    deps = [
+        ":gf32_graph_adapter",
+        ":shared_memory_manager",
+        "//ml_drift_delegate/delegate:unowned_tensor_desc",
+        "//ml_drift_delegate/tflite:shared_const_tensor_map",
+        "//tflite/c:common",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
+        "@ml_drift//ml_drift/common:data_type",
+        "@ml_drift//ml_drift/common:gpu_info",
+        "@ml_drift//ml_drift/common:gpu_model",
+        "@ml_drift//ml_drift/common:model",
+        "@ml_drift//ml_drift/common:operations",
+        "@ml_drift//ml_drift/common:precision",
+        "@ml_drift//ml_drift/common:shape",
+        "@ml_drift//ml_drift/common/task:gpu_tensor",
+        "@ml_drift//ml_drift/common/task:tensor_desc",
+    ],
+)
+
 cc_library(
     name = "shared_memory_manager_cl",
     hdrs = ["shared_memory_manager_cl.h"],
@@ -158,6 +184,7 @@ cc_library(
         "//tflite/c:common",
         "//tflite/core/c:private_common",
         "//weight_loader:external_weight_loader",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
@@ -458,14 +485,17 @@ objc_library(
         "@ml_drift//ml_drift/common:gpu_model",
         "@ml_drift//ml_drift/common:ir_model",
         "@ml_drift//ml_drift/common:model",
+        "@ml_drift//ml_drift/common:operations",
         "@ml_drift//ml_drift/common:precision",
         "@ml_drift//ml_drift/common:shape",
+        "@ml_drift//ml_drift/common:tensor",
         "@ml_drift//ml_drift/common/task:gpu_tensor",
         "@ml_drift//ml_drift/common/task:tensor_desc",
         "@ml_drift//ml_drift/metal:metal_device",
         "@ml_drift//ml_drift/metal:metal_spatial_tensor",
         "//ml_drift_delegate/delegate/serialization_weight_cache",
         "//ml_drift_delegate/tflite:shared_const_tensor_map",
+        "//tflite:array",
         "//tflite/c:common",
     ],
 )

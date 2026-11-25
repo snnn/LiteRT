@@ -25,6 +25,7 @@
 #include <optional>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "testing/base/public/gmock.h"
@@ -38,6 +39,7 @@
 #include "ml_drift/common/model.h"  // from @ml_drift
 #include "ml_drift/common/operations.h"  // from @ml_drift
 #include "ml_drift/common/shape.h"  // from @ml_drift
+#include "ml_drift/common/tensor.h"  // from @ml_drift
 #include "ml_drift_delegate/tflite/model_builder_internal.h"
 #include "ml_drift_delegate/tflite/object_reader.h"
 #include "ml_drift_delegate/tflite/operation_parser.h"
@@ -5147,6 +5149,157 @@ TEST(TransposeConvBuiltinOperationParserTest, TestIsSupported) {
           .ok());
 }
 
+TEST(TransposeConvBuiltinOperationParserTest,
+     RejectsConstantInputWithRuntimeBias) {
+  // Constant output_shape, constant weights, constant input, and runtime bias
+  // (with unallocated data.f == nullptr).
+  auto context = std::make_unique<StubTfLiteContext>(
+      kTfLiteBuiltinTransposeConv,
+      /*op_version=*/3,
+      /*num_inputs=*/4,
+      /*shape=*/std::vector<int>({1, 1, 1, 1}));
+  TfLiteTransposeConvParams* tf_options =
+      static_cast<TfLiteTransposeConvParams*>(context->node()->builtin_data);
+  tf_options->stride_width = 1;
+  tf_options->stride_height = 1;
+  // input[0] = output_shape (const int32), input[1] = weights (const),
+  // input[2] = input (const), input[3] = bias (runtime, unallocated).
+  context->ChangeTensorShape(1, {4});
+  context->SetTensorType(1, kTfLiteInt32, kTfLiteMmapRo);
+  context->SetTensorType(2, kTfLiteFloat32, kTfLiteMmapRo);
+  context->SetTensorType(3, kTfLiteFloat32, kTfLiteMmapRo);
+  context->ChangeTensorShape(4, {1});
+  delete[] context->tensor(4)->data.f;
+  context->tensor(4)->data.f = nullptr;
+
+  auto parser = NewOperationParser(context->node(), context->registration());
+  EXPECT_THAT(parser->IsSupported(context.get(), context->node(),
+                                  context->registration()),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("input must be a runtime tensor")));
+}
+
+TEST(TransposeConvBuiltinOperationParserTest, RejectsRuntimeBias) {
+  // Runtime input + constant weights + runtime bias has 2 runtime inputs total,
+  // which previously bypassed checks and crashed in Parse().
+  auto context = std::make_unique<StubTfLiteContext>(
+      kTfLiteBuiltinTransposeConv,
+      /*op_version=*/3,
+      /*num_inputs=*/4,
+      /*shape=*/std::vector<int>({1, 1, 1, 1}));
+  TfLiteTransposeConvParams* tf_options =
+      static_cast<TfLiteTransposeConvParams*>(context->node()->builtin_data);
+  tf_options->stride_width = 1;
+  tf_options->stride_height = 1;
+  context->ChangeTensorShape(1, {4});
+  context->SetTensorType(1, kTfLiteInt32, kTfLiteMmapRo);
+  context->SetTensorType(2, kTfLiteFloat32, kTfLiteMmapRo);
+  context->ChangeTensorShape(4, {1});
+  delete[] context->tensor(4)->data.f;
+  context->tensor(4)->data.f = nullptr;
+
+  auto parser = NewOperationParser(context->node(), context->registration());
+  EXPECT_THAT(parser->IsSupported(context.get(), context->node(),
+                                  context->registration()),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("bias must be a constant tensor")));
+}
+
+TEST(TransposeConvBuiltinOperationParserTest, RejectsInvalidConstantBias) {
+  auto context = std::make_unique<StubTfLiteContext>(
+      kTfLiteBuiltinTransposeConv,
+      /*op_version=*/3,
+      /*num_inputs=*/4,
+      /*shape=*/std::vector<int>({1, 1, 1, 1}));
+  TfLiteTransposeConvParams* tf_options =
+      static_cast<TfLiteTransposeConvParams*>(context->node()->builtin_data);
+  tf_options->stride_width = 1;
+  tf_options->stride_height = 1;
+  context->ChangeTensorShape(1, {4});
+  context->SetTensorType(1, kTfLiteInt32, kTfLiteMmapRo);
+  context->SetTensorType(2, kTfLiteFloat32, kTfLiteMmapRo);
+  // Non-linear 2D shape for constant bias.
+  context->ChangeTensorShape(4, {2, 2});
+  context->SetTensorType(4, kTfLiteFloat32, kTfLiteMmapRo);
+
+  auto parser = NewOperationParser(context->node(), context->registration());
+  EXPECT_FALSE(
+      parser
+          ->IsSupported(context.get(), context->node(), context->registration())
+          .ok());
+}
+
+TEST(TransposeConvBuiltinOperationParserTest,
+     SupportsAndParsesWithConstantBias) {
+  auto context = std::make_unique<StubTfLiteContext>(
+      kTfLiteBuiltinTransposeConv,
+      /*op_version=*/3,
+      /*num_inputs=*/4,
+      /*shape=*/std::vector<int>({1, 1, 1, 1}));
+  TfLiteTransposeConvParams* tf_options =
+      static_cast<TfLiteTransposeConvParams*>(context->node()->builtin_data);
+  tf_options->stride_width = 1;
+  tf_options->stride_height = 1;
+  tf_options->padding = kTfLitePaddingSame;
+  context->ChangeTensorShape(1, {4});
+  context->SetTensorType(1, kTfLiteInt32, kTfLiteMmapRo);
+  context->SetTensorType(2, kTfLiteFloat32, kTfLiteMmapRo);
+  context->ChangeTensorShape(4, {1});
+  context->SetTensorType(4, kTfLiteFloat32, kTfLiteMmapRo);
+  context->tensor(4)->data.f[0] = 2.5f;
+
+  auto parser = NewOperationParser(context->node(), context->registration());
+  ASSERT_OK(parser->IsSupported(context.get(), context->node(),
+                                context->registration()));
+
+  ::ml_drift::GraphFloat32 graph;
+  absl::flat_hash_map<int, ::ml_drift::Value*> tensor_to_value;
+  ObjectReader reader(&graph, context.get(), context->node(), &tensor_to_value);
+  parser->Parse(context->node(), context->registration(), &graph, &reader);
+  ASSERT_EQ(graph.nodes().size(), 1);
+  const auto& attr = std::any_cast<::ml_drift::ConvolutionTransposedAttributes>(
+      graph.nodes()[0]->operation.attributes);
+  EXPECT_EQ(attr.bias.shape, ::ml_drift::Linear(1));
+  ASSERT_EQ(attr.bias.data.size(), 1);
+  EXPECT_FLOAT_EQ(attr.bias.data[0], 2.5f);
+}
+
+TEST(TransposeConvBuiltinOperationParserTest,
+     SupportsAndParsesRuntimeWeightsWithConstantBias) {
+  auto context = std::make_unique<StubTfLiteContext>(
+      kTfLiteBuiltinTransposeConv,
+      /*op_version=*/3,
+      /*num_inputs=*/4,
+      /*shape=*/std::vector<int>({1, 1, 1, 1}));
+  TfLiteTransposeConvParams* tf_options =
+      static_cast<TfLiteTransposeConvParams*>(context->node()->builtin_data);
+  tf_options->stride_width = 1;
+  tf_options->stride_height = 1;
+  tf_options->padding = kTfLitePaddingSame;
+  context->ChangeTensorShape(1, {4});
+  context->SetTensorType(1, kTfLiteInt32, kTfLiteMmapRo);
+  // weights (tensor 2) and input (tensor 3) remain kTfLiteArenaRw.
+  context->ChangeTensorShape(4, {1});
+  context->SetTensorType(4, kTfLiteFloat32, kTfLiteMmapRo);
+  context->tensor(4)->data.f[0] = 3.0f;
+
+  auto parser = NewOperationParser(context->node(), context->registration());
+  ASSERT_OK(parser->IsSupported(context.get(), context->node(),
+                                context->registration()));
+
+  ::ml_drift::GraphFloat32 graph;
+  absl::flat_hash_map<int, ::ml_drift::Value*> tensor_to_value;
+  ObjectReader reader(&graph, context.get(), context->node(), &tensor_to_value);
+  parser->Parse(context->node(), context->registration(), &graph, &reader);
+  ASSERT_EQ(graph.nodes().size(), 1);
+  EXPECT_EQ(graph.FindInputs(graph.nodes()[0]->id).size(), 2);
+  const auto& attr = std::any_cast<::ml_drift::ConvolutionTransposedAttributes>(
+      graph.nodes()[0]->operation.attributes);
+  EXPECT_EQ(attr.bias.shape, ::ml_drift::Linear(1));
+  ASSERT_EQ(attr.bias.data.size(), 1);
+  EXPECT_FLOAT_EQ(attr.bias.data[0], 3.0f);
+}
+
 TEST(TransposeConvCustomOperationParserTest, TestIsSupported) {
   // Invalid num_inputs
   auto context = std::make_unique<StubTfLiteContext>(
@@ -5179,6 +5332,7 @@ TEST(TransposeConvCustomOperationParserTest, TestIsSupported) {
       /*num_inputs=*/2,
       /*shape=*/std::vector<int>({1, 1, 1, 1}));
   context->registration()->custom_name = "Convolution2DTransposeBias";
+  context->SetTensorType(2, kTfLiteFloat32, kTfLiteMmapRo);
   TfLiteTransposeConvParams tf_options;
   context->node()->custom_initial_data = &tf_options;
   tf_options.stride_width = 0;
@@ -5194,6 +5348,53 @@ TEST(TransposeConvCustomOperationParserTest, TestIsSupported) {
       parser
           ->IsSupported(context.get(), context->node(), context->registration())
           .ok());
+}
+
+TEST(TransposeConvCustomOperationParserTest,
+     RejectsConstantInputRuntimeWeightsAndRuntimeBias) {
+  auto context = std::make_unique<StubTfLiteContext>(
+      kTfLiteBuiltinCustom,
+      /*op_version=*/1,
+      /*num_inputs=*/3,
+      /*shape=*/std::vector<int>({1, 1, 1, 1}));
+  context->registration()->custom_name = "Convolution2DTransposeBias";
+  TfLiteTransposeConvParams tf_options;
+  tf_options.stride_width = 1;
+  tf_options.stride_height = 1;
+  tf_options.padding = kTfLitePaddingSame;
+  context->node()->custom_initial_data = &tf_options;
+  context->ChangeTensorShape(3, {1});
+
+  auto parser = NewOperationParser(context->node(), context->registration());
+
+  // Runtime weights rejected.
+  EXPECT_THAT(parser->IsSupported(context.get(), context->node(),
+                                  context->registration()),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("weights must be a constant tensor")));
+
+  // Constant weights + runtime bias rejected.
+  context->SetTensorType(2, kTfLiteFloat32, kTfLiteMmapRo);
+  delete[] context->tensor(3)->data.f;
+  context->tensor(3)->data.f = nullptr;
+  EXPECT_THAT(parser->IsSupported(context.get(), context->node(),
+                                  context->registration()),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("bias must be a constant tensor")));
+
+  // Constant input rejected even when weights and bias are constant.
+  context->ChangeTensorShape(3, {1});
+  context->SetTensorType(3, kTfLiteFloat32, kTfLiteMmapRo);
+  context->SetTensorType(1, kTfLiteFloat32, kTfLiteMmapRo);
+  EXPECT_THAT(parser->IsSupported(context.get(), context->node(),
+                                  context->registration()),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("input must be a runtime tensor")));
+
+  // Runtime input + constant weights + constant bias succeeds.
+  context->SetTensorType(1, kTfLiteFloat32, kTfLiteArenaRw);
+  EXPECT_OK(parser->IsSupported(context.get(), context->node(),
+                                context->registration()));
 }
 
 TEST(SpaceToDepthOperationParserTest, TestIsSupported) {
@@ -6359,6 +6560,329 @@ TEST(CompositeGroupNormParserTest,
   auto parser = NewOperationParser(context->node(), context->registration());
   EXPECT_OK(parser->IsSupported(context.get(), context->node(),
                                 context->registration()));
+}
+
+TEST(ModelBuilderTest, FullyConnectedBlockwiseV2SharedAndHostDequantized) {
+  auto make_const_tensor = [](TfLiteType type, const std::vector<int>& dims,
+                              const void* data, size_t bytes) {
+    TfLiteTensor t = {};
+    t.type = type;
+    t.dims = TfLiteIntArrayCreate(dims.size());
+    for (size_t i = 0; i < dims.size(); ++i) t.dims->data[i] = dims[i];
+    t.data.raw_const = static_cast<const char*>(data);
+    t.bytes = bytes;
+    t.allocation_type = kTfLiteMmapRo;
+    t.buffer_handle = kTfLiteNullBufferHandle;
+    return t;
+  };
+  auto make_rw_tensor = [](TfLiteType type, const std::vector<int>& dims) {
+    TfLiteTensor t = {};
+    t.type = type;
+    t.dims = TfLiteIntArrayCreate(dims.size());
+    for (size_t i = 0; i < dims.size(); ++i) t.dims->data[i] = dims[i];
+    t.allocation_type = kTfLiteArenaRw;
+    t.buffer_handle = kTfLiteNullBufferHandle;
+    return t;
+  };
+
+  // Case 1: Shared quantized 2-D INT2 blockwise v2 weights [O=2, I=4].
+  {
+    int8_t packed_int2[2] = {0x4E, 0x4E};
+    float scales[2] = {1.0f, 2.0f};
+    float zp[1] = {-0.5f};
+    TfLiteIntArray* bshape = TfLiteIntArrayCreate(2);
+    bshape->data[0] = 1;
+    bshape->data[1] = 4;
+    TfLiteBlockwiseQuantizationV2 quant = {
+        .scale = 3, .zero_point = 4, .block_shape = bshape};
+
+    TfLiteTensor tensors[5] = {
+        make_rw_tensor(kTfLiteFloat32, {1, 4}),
+        make_const_tensor(kTfLiteInt2, {2, 4}, packed_int2,
+                          sizeof(packed_int2)),
+        make_rw_tensor(kTfLiteFloat32, {1, 2}),
+        make_const_tensor(kTfLiteFloat32, {2, 1}, scales, sizeof(scales)),
+        make_const_tensor(kTfLiteFloat32, {1, 1}, zp, sizeof(zp)),
+    };
+    tensors[1].quantization = {kTfLiteBlockwiseQuantizationV2, &quant};
+
+    TfLiteFullyConnectedParams fc_params = {};
+    fc_params.activation = kTfLiteActNone;
+    fc_params.weights_format = kTfLiteFullyConnectedWeightsFormatDefault;
+    TfLiteNode node = {};
+    node.inputs = TfLiteIntArrayCreate(2);
+    node.inputs->data[0] = 0;
+    node.inputs->data[1] = 1;
+    node.outputs = TfLiteIntArrayCreate(1);
+    node.outputs->data[0] = 2;
+    node.builtin_data = &fc_params;
+    TfLiteRegistration reg = {};
+    reg.builtin_code = kTfLiteBuiltinFullyConnected;
+    reg.version = 17;
+
+    TfLiteContext context = {};
+    context.tensors = tensors;
+    context.tensors_size = 5;
+
+    auto parser = NewOperationParser(&node, &reg);
+    ASSERT_OK(parser->IsSupported(&context, &node, &reg));
+
+    ::ml_drift::GraphFloat32 graph;
+    absl::flat_hash_map<int, ::ml_drift::Value*> tensor_to_value;
+    TensorIndexToBufferIdMap buffer_ids = {{1, 500}};
+    SharedConstTensorsMap shared_tensors;
+    ObjectReader reader(&graph, &context, &node, &tensor_to_value,
+                        /*quant_conversion_map=*/nullptr, &buffer_ids,
+                        /*tensor_to_external_buffer_id_map=*/nullptr,
+                        &shared_tensors);
+    parser->Parse(&node, &reg, &graph, &reader);
+
+    ASSERT_EQ(graph.nodes().size(), 1);
+    EXPECT_EQ(
+        ::ml_drift::OperationTypeFromString(graph.nodes()[0]->operation.type),
+        ::ml_drift::OperationType::kFullyConnectedInt2);
+    const auto attr = std::any_cast<::ml_drift::FullyConnectedInt2Attributes>(
+        graph.nodes()[0]->operation.attributes);
+    using Int2Tensor =
+        ::ml_drift::Tensor<::ml_drift::OHWI, ::ml_drift::DataType::kInt2>;
+    ASSERT_TRUE(std::holds_alternative<Int2Tensor>(attr.weights));
+    EXPECT_EQ(std::get<Int2Tensor>(attr.weights).shape,
+              ::ml_drift::OHWI(2, 1, 1, 4));
+    EXPECT_EQ(attr.scale.shape, ::ml_drift::OHWI(2, 1, 1, 1));
+    EXPECT_EQ(attr.zero_point.shape, ::ml_drift::OHWI(2, 1, 1, 1));
+    ASSERT_EQ(shared_tensors.size(), 1);
+    EXPECT_EQ(shared_tensors.begin()->second.tflite_tensor_id, 1);
+    EXPECT_EQ(shared_tensors.begin()->second.global_id, 500);
+
+    // Non-constant blockwise v2 weights must be rejected.
+    tensors[1].allocation_type = kTfLiteArenaRw;
+    EXPECT_THAT(parser->IsSupported(&context, &node, &reg),
+                StatusIs(absl::StatusCode::kUnimplemented));
+
+    for (auto& t : tensors) TfLiteIntArrayFree(t.dims);
+    TfLiteIntArrayFree(bshape);
+    TfLiteIntArrayFree(node.inputs);
+    TfLiteIntArrayFree(node.outputs);
+  }
+
+  // Case 2: Host-dequantized fallback for uneven blocks [O=2, I=5], block=4.
+  {
+    int8_t weights_i8[10] = {1, 2, 3, 4, 5, -1, -2, -3, -4, -5};
+    float scales[4] = {1.0f, 2.0f, 1.0f, 2.0f};
+    TfLiteIntArray* bshape = TfLiteIntArrayCreate(2);
+    bshape->data[0] = 1;
+    bshape->data[1] = 4;
+    TfLiteBlockwiseQuantizationV2 quant = {
+        .scale = 3, .zero_point = kTfLiteOptionalTensor, .block_shape = bshape};
+
+    TfLiteTensor tensors[4] = {
+        make_rw_tensor(kTfLiteFloat32, {1, 5}),
+        make_const_tensor(kTfLiteInt8, {2, 5}, weights_i8, sizeof(weights_i8)),
+        make_rw_tensor(kTfLiteFloat32, {1, 2}),
+        make_const_tensor(kTfLiteFloat32, {2, 2}, scales, sizeof(scales)),
+    };
+    tensors[1].quantization = {kTfLiteBlockwiseQuantizationV2, &quant};
+
+    TfLiteFullyConnectedParams fc_params = {};
+    fc_params.activation = kTfLiteActNone;
+    fc_params.weights_format = kTfLiteFullyConnectedWeightsFormatDefault;
+    TfLiteNode node = {};
+    node.inputs = TfLiteIntArrayCreate(2);
+    node.inputs->data[0] = 0;
+    node.inputs->data[1] = 1;
+    node.outputs = TfLiteIntArrayCreate(1);
+    node.outputs->data[0] = 2;
+    node.builtin_data = &fc_params;
+    TfLiteRegistration reg = {};
+    reg.builtin_code = kTfLiteBuiltinFullyConnected;
+    reg.version = 17;
+
+    TfLiteContext context = {};
+    context.tensors = tensors;
+    context.tensors_size = 4;
+
+    auto parser = NewOperationParser(&node, &reg);
+    ASSERT_OK(parser->IsSupported(&context, &node, &reg));
+
+    ::ml_drift::GraphFloat32 graph;
+    absl::flat_hash_map<int, ::ml_drift::Value*> tensor_to_value;
+    TensorIndexToBufferIdMap buffer_ids = {{1, 501}};
+    SharedConstTensorsMap shared_tensors;
+    ObjectReader reader(&graph, &context, &node, &tensor_to_value,
+                        /*quant_conversion_map=*/nullptr, &buffer_ids,
+                        /*tensor_to_external_buffer_id_map=*/nullptr,
+                        &shared_tensors);
+    parser->Parse(&node, &reg, &graph, &reader);
+
+    EXPECT_TRUE(shared_tensors.empty());
+    ASSERT_EQ(graph.nodes().size(), 1);
+    EXPECT_EQ(
+        ::ml_drift::OperationTypeFromString(graph.nodes()[0]->operation.type),
+        ::ml_drift::OperationType::kFullyConnected);
+    const auto attr = std::any_cast<::ml_drift::FullyConnectedAttributes>(
+        graph.nodes()[0]->operation.attributes);
+    EXPECT_EQ(attr.weights.shape, ::ml_drift::OHWI(2, 1, 1, 5));
+    ASSERT_GE(attr.weights.data.size(), 10);
+    EXPECT_FLOAT_EQ(attr.weights.data[0], 1.0f);
+    EXPECT_FLOAT_EQ(attr.weights.data[4], 10.0f);
+    EXPECT_FLOAT_EQ(attr.weights.data[9], -10.0f);
+
+    for (auto& t : tensors) TfLiteIntArrayFree(t.dims);
+    TfLiteIntArrayFree(bshape);
+    TfLiteIntArrayFree(node.inputs);
+    TfLiteIntArrayFree(node.outputs);
+  }
+}
+
+TEST(ModelBuilderTest, DequantizeAndQuantizeFp16CastsAndValidation) {
+  auto make_affine_quant = [](float scale_val, int zp_val) {
+    TfLiteQuantization q = {};
+    q.type = kTfLiteAffineQuantization;
+    auto* params = static_cast<TfLiteAffineQuantization*>(
+        malloc(sizeof(TfLiteAffineQuantization)));
+    params->scale = TfLiteFloatArrayCreate(1);
+    params->scale->data[0] = scale_val;
+    params->zero_point = TfLiteIntArrayCreate(1);
+    params->zero_point->data[0] = zp_val;
+    params->quantized_dimension = 0;
+    q.params = params;
+    return q;
+  };
+
+  // DEQUANTIZE v6 runtime INT8 -> FLOAT16 inserts QuantizeAndDequantize + Cast.
+  {
+    tflite::Interpreter interpreter;
+    ASSERT_EQ(interpreter.AddTensors(2), kTfLiteOk);
+    ASSERT_EQ(interpreter.SetInputs({0}), kTfLiteOk);
+    ASSERT_EQ(interpreter.SetOutputs({1}), kTfLiteOk);
+    ASSERT_EQ(interpreter.SetTensorParametersReadWrite(
+                  0, kTfLiteInt8, "in", {1, 4}, make_affine_quant(0.5f, 0)),
+              kTfLiteOk);
+    ASSERT_EQ(interpreter.SetTensorParametersReadWrite(
+                  1, kTfLiteFloat16, "out", {1, 4}, TfLiteQuantization{}),
+              kTfLiteOk);
+    TfLiteContext* context = interpreter.primary_subgraph().context();
+
+    TfLiteNode node = {};
+    node.inputs = TfLiteIntArrayCreate(1);
+    node.inputs->data[0] = 0;
+    node.outputs = TfLiteIntArrayCreate(1);
+    node.outputs->data[0] = 1;
+    TfLiteRegistration reg = {};
+    reg.builtin_code = kTfLiteBuiltinDequantize;
+    reg.version = 6;
+
+    auto parser = NewOperationParser(&node, &reg, /*allow_quant_ops=*/true);
+    ASSERT_OK(parser->IsSupported(context, &node, &reg));
+
+    ::ml_drift::GraphFloat32 graph;
+    absl::flat_hash_map<int, ::ml_drift::Value*> tensor_to_value;
+    absl::flat_hash_map<int, int> quant_conversion_map;
+    ObjectReader reader(&graph, context, &node, &tensor_to_value,
+                        &quant_conversion_map);
+    parser->Parse(&node, &reg, &graph, &reader);
+
+    ASSERT_EQ(graph.nodes().size(), 2);
+    EXPECT_EQ(
+        ::ml_drift::OperationTypeFromString(graph.nodes()[0]->operation.type),
+        ::ml_drift::OperationType::kQuantizeAndDequantize);
+    EXPECT_EQ(
+        ::ml_drift::OperationTypeFromString(graph.nodes()[1]->operation.type),
+        ::ml_drift::OperationType::kCast);
+    auto cast_outputs = graph.FindOutputs(graph.nodes()[1]->id);
+    ASSERT_EQ(cast_outputs.size(), 1);
+    EXPECT_EQ(cast_outputs[0]->tensor.type, ::ml_drift::DataType::kFloat16);
+
+    // Runtime DEQUANTIZE with missing zero_point is rejected.
+    auto* qparams = static_cast<TfLiteAffineQuantization*>(
+        context->tensors[0].quantization.params);
+    TfLiteIntArray* saved_zp = qparams->zero_point;
+    qparams->zero_point = nullptr;
+    EXPECT_THAT(parser->IsSupported(context, &node, &reg),
+                StatusIs(absl::StatusCode::kInvalidArgument));
+    qparams->zero_point = saved_zp;
+
+    // Constant non-affine DEQUANTIZE v6 input is rejected.
+    int8_t const_data[4] = {1, 2, 3, 4};
+    TfLiteBlockwiseQuantizationV2 bw_q = {};
+    const TfLiteQuantization saved_quant = context->tensors[0].quantization;
+    context->tensors[0].allocation_type = kTfLiteMmapRo;
+    context->tensors[0].data.int8 = const_data;
+    context->tensors[0].bytes = sizeof(const_data);
+    context->tensors[0].quantization = {kTfLiteBlockwiseQuantizationV2, &bw_q};
+    EXPECT_THAT(parser->IsSupported(context, &node, &reg),
+                StatusIs(absl::StatusCode::kUnimplemented));
+    context->tensors[0].quantization = saved_quant;
+    context->tensors[0].data.raw = nullptr;
+
+    TfLiteIntArrayFree(node.inputs);
+    TfLiteIntArrayFree(node.outputs);
+  }
+
+  // QUANTIZE v4 runtime FLOAT16 -> INT8 inserts Cast + QuantizeAndDequantize.
+  {
+    tflite::Interpreter interpreter;
+    ASSERT_EQ(interpreter.AddTensors(2), kTfLiteOk);
+    ASSERT_EQ(interpreter.SetInputs({0}), kTfLiteOk);
+    ASSERT_EQ(interpreter.SetOutputs({1}), kTfLiteOk);
+    ASSERT_EQ(interpreter.SetTensorParametersReadWrite(
+                  0, kTfLiteFloat16, "in", {1, 4}, TfLiteQuantization{}),
+              kTfLiteOk);
+    ASSERT_EQ(interpreter.SetTensorParametersReadWrite(
+                  1, kTfLiteInt8, "out", {1, 4}, make_affine_quant(0.25f, 0)),
+              kTfLiteOk);
+    TfLiteContext* context = interpreter.primary_subgraph().context();
+
+    TfLiteNode node = {};
+    node.inputs = TfLiteIntArrayCreate(1);
+    node.inputs->data[0] = 0;
+    node.outputs = TfLiteIntArrayCreate(1);
+    node.outputs->data[0] = 1;
+    TfLiteRegistration reg = {};
+    reg.builtin_code = kTfLiteBuiltinQuantize;
+    reg.version = 4;
+
+    auto parser = NewOperationParser(&node, &reg, /*allow_quant_ops=*/true);
+    ASSERT_OK(parser->IsSupported(context, &node, &reg));
+
+    ::ml_drift::GraphFloat32 graph;
+    absl::flat_hash_map<int, ::ml_drift::Value*> tensor_to_value;
+    absl::flat_hash_map<int, int> quant_conversion_map;
+    ObjectReader reader(&graph, context, &node, &tensor_to_value,
+                        &quant_conversion_map);
+    parser->Parse(&node, &reg, &graph, &reader);
+
+    ASSERT_EQ(graph.nodes().size(), 2);
+    EXPECT_EQ(
+        ::ml_drift::OperationTypeFromString(graph.nodes()[0]->operation.type),
+        ::ml_drift::OperationType::kCast);
+    EXPECT_EQ(
+        ::ml_drift::OperationTypeFromString(graph.nodes()[1]->operation.type),
+        ::ml_drift::OperationType::kQuantizeAndDequantize);
+    auto cast_outputs = graph.FindOutputs(graph.nodes()[0]->id);
+    ASSERT_EQ(cast_outputs.size(), 1);
+    EXPECT_EQ(cast_outputs[0]->tensor.type, ::ml_drift::DataType::kFloat32);
+
+    // Non-affine output is rejected.
+    const TfLiteQuantization saved_quant = context->tensors[1].quantization;
+    TfLiteBlockwiseQuantizationV2 bw_q = {};
+    context->tensors[1].quantization = {kTfLiteBlockwiseQuantizationV2, &bw_q};
+    EXPECT_THAT(parser->IsSupported(context, &node, &reg),
+                StatusIs(absl::StatusCode::kUnimplemented));
+
+    // Missing zero_point is rejected.
+    context->tensors[1].quantization = saved_quant;
+    auto* qparams = static_cast<TfLiteAffineQuantization*>(
+        context->tensors[1].quantization.params);
+    TfLiteIntArray* saved_zp = qparams->zero_point;
+    qparams->zero_point = nullptr;
+    EXPECT_THAT(parser->IsSupported(context, &node, &reg),
+                StatusIs(absl::StatusCode::kInvalidArgument));
+    qparams->zero_point = saved_zp;
+
+    TfLiteIntArrayFree(node.inputs);
+    TfLiteIntArrayFree(node.outputs);
+  }
 }
 
 }  // namespace

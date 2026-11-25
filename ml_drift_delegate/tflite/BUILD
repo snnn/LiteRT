@@ -114,6 +114,7 @@ cc_test(
     name = "ir_model_builder_test",
     srcs = ["ir_model_builder_test.cc"],
     deps = [
+        ":custom_ir_operation_parser",
         ":ir_model_builder",
         ":ir_model_builder_helper",
         ":shared_const_tensor_map",
@@ -122,6 +123,7 @@ cc_test(
         "//tflite:framework",
         "//tflite/c:c_api_types",
         "//tflite/c:common",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
         "@ml_drift//ml_drift/common:data_type",
@@ -451,6 +453,7 @@ cc_test(
         "//tflite/c:c_api_types",
         "//tflite/c:common",
         "//tflite/core/c:private_common",
+        "//tflite/kernels/internal:tensor_utils_no_eigen",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status",
@@ -461,6 +464,7 @@ cc_test(
         "@ml_drift//ml_drift/common:model",
         "@ml_drift//ml_drift/common:operations",
         "@ml_drift//ml_drift/common:shape",
+        "@ml_drift//ml_drift/common:tensor",
     ],
 )
 
