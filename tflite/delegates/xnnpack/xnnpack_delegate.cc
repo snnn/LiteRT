@@ -3555,16 +3555,33 @@ class Subgraph {
                                  BuiltinOperator_AVERAGE_POOL_2D, node_index));
 
     const TfLiteTensor& input_tensor = tensors[node->inputs->data[0]];
-    TF_LITE_ENSURE_STATUS(CheckTensorFloatType(
-        logging_context, input_tensor, node->inputs->data[0], node_index));
-
     const TfLiteTensor& output_tensor = tensors[node->outputs->data[0]];
-    TF_LITE_ENSURE_STATUS(CheckTensorFloatType(
-        logging_context, output_tensor, node->outputs->data[0], node_index));
+    TF_LITE_ENSURE_STATUS(CheckTensorFloatOrQInt8Type(
+        delegate, logging_context, input_tensor, node->inputs->data[0],
+        node_index));
+    TF_LITE_ENSURE_STATUS(CheckTensorFloatOrQInt8Type(
+        delegate, logging_context, output_tensor, node->outputs->data[0],
+        node_index));
 
     TF_LITE_ENSURE_STATUS(CheckPoolingParams(logging_context, pool_params,
                                              BuiltinOperator_AVERAGE_POOL_2D,
                                              node_index));
+    if (input_tensor.type == kTfLiteInt8 || output_tensor.type == kTfLiteInt8) {
+      // A full odd window has no half-integer averages. Up to 4095 samples,
+      // the minimum distance to a tie, 0.5 / area, exceeds the FP32 error
+      // from scaling a centered int8 sum by the reciprocal of the area.
+      // SAME padding can give even sample counts at the edges.
+      const int64_t area = static_cast<int64_t>(pool_params->filter_height) *
+                           pool_params->filter_width;
+      if (input_tensor.type != output_tensor.type ||
+          input_tensor.params.scale != output_tensor.params.scale ||
+          input_tensor.params.zero_point != output_tensor.params.zero_point ||
+          pool_params->activation != kTfLiteActNone ||
+          pool_params->padding != kTfLitePaddingValid || area % 2 == 0 ||
+          area > 4095) {
+        return kTfLiteError;
+      }
+    }
 
     uint32_t flags = 0;
     TF_LITE_ENSURE_STATUS(CalculatePadding(

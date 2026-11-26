@@ -173,7 +173,8 @@ class QuantizedPool2DTester {
   void Test(tflite::BuiltinOperator pool_op, Interpreter* delegate_interpreter,
             Interpreter* default_interpreter) const;
 
-  void Test(tflite::BuiltinOperator pool_op, TfLiteDelegate* delegate) const;
+  void Test(tflite::BuiltinOperator pool_op, TfLiteDelegate* delegate,
+            bool expect_delegation = true) const;
 
  private:
   std::vector<char> CreateTfLiteModel(tflite::BuiltinOperator pool_op) const;

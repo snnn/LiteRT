@@ -641,6 +641,13 @@ Below is the list of currently supported quantized operators:
 *   Fused `NONE`, `RELU`, `RELU_N1_TO_1`, and `RELU6` activations are supported,
     but fused `TANH` and `SIGN_BIT` activations are not.
 
+#### `AVERAGE_POOL_2D`
+
+*   Input and output must be signed INT8 with matching per-tensor scale and
+    zero point.
+*   Use `VALID` padding, `NONE` activation, and an odd filter area of at most
+    4095 elements. These conditions preserve the builtin kernel's rounding.
+
 #### `CONCATENATION`
 
 *   Inputs and outputs must be in 8-bit quantized format.

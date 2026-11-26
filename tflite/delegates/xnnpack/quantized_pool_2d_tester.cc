@@ -71,8 +71,10 @@ void QuantizedPool2DTester::Test(tflite::BuiltinOperator pool_op,
         for (int32_t c = 0; c < Channels(); c++) {
           const int32_t index =
               ((i * OutputHeight() + y) * OutputWidth() + x) * Channels() + c;
-          if (pool_op == BuiltinOperator_MAX_POOL_2D) {
-            // MaxPooling results must be exact
+          if (pool_op == BuiltinOperator_MAX_POOL_2D ||
+              (Padding() == ::tflite::Padding_VALID && PoolingWidth() % 2 == 1 &&
+               PoolingHeight() % 2 == 1)) {
+            // A full odd window cannot have an average halfway between codes.
             ASSERT_EQ(static_cast<int32_t>(default_output_data[index]),
                       static_cast<int32_t>(xnnpack_output_data[index]))
                 << "batch " << i << " / " << BatchSize() << ", y position " << y
@@ -92,7 +94,8 @@ void QuantizedPool2DTester::Test(tflite::BuiltinOperator pool_op,
 }
 
 void QuantizedPool2DTester::Test(tflite::BuiltinOperator pool_op,
-                                 TfLiteDelegate* delegate) const {
+                                 TfLiteDelegate* delegate,
+                                 bool expect_delegation) const {
   std::vector<char> buffer = CreateTfLiteModel(pool_op);
   const tflite::Model* model = tflite::GetModel(buffer.data());
 
@@ -124,6 +127,11 @@ void QuantizedPool2DTester::Test(tflite::BuiltinOperator pool_op,
   ASSERT_EQ(default_interpreter->AllocateTensors(), kTfLiteOk);
 
   ASSERT_EQ(delegate_interpreter->ModifyGraphWithDelegate(delegate), kTfLiteOk);
+
+  ASSERT_EQ(delegate_interpreter->execution_plan().size(), 1);
+  const int node_id = delegate_interpreter->execution_plan().front();
+  ASSERT_EQ(delegate_interpreter->node_and_registration(node_id)->first.delegate,
+            expect_delegation ? delegate : nullptr);
 
   if (Unsigned()) {
     Test<uint8_t>(pool_op, delegate_interpreter.get(),
